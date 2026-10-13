@@ -1,0 +1,24 @@
+
+@import "tailwindcss";
+
+@theme {
+  --color-brand: #CB874C;
+  --color-navy: #14243A;
+  --color-studio: #101923;
+  --color-panel: #192431;
+  --color-warm-white: #F7F5F0;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-width: 800px;
+  background: var(--color-studio);
+  color: var(--color-warm-white);
+  font-family: "Segoe UI", Arial, sans-serif;
+}
