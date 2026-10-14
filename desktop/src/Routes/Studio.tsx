@@ -1,4 +1,4 @@
-export default function Home() {
+export default function Studio() {
   return (
     <div className="flex min-h-full items-center justify-center">
       <div className="rounded-2xl border border-brand/40 bg-panel p-10 text-center shadow-xl">
