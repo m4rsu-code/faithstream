@@ -1,6 +1,7 @@
 import { Outlet } from 'react-router-dom';
 import Header from './Header';
 import SidebarNav from './SidebarNav';
+import StatusFooter from './StatusFooter';
 
 export default function Layout() {
   return (
@@ -12,6 +13,7 @@ export default function Layout() {
           <Outlet />
         </main>
       </div>
+       <StatusFooter message="Ready. Your stream is live on Facebook." />
     </div>
   );
 }
