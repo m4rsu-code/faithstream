@@ -9,11 +9,11 @@ export default function Layout() {
       <Header />
       <div className="flex min-h-0 flex-1">
         <SidebarNav />
-        <main className="flex-1 overflow-auto p-6">
+        <main className="min-h-0 min-w-0 flex-1 overflow-hidden p-4">
           <Outlet />
         </main>
       </div>
-       <StatusFooter message="Ready. Your stream is live on Facebook." />
+      <StatusFooter message="Ready. Your stream is live on Facebook." />
     </div>
   );
 }
