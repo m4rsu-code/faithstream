@@ -2,12 +2,103 @@
 @import "tailwindcss";
 
 @theme {
-  --color-brand: #CB874C;
-  --color-navy: #14243A;
-  --color-studio: #101923;
-  --color-panel: #192431;
-  --color-warm-white: #F7F5F0;
+  --color-brand: var(--theme-brand);
+  --color-navy: var(--theme-navy);
+  --color-studio: var(--theme-studio);
+  --color-panel: var(--theme-panel);
+  --color-warm-white: var(--theme-text);
 }
+
+:root,
+:root[data-theme='midnight'] {
+  color-scheme: dark;
+  --theme-brand: #CB874C;
+  --theme-navy: #14243A;
+  --theme-studio: #101923;
+  --theme-panel: #192431;
+  --theme-text: #F7F5F0;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --theme-brand: #A95119;
+  --theme-navy: #E7EDF4;
+  --theme-studio: #F4F6F9;
+  --theme-panel: #FFFFFF;
+  --theme-text: #1A2635;
+}
+
+:root[data-theme='ocean'] {
+  color-scheme: dark;
+  --theme-brand: #54C6D3;
+  --theme-navy: #102936;
+  --theme-studio: #091B24;
+  --theme-panel: #163440;
+  --theme-text: #E9F7FA;
+}
+
+:root[data-theme='forest'] {
+  color-scheme: dark;
+  --theme-brand: #9BCB7A;
+  --theme-navy: #1B2D22;
+  --theme-studio: #111D16;
+  --theme-panel: #24382A;
+  --theme-text: #F0F6EC;
+}
+
+:root[data-theme='plum'] {
+  color-scheme: dark;
+  --theme-brand: #D1A0F2;
+  --theme-navy: #2A2035;
+  --theme-studio: #1A1421;
+  --theme-panel: #30253B;
+  --theme-text: #F7F0FB;
+}
+
+:root[data-theme='light'] [class~='text-white'] { color: #1A2635; }
+:root[data-theme='light'] [class~='text-white/30'] { color: rgb(26 38 53 / 30%); }
+:root[data-theme='light'] [class~='text-white/35'] { color: rgb(26 38 53 / 35%); }
+:root[data-theme='light'] [class~='text-white/40'] { color: rgb(26 38 53 / 40%); }
+:root[data-theme='light'] [class~='text-white/45'] { color: rgb(26 38 53 / 45%); }
+:root[data-theme='light'] [class~='text-white/50'] { color: rgb(26 38 53 / 50%); }
+:root[data-theme='light'] [class~='text-white/55'] { color: rgb(26 38 53 / 55%); }
+:root[data-theme='light'] [class~='text-white/60'] { color: rgb(26 38 53 / 60%); }
+:root[data-theme='light'] [class~='text-white/65'] { color: rgb(26 38 53 / 65%); }
+:root[data-theme='light'] [class~='text-white/70'] { color: rgb(26 38 53 / 70%); }
+:root[data-theme='light'] [class~='text-white/75'] { color: rgb(26 38 53 / 75%); }
+:root[data-theme='light'] [class~='text-white/80'] { color: rgb(26 38 53 / 80%); }
+:root[data-theme='light'] [class~='text-slate-300'] { color: #475569; }
+:root[data-theme='light'] [class~='text-sky-200'] { color: #0369A1; }
+:root[data-theme='light'] [class~='text-amber-200'],
+:root[data-theme='light'] [class~='text-amber-300'] { color: #92400E; }
+:root[data-theme='light'] [class~='text-emerald-300'],
+:root[data-theme='light'] [class~='text-emerald-400'] { color: #047857; }
+:root[data-theme='light'] [class~='text-red-200'],
+:root[data-theme='light'] [class~='text-red-300'],
+:root[data-theme='light'] [class~='text-red-400'] { color: #B91C1C; }
+:root[data-theme='light'] [class~='border-white/5'],
+:root[data-theme='light'] [class~='border-white/10'],
+:root[data-theme='light'] [class~='border-white/15'],
+:root[data-theme='light'] [class~='border-white/20'],
+:root[data-theme='light'] [class~='border-white/25'],
+:root[data-theme='light'] [class~='border-white/30'],
+:root[data-theme='light'] [class~='border-white/40'] { border-color: rgb(26 38 53 / 14%); }
+:root[data-theme='light'] [class~='bg-[#101d2a]'] { background-color: #FFFFFF; }
+:root[data-theme='light'] [class~='bg-[#091521]'] { background-color: #E7EDF4; }
+:root[data-theme='light'] [class~='bg-[#0b1520]/95'] { background-color: #FFFFFF; }
+:root[data-theme='light'] [class~='bg-gradient-to-br'][class~='text-white'] { color: #FFFFFF; }
+:root[data-theme='light'] [class~='bg-black/20'] { background-color: rgb(26 38 53 / 5%); }
+:root[data-theme='light'] [class~='bg-black/30'] { background-color: rgb(26 38 53 / 7%); }
+:root[data-theme='light'] [class~='bg-black/50'],
+:root[data-theme='light'] [class~='bg-black/55'],
+:root[data-theme='light'] [class~='bg-black/65'],
+:root[data-theme='light'] [class~='bg-black/70'],
+:root[data-theme='light'] [class~='bg-black/75'],
+:root[data-theme='light'] [class~='bg-black/80'],
+:root[data-theme='light'] [class~='bg-black/85'] { color: #FFFFFF; }
+:root[data-theme='light'] [class~='bg-black/65'] { background-color: rgb(26 38 53 / 70%); }
+:root[data-theme='light'] [class~='bg-black/75'] { background-color: rgb(26 38 53 / 76%); }
+:root[data-theme='light'] [class~='bg-black/85'] { background-color: rgb(26 38 53 / 86%); }
 
 html,
 body,

@@ -7,6 +7,10 @@ import Studio, { StudioDisplayOutput } from './Routes/Studio';
 import Presentation from './Routes/Presentation';
 import Settings from './Routes/Settings';
 
+const savedTheme = localStorage.getItem('faithstream.theme');
+const availableThemes = ['midnight', 'light', 'ocean', 'forest', 'plum'];
+document.documentElement.dataset.theme = savedTheme && availableThemes.includes(savedTheme) ? savedTheme : 'midnight';
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <HashRouter>

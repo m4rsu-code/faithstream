@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 contextBridge.exposeInMainWorld('faithstreamWindow', {
   getStudioDisplays: () => ipcRenderer.invoke('studio:get-displays'),
@@ -6,9 +6,16 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
   closeStudioDisplay: () => ipcRenderer.invoke('studio:close-display'),
   setPresentationFullscreen: (enabled: boolean) =>
     ipcRenderer.invoke('presentation:set-fullscreen', enabled),
+  renderPowerPointSlides: (file: File) =>
+    ipcRenderer.invoke('presentation:render-pptx', webUtils.getPathForFile(file)) as Promise<{
+      ok: boolean;
+      message?: string;
+      slides?: { name: string; data: string }[];
+    }>,
   minimize: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   close: () => ipcRenderer.invoke('window:close'),
+  setAuthenticatedMode: (authenticated: boolean) => ipcRenderer.invoke('window:set-authenticated-mode', authenticated),
   startStream: (options: {
     serverUrl: string;
     streamKey: string;
@@ -20,6 +27,14 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
   }) => ipcRenderer.invoke('stream:start', options),
   sendStreamAudio: (chunk: ArrayBuffer) => ipcRenderer.send('stream:audio', chunk),
   stopStream: () => ipcRenderer.invoke('stream:stop'),
+  startRecording: (options: { capture: { x: number; y: number; width: number; height: number } }) => ipcRenderer.invoke('recording:start', options),
+  sendRecordingAudio: (chunk: ArrayBuffer) => ipcRenderer.send('recording:audio', chunk),
+  stopRecording: () => ipcRenderer.invoke('recording:stop'),
+  onRecordingStatus: (callback: (event: { status: string; message?: string; filePath?: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { status: string; message?: string; filePath?: string }) => callback(payload);
+    ipcRenderer.on('recording:status', listener);
+    return () => ipcRenderer.removeListener('recording:status', listener);
+  },
   onStreamStatus: (callback: (event: { status: string; message?: string }) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: { status: string; message?: string }) => callback(payload);
     ipcRenderer.on('stream:status', listener);

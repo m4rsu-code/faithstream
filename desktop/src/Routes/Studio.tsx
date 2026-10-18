@@ -10,6 +10,8 @@ import {
   Image,
   Mic,
   Monitor,
+  Music2,
+  Pause,
   Pencil,
   Play,
   Plus,
@@ -70,26 +72,46 @@ type SavedPresentationSlide = {
 };
 type SavedPresentation = { id: string; name: string; slides: SavedPresentationSlide[]; locked?: boolean };
 type StudioMedia = { id: string; type: 'image' | 'video'; blob: Blob };
+type StudioMusicAsset = { id: string; name: string; blob: Blob; createdAt: number };
+type StudioMusicAssetWithUrl = StudioMusicAsset & { url: string };
 const STUDIO_SCENES_KEY = 'faithstream.studio-scenes';
 const STUDIO_SLIDESHOW_SCENES_KEY = 'faithstream.studio-slideshow-scenes';
 const STUDIO_OUTPUT_REF_KEY = 'faithstream.studio-output-ref';
+const STUDIO_STREAM_OUTPUT_REF_KEY = 'faithstream.studio-stream-output-ref';
+const STUDIO_DISPLAY_MODE_KEY = 'faithstream.studio-display-mode';
+const STUDIO_PREVIEW_MODE_KEY = 'faithstream.studio-preview-mode';
+const STUDIO_RESOLUTION_KEY = 'faithstream.studio-resolution';
+const STUDIO_FRAME_RATE_KEY = 'faithstream.studio-frame-rate';
+const STUDIO_BITRATE_KEY = 'faithstream.studio-bitrate';
 const STUDIO_SESSION_KEY = 'faithstream.studio-session';
+const STUDIO_MUSIC_DB = 'faithstream.studio-music';
+const STUDIO_MUSIC_STORE = 'tracks';
+
+const markStartupResourceReady = (resource: 'studio-media' | 'studio-music') => {
+  window.dispatchEvent(new CustomEvent('faithstream:startup-resource-ready', { detail: resource }));
+};
 
 const loadStudioScenes = (): Scene[] => {
   try {
     const saved = JSON.parse(localStorage.getItem(STUDIO_SCENES_KEY) ?? '[]') as Scene[];
     if (!Array.isArray(saved)) return [];
     const presentations = JSON.parse(localStorage.getItem('faithstream.presentations') ?? '[]') as SavedPresentation[];
-    return saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides)).map((scene) => {
+    return saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides))
+      .filter((scene) => !scene.presentationId || presentations.some((item) => item.id === scene.presentationId))
+      .map((scene) => {
       const presentation = presentations.find((item) => item.id === scene.presentationId);
       if (!presentation) return scene;
       return {
         ...scene,
+        name: presentation.name || scene.name,
         slides: scene.slides.map((studioSlide, index) => {
           const savedSlide = presentation.slides[index];
-          return !studioSlide.design && savedSlide
-            ? { ...studioSlide, design: { box: savedSlide.box, extraBoxes: savedSlide.extraBoxes, pictures: savedSlide.pictures, shapes: savedSlide.shapes } }
-            : studioSlide;
+          if (!savedSlide) return studioSlide;
+          return {
+            ...studioSlide,
+            title: savedSlide.title || studioSlide.title || `Slide ${index + 1}`,
+            ...(!studioSlide.design ? { design: { box: savedSlide.box, extraBoxes: savedSlide.extraBoxes, pictures: savedSlide.pictures, shapes: savedSlide.shapes } } : {}),
+          };
         }),
       };
     });
@@ -99,7 +121,11 @@ const loadStudioScenes = (): Scene[] => {
 const loadSlideshowScenes = (): Scene[] => {
   try {
     const saved = JSON.parse(localStorage.getItem(STUDIO_SLIDESHOW_SCENES_KEY) ?? 'null') as Scene[] | null;
-    if (Array.isArray(saved)) return saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides));
+    if (Array.isArray(saved)) {
+      const presentations = readSavedPresentations();
+      return saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides))
+        .filter((scene) => !scene.presentationId || presentations.some((item) => item.id === scene.presentationId));
+    }
   } catch { /* Migrate existing Studio scenes below. */ }
   // Preserve existing projects while giving Slideshow its own editable scene copy.
   return loadStudioScenes().map((scene) => ({ ...scene, slides: scene.slides.map((slide) => ({ ...slide, design: slide.design ? { ...slide.design } : undefined })) }));
@@ -145,11 +171,52 @@ const saveStudioMedia = async (asset: StudioMedia) => {
   db.close();
 };
 
+const openStudioMusicDb = () => new Promise<IDBDatabase>((resolve, reject) => {
+  const request = indexedDB.open(STUDIO_MUSIC_DB, 1);
+  request.onupgradeneeded = () => request.result.createObjectStore(STUDIO_MUSIC_STORE, { keyPath: 'id' });
+  request.onsuccess = () => resolve(request.result);
+  request.onerror = () => reject(request.error);
+});
+
+const readStudioMusic = async (): Promise<StudioMusicAsset[]> => {
+  const db = await openStudioMusicDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STUDIO_MUSIC_STORE, 'readonly');
+    const request = transaction.objectStore(STUDIO_MUSIC_STORE).getAll();
+    request.onsuccess = () => resolve((request.result as StudioMusicAsset[]).sort((a, b) => b.createdAt - a.createdAt));
+    request.onerror = () => reject(request.error);
+    transaction.oncomplete = () => db.close();
+    transaction.onerror = () => db.close();
+  });
+};
+
+const saveStudioMusic = async (asset: StudioMusicAsset) => {
+  const db = await openStudioMusicDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(STUDIO_MUSIC_STORE, 'readwrite');
+    transaction.objectStore(STUDIO_MUSIC_STORE).put(asset);
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+    transaction.onabort = () => { db.close(); reject(transaction.error); };
+  });
+};
+
+const deleteStudioMusicAsset = async (id: string) => {
+  const db = await openStudioMusicDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(STUDIO_MUSIC_STORE, 'readwrite');
+    transaction.objectStore(STUDIO_MUSIC_STORE).delete(id);
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+    transaction.onabort = () => { db.close(); reject(transaction.error); };
+  });
+};
+
 type Ref = { sceneId: number; slideIdx: number };
 
 const same = (a: Ref, b: Ref) => a.sceneId === b.sceneId && a.slideIdx === b.slideIdx;
 
-type SourceKind = 'camera' | 'screen' | 'media' | 'presentation' | 'text' | 'microphone' | 'desktop-audio';
+type SourceKind = 'camera' | 'screen' | 'media' | 'presentation' | 'text' | 'microphone' | 'desktop-audio' | 'music';
 type Source = {
   id: number;
   sceneId: number;
@@ -160,6 +227,7 @@ type Source = {
   stream?: MediaStream;
   deviceId?: string;
   mediaAssetId?: string;
+  loop?: boolean;
   text?: string;
   noiseSuppression?: boolean;
   layout?: { x: number; y: number; width: number; height: number };
@@ -173,6 +241,7 @@ const SOURCE_OPTIONS: { kind: SourceKind; name: string; icon: LucideIcon; group:
   { kind: 'text', name: 'Text overlay', icon: Type, group: 'Overlay' },
   { kind: 'microphone', name: 'Microphone', icon: Mic, group: 'Audio' },
   { kind: 'desktop-audio', name: 'Desktop audio', icon: Volume2, group: 'Audio' },
+  { kind: 'music', name: 'Music track', icon: Music2, group: 'Audio' },
 ];
 
 const loadStudioSources = (): Source[] => {
@@ -532,7 +601,9 @@ export default function Studio() {
   const [sceneDeleteTab, setSceneDeleteTab] = useState<'stream' | 'slideshow'>('stream');
   const [addSceneTab, setAddSceneTab] = useState<'stream' | 'slideshow'>('stream');
   const [sceneId, setSceneId] = useState(() => scenes[0]?.id ?? 0); // scene whose slides are listed (Scenes panel)
+  const [sidebarPanel, setSidebarPanel] = useState<'scenes' | 'music'>('scenes');
   const [selected, setSelected] = useState<Ref>(() => ({ sceneId: scenes[0]?.id ?? 0, slideIdx: 0 }));
+  const slideCardRefs = useRef(new Map<string, HTMLDivElement>());
   const [preview, setPreview] = useState<Ref>(() => ({ sceneId: scenes[0]?.id ?? 0, slideIdx: 0 }));
   const [onAir, setOnAir] = useState<Ref>(() => ({ sceneId: scenes[0]?.id ?? 0, slideIdx: 0 }));
 
@@ -561,32 +632,40 @@ export default function Studio() {
   }, [onAir.sceneId, onAir.slideIdx]);
 
   const [sources, setSources] = useState<Source[]>(loadStudioSources);
+  const [musicAssets, setMusicAssets] = useState<StudioMusicAssetWithUrl[]>([]);
+  const [musicPlaying, setMusicPlaying] = useState<Record<number, boolean>>({});
+  const [previewingMusicId, setPreviewingMusicId] = useState<string | null>(null);
   const [addSourceOpen, setAddSourceOpen] = useState(false);
   const [sourceError, setSourceError] = useState('');
   const [audioError, setAudioError] = useState('');
   const [sourceEditor, setSourceEditor] = useState<Source | null>(null);
   const [sourceDraft, setSourceDraft] = useState('');
   const [selectedProgramSource, setSelectedProgramSource] = useState<number | null>(null);
+  const [previewSetupLayouts, setPreviewSetupLayouts] = useState<Record<number, NonNullable<Source['layout']>>>({});
   const [cameraOnlySnapshot, setCameraOnlySnapshot] = useState<{ sceneId: number; sources: { id: number; visible: boolean; layout?: Source['layout'] }[] } | null>(null);
   const programCanvasRef = useRef<HTMLDivElement>(null);
-  const sourceDrag = useRef<{ id: number; mode: 'move' | 'resize'; startX: number; startY: number; layout: { x: number; y: number; width: number; height: number } } | null>(null);
-  const layerInteraction = useRef<{ id: number; selectedBefore: boolean; moved: boolean } | null>(null);
+  const previewSetupCanvasRef = useRef<HTMLDivElement>(null);
+  const previewSetupDrag = useRef<{ id: number; mode: 'move' | 'resize'; startX: number; startY: number; layout: { x: number; y: number; width: number; height: number } } | null>(null);
   const sourceFileRef = useRef<HTMLInputElement>(null);
+  const musicFileRef = useRef<HTMLInputElement>(null);
+  const musicElements = useRef(new Map<number, HTMLAudioElement>());
+  const musicStreams = useRef(new Map<number, MediaStream>());
+  const musicPreviewElement = useRef<HTMLAudioElement | null>(null);
   const sourceStreams = useRef(new Map<number, MediaStream>());
   const sourceObjectUrls = useRef<string[]>([]);
   const sourceMenuRef = useRef<HTMLDivElement>(null);
   const sourceTriggerRef = useRef<HTMLButtonElement>(null);
   const [channels, setChannels] = useState<Channel[]>(() => sources
-    .filter((source) => source.kind === 'microphone' || source.kind === 'desktop-audio')
-    .map((source) => ({ id: source.id, sceneId: source.sceneId, name: source.name, icon: source.kind === 'microphone' ? Mic : Volume2, db: -6, muted: false })));
+    .filter((source) => source.kind === 'microphone' || source.kind === 'desktop-audio' || source.kind === 'music')
+    .map((source) => ({ id: source.id, sceneId: source.sceneId, name: source.name, icon: source.kind === 'microphone' ? Mic : source.kind === 'music' ? Music2 : Volume2, db: -6, muted: false })));
   const [audioLevels, setAudioLevels] = useState<Record<number, number>>({});
 
   const [live, setLive] = useState(false);
   const [recording, setRecording] = useState(false);
   const [goLiveSetupOpen, setGoLiveSetupOpen] = useState(false);
-  const [streamResolution, setStreamResolution] = useState('1080p');
-  const [streamFrameRate, setStreamFrameRate] = useState('30');
-  const [streamBitrate, setStreamBitrate] = useState('6000');
+  const [streamResolution, setStreamResolution] = useState(() => localStorage.getItem(STUDIO_RESOLUTION_KEY) || '1080p');
+  const [streamFrameRate, setStreamFrameRate] = useState(() => localStorage.getItem(STUDIO_FRAME_RATE_KEY) || '30');
+  const [streamBitrate, setStreamBitrate] = useState(() => localStorage.getItem(STUDIO_BITRATE_KEY) || '6000');
   const [streamServerUrl, setStreamServerUrl] = useState('');
   const [streamKey, setStreamKey] = useState('');
   const [showStreamKey, setShowStreamKey] = useState(false);
@@ -600,7 +679,12 @@ export default function Studio() {
   const liveAudioDestination = useRef<MediaStreamAudioDestinationNode | null>(null);
   const liveAudioInputs = useRef(new Map<number, MediaStreamAudioSourceNode>());
   const liveAudioGains = useRef(new Map<number, GainNode>());
-  const [previewMode, setPreviewMode] = useState(true);
+  const recordingAudioContext = useRef<AudioContext | null>(null);
+  const recordingAudioRecorder = useRef<MediaRecorder | null>(null);
+  const recordingAudioDestination = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const recordingAudioInputs = useRef(new Map<number, MediaStreamAudioSourceNode>());
+  const recordingAudioGains = useRef(new Map<number, GainNode>());
+  const [previewMode, setPreviewMode] = useState(() => localStorage.getItem(STUDIO_PREVIEW_MODE_KEY) !== 'false');
   const [studioOutputTab, setStudioOutputTab] = useState<'slideshow' | 'stream'>('stream');
   const [offlineSlide, setOfflineSlide] = useState<Ref>(() => ({ sceneId: slideshowScenes[0]?.id ?? 0, slideIdx: 0 }));
   const [offlineEditing, setOfflineEditing] = useState(false);
@@ -613,6 +697,17 @@ export default function Studio() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirmEndStream, setConfirmEndStream] = useState(() => localStorage.getItem('faithstream.studio-confirm-end') !== 'false');
   const [endStreamConfirmOpen, setEndStreamConfirmOpen] = useState(false);
+
+  useEffect(() => {
+    try { localStorage.setItem(STUDIO_PREVIEW_MODE_KEY, String(previewMode)); } catch { /* Keep the current Studio mode if storage is unavailable. */ }
+  }, [previewMode]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(STUDIO_RESOLUTION_KEY, streamResolution);
+      localStorage.setItem(STUDIO_FRAME_RATE_KEY, streamFrameRate);
+      localStorage.setItem(STUDIO_BITRATE_KEY, streamBitrate);
+    } catch { /* Keep the current stream settings if storage is unavailable. */ }
+  }, [streamResolution, streamFrameRate, streamBitrate]);
 
   useEffect(() => {
     const active = live || recording;
@@ -644,8 +739,42 @@ export default function Studio() {
   }, [slideshowScenes]);
 
   useEffect(() => {
+    const refreshLinkedPresentationTitles = () => {
+      const presentations = readSavedPresentations();
+      const byId = new Map(presentations.map((presentation) => [presentation.id, presentation]));
+      const refresh = (current: Scene[]) => current.filter((scene) => !scene.presentationId || byId.has(scene.presentationId)).map((scene) => {
+        const presentation = scene.presentationId ? byId.get(scene.presentationId) : undefined;
+        if (!presentation) return scene;
+        return {
+          ...scene,
+          name: presentation.name || scene.name,
+          slides: scene.slides.map((slide, index) => {
+            const savedSlide = presentation.slides[index];
+            return savedSlide ? { ...slide, title: savedSlide.title || slide.title || `Slide ${index + 1}` } : slide;
+          }),
+        };
+      });
+      setScenes(refresh);
+      setSlideshowScenes(refresh);
+    };
+    const onPresentationsStorage = (event: StorageEvent) => {
+      if (event.key === 'faithstream.presentations') refreshLinkedPresentationTitles();
+    };
+    window.addEventListener('faithstream:presentations-updated', refreshLinkedPresentationTitles);
+    window.addEventListener('storage', onPresentationsStorage);
+    return () => {
+      window.removeEventListener('faithstream:presentations-updated', refreshLinkedPresentationTitles);
+      window.removeEventListener('storage', onPresentationsStorage);
+    };
+  }, []);
+
+  useEffect(() => {
     try { localStorage.setItem(STUDIO_OUTPUT_REF_KEY, JSON.stringify(offlineSlide)); } catch { /* Output window can still follow the current Studio session. */ }
   }, [offlineSlide]);
+
+  useEffect(() => {
+    try { localStorage.setItem(STUDIO_STREAM_OUTPUT_REF_KEY, JSON.stringify(onAir)); } catch { /* Keep stream monitor output in sync when storage is unavailable. */ }
+  }, [onAir]);
 
   useEffect(() => {
     let active = true;
@@ -657,12 +786,12 @@ export default function Studio() {
       if (active) setDisplayError('Could not read the connected monitors.');
     });
     const onOutputChange = (event: StorageEvent) => {
-      if (event.key !== STUDIO_OUTPUT_REF_KEY || !event.newValue) return;
+      if (!event.newValue) return;
       try {
         const next = JSON.parse(event.newValue) as Ref;
-        if (Number.isFinite(next.sceneId) && Number.isFinite(next.slideIdx)) {
-          setOfflineSlide(next);
-        }
+        if (!Number.isFinite(next.sceneId) || !Number.isFinite(next.slideIdx)) return;
+        if (event.key === STUDIO_OUTPUT_REF_KEY) setOfflineSlide(next);
+        if (event.key === STUDIO_STREAM_OUTPUT_REF_KEY) setOnAir(next);
       } catch { /* Ignore an incomplete update from the projector window. */ }
     };
     window.addEventListener('storage', onOutputChange);
@@ -687,6 +816,20 @@ export default function Studio() {
         liveAudioInputs.current.forEach((input) => input.disconnect());
         liveAudioInputs.current.clear();
         liveAudioGains.current.clear();
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    const subscribe = window.faithstreamWindow?.onRecordingStatus;
+    if (!subscribe) return;
+    return subscribe((event) => {
+      if (event.status === 'saved') {
+        setRecording(false);
+      } else if (event.status === 'error') {
+        setRecording(false);
+        const recorder = recordingAudioRecorder.current;
+        if (recorder && recorder.state !== 'inactive') recorder.stop();
       }
     });
   }, []);
@@ -723,11 +866,43 @@ export default function Studio() {
   }, [channels, sources, onAir.sceneId]);
 
   useEffect(() => {
+    const context = recordingAudioContext.current;
+    const destination = recordingAudioDestination.current;
+    if (!context || !destination || !recordingAudioRecorder.current || recordingAudioRecorder.current.state === 'inactive') return;
+    const activeIds = new Set(mixerChannels.map((channel) => channel.id));
+    recordingAudioInputs.current.forEach((input, id) => {
+      if (activeIds.has(id)) return;
+      input.disconnect();
+      recordingAudioGains.current.get(id)?.disconnect();
+      recordingAudioInputs.current.delete(id);
+      recordingAudioGains.current.delete(id);
+    });
+    mixerChannels.forEach((channel) => {
+      const source = sources.find((item) => item.id === channel.id);
+      if (!recordingAudioGains.current.has(channel.id)) {
+        const tracks = source?.stream?.getAudioTracks().filter((track) => track.readyState === 'live') ?? [];
+        if (tracks.length) {
+          const input = context.createMediaStreamSource(new MediaStream(tracks));
+          const gain = context.createGain();
+          input.connect(gain).connect(destination);
+          recordingAudioInputs.current.set(channel.id, input);
+          recordingAudioGains.current.set(channel.id, gain);
+        }
+      }
+      const gain = recordingAudioGains.current.get(channel.id);
+      if (!gain) return;
+      gain.gain.setTargetAtTime(source?.visible && !channel.muted ? 10 ** (channel.db / 20) : 0, context.currentTime, 0.025);
+    });
+  }, [channels, sources, onAir.sceneId]);
+
+  useEffect(() => {
     try { localStorage.setItem(STUDIO_SOURCES_KEY, JSON.stringify(sources.map(({ stream: _stream, ...source }) => source))); } catch { /* Keep the current source list usable if storage is unavailable. */ }
   }, [sources]);
 
   useEffect(() => () => {
     sourceStreams.current.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
+    musicElements.current.forEach((audio) => audio.pause());
+    musicPreviewElement.current?.pause();
     sourceObjectUrls.current.forEach((url) => URL.revokeObjectURL(url));
   }, []);
 
@@ -783,7 +958,31 @@ export default function Studio() {
           return asset ? { ...slide, bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : slide;
         }),
       })));
-    }).catch(() => { /* Scenes can still use presentation slides without local media. */ });
+      markStartupResourceReady('studio-media');
+    }).catch(() => {
+      if (!cancelled) markStartupResourceReady('studio-media');
+      /* Scenes can still use presentation slides without local media. */
+    });
+    return () => { cancelled = true; urls.forEach(URL.revokeObjectURL); };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let urls: string[] = [];
+    void readStudioMusic().then((assets) => {
+      const loaded = assets.map((asset) => {
+        const url = URL.createObjectURL(asset.blob);
+        urls.push(url);
+        return { ...asset, url };
+      });
+      if (cancelled) { urls.forEach(URL.revokeObjectURL); return; }
+      sourceObjectUrls.current.push(...urls);
+      setMusicAssets(loaded);
+      markStartupResourceReady('studio-music');
+    }).catch(() => {
+      if (!cancelled) markStartupResourceReady('studio-music');
+      if (!cancelled) setSourceError('Could not load saved music tracks.');
+    });
     return () => { cancelled = true; urls.forEach(URL.revokeObjectURL); };
   }, []);
 
@@ -839,6 +1038,8 @@ export default function Studio() {
       setScenes((current) => [...current, ...newScenes]);
       setSceneId(newScenes[0].id);
       setSelected({ sceneId: newScenes[0].id, slideIdx: 0 });
+      setPreview({ sceneId: newScenes[0].id, slideIdx: 0 });
+      if (!previewMode) setOnAir({ sceneId: newScenes[0].id, slideIdx: 0 });
     }
     setAddSceneOpen(false);
   };
@@ -856,6 +1057,8 @@ export default function Studio() {
       setScenes((current) => [...current, newScene]);
       setSceneId(id);
       setSelected({ sceneId: id, slideIdx: 0 });
+      setPreview({ sceneId: id, slideIdx: 0 });
+      if (!previewMode) setOnAir({ sceneId: id, slideIdx: 0 });
     }
     setAddSceneOpen(false);
   };
@@ -956,12 +1159,28 @@ export default function Studio() {
       setDisplayError('Choose a connected monitor first.');
       return;
     }
+    try { localStorage.setItem(STUDIO_DISPLAY_MODE_KEY, 'slideshow'); } catch { /* Keep the selected display usable if storage is unavailable. */ }
     const result = await window.faithstreamWindow?.openStudioDisplay(targetDisplayId);
     if (!result?.ok) setDisplayError(result?.message ?? 'Could not open the slideshow on that monitor.');
     else setDisplayError('');
   };
+  const openStreamDisplay = async () => {
+    if (targetDisplayId === null) {
+      setDisplayError('Choose a connected monitor first.');
+      return;
+    }
+    try {
+      localStorage.setItem(STUDIO_STREAM_OUTPUT_REF_KEY, JSON.stringify(onAir));
+      localStorage.setItem(STUDIO_DISPLAY_MODE_KEY, 'stream');
+    } catch { /* Keep the selected display usable if storage is unavailable. */ }
+    const result = await window.faithstreamWindow?.openStudioDisplay(targetDisplayId);
+    if (!result?.ok) setDisplayError(result?.message ?? 'Could not open the stream slide on that monitor.');
+    else setDisplayError('');
+  };
   const stepOfflineSlide = (direction: -1 | 1) => {
-    const nextIndex = Math.max(0, Math.min(offlineScene.slides.length - 1, offlineSlide.slideIdx + direction));
+    const count = offlineScene.slides.length;
+    if (count < 1) return;
+    const nextIndex = (offlineSlide.slideIdx + direction + count) % count;
     const target = { ...offlineSlide, slideIdx: nextIndex };
     setOfflineSlide(target);
     setOfflineEditing(false);
@@ -970,26 +1189,31 @@ export default function Studio() {
   const scene = scenes.find((x) => x.id === sceneId) ?? emptyScene;
   const staged = resolve(selected);
   const previewed = resolve(preview);
+  const previewSetupRef = previewMode ? preview : selected;
+  const previewSetupSlide = resolve(previewSetupRef);
   const airing = resolve(onAir);
   // Keep sources available when switching slides/scenes, like reusable OBS sources.
   const sourcesForScene = (id: number) => sources.filter((source) => source.shared || source.sceneId === id);
   const sceneSources = sourcesForScene(sceneId);
   const onAirSceneSources = sourcesForScene(onAir.sceneId);
+  const previewSceneSources = sourcesForScene(previewSetupRef.sceneId);
+  const presentationSource = onAirSceneSources.find((source) => source.kind === 'presentation');
   const cameraSources = onAirSceneSources.filter((source) => source.kind === 'camera' && source.visible);
-  const otherVisualSources = onAirSceneSources.filter((source) => source.visible && source.kind !== 'camera' && source.kind !== 'presentation' && source.kind !== 'microphone' && source.kind !== 'desktop-audio');
-  const programOverlaySources = [...cameraSources, ...otherVisualSources];
+  const programOverlaySources = onAirSceneSources.filter((source) => source.visible && ['camera', 'screen', 'media', 'presentation', 'text'].includes(source.kind));
+  const previewSetupOverlays = previewSceneSources.filter((source) => source.visible && ['camera', 'screen', 'media', 'presentation', 'text'].includes(source.kind));
   const visibleProgramOverlays = studioOutputTab === 'stream' ? programOverlaySources : [];
   const getProgramLayout = (source: Source) => {
     if (source.layout) return source.layout;
+    if (source.kind === 'presentation') return { x: 0, y: 0, width: 100, height: 100 };
     if (source.kind === 'camera') {
-      const cameraIndex = cameraSources.findIndex((camera) => camera.id === source.id);
+      const cameraIndex = sourcesForScene(source.sceneId).filter((item) => item.kind === 'camera').findIndex((camera) => camera.id === source.id);
       return { x: 100 - (cameraIndex + 1) * 24, y: 72, width: 22, height: 22 };
     }
     return source.kind === 'text' ? { x: 10, y: 68, width: 80, height: 24 } : { x: 8, y: 8, width: 42, height: 42 };
   };
-  const selectedProgramOverlay = programOverlaySources.find((source) => source.id === selectedProgramSource);
-  const selectedProgramLayout = selectedProgramOverlay ? getProgramLayout(selectedProgramOverlay) : null;
-  const presentationSource = onAirSceneSources.find((source) => source.kind === 'presentation');
+  const getPreviewSetupLayout = (source: Source) => previewSetupLayouts[source.id] ?? getProgramLayout(source);
+  const selectedProgramOverlay = previewSetupOverlays.find((source) => source.id === selectedProgramSource);
+  const selectedProgramLayout = selectedProgramOverlay ? getPreviewSetupLayout(selectedProgramOverlay) : null;
   const showPresentationInProgram = !!presentationSource?.visible;
   const cameraLimitReached = sceneSources.filter((source) => source.kind === 'camera').length >= 3;
   const mixerChannels = channels.filter((channel) => onAirSceneSources.some((source) => source.id === channel.id));
@@ -1003,8 +1227,11 @@ export default function Studio() {
   const selectSlide = (i: number) => setSelected({ sceneId, slideIdx: i });
 
   const selectScene = (id: number) => {
+    const target = { sceneId: id, slideIdx: 0 };
     setSceneId(id);
-    setSelected({ sceneId: id, slideIdx: 0 });
+    setSelected(target);
+    setPreview(target);
+    if (!previewMode) setOnAir(target);
     setAddSourceOpen(false);
   };
 
@@ -1072,12 +1299,17 @@ export default function Studio() {
   // If a different slide moves into Preview, close the editor.
   useEffect(() => setEditing(false), [preview.sceneId, preview.slideIdx]);
 
+  useEffect(() => {
+    if (studioOutputTab !== 'stream') return;
+    slideCardRefs.current.get(`${selected.sceneId}:${selected.slideIdx}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [selected.sceneId, selected.slideIdx, studioOutputTab]);
+
   // Keyboard: ← → ↑ ↓ and PageUp / PageDown (what most presentation clickers send) change slides.
   // Fast mode (Preview Mode off): the slide goes on air immediately. Otherwise it is only selected.
   const step = (dir: 1 | -1) => {
     const count = scenes.find((x) => x.id === selected.sceneId)?.slides.length ?? 0;
     if (count < 1) return;
-    const i = Math.min(count - 1, Math.max(0, selected.slideIdx + dir));
+    const i = (selected.slideIdx + dir + count) % count;
     if (i === selected.slideIdx) return;
     const target = { sceneId: selected.sceneId, slideIdx: i };
     setSelected(target);
@@ -1087,11 +1319,44 @@ export default function Studio() {
     }
   };
 
+  const stepOnAir = (dir: 1 | -1) => {
+    const count = scenes.find((item) => item.id === onAir.sceneId)?.slides.length ?? 0;
+    if (count < 1) return;
+    const slideIdx = (onAir.slideIdx + dir + count) % count;
+    if (slideIdx === onAir.slideIdx) return;
+    const target = { sceneId: onAir.sceneId, slideIdx };
+    setSelected(target);
+    setPreview(target);
+    setOnAir(target);
+  };
+
+  const stepPreview = (dir: 1 | -1) => {
+    const count = scenes.find((item) => item.id === preview.sceneId)?.slides.length ?? 0;
+    if (count < 1) return;
+    const slideIdx = (preview.slideIdx + dir + count) % count;
+    if (slideIdx === preview.slideIdx) return;
+    const target = { sceneId: preview.sceneId, slideIdx };
+    setSelected(target);
+    setPreview(target);
+  };
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (editing) return; // typing a correction: leave the keys alone
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return; // sliders use arrow keys too
+      if (studioOutputTab === 'stream' && previewMode && e.key === 'Enter' && tag !== 'BUTTON' && tag !== 'A') {
+        e.preventDefault();
+        setOnAir(preview);
+        return;
+      }
+      if (studioOutputTab === 'stream' && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault();
+        const direction = e.key === 'ArrowDown' ? 1 : -1;
+        if (previewMode) stepPreview(direction);
+        else stepOnAir(direction);
+        return;
+      }
       const forward = ['ArrowRight', 'ArrowDown', 'PageDown'].includes(e.key);
       const back = ['ArrowLeft', 'ArrowUp', 'PageUp'].includes(e.key);
       if (!forward && !back) return;
@@ -1104,13 +1369,13 @@ export default function Studio() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  });
+  }, [editing, studioOutputTab, selected, onAir, scenes, previewMode, preview, sceneId, offlineSlide]);
 
   const toggleSource = (id: number) => {
     const source = sources.find((item) => item.id === id);
     if (!source) return;
     const visible = !source.visible;
-    if (source.kind === 'microphone' || source.kind === 'desktop-audio') {
+    if (source.kind === 'microphone' || source.kind === 'desktop-audio' || source.kind === 'music') {
       const muted = channels.find((channel) => channel.id === id)?.muted ?? false;
       source.stream?.getAudioTracks().forEach((track) => { track.enabled = visible && !muted; });
     }
@@ -1126,7 +1391,7 @@ export default function Studio() {
       sceneId,
       shared: true,
       kind,
-      name: count > 1 && kind !== 'text' && kind !== 'presentation' ? `${option.name} ${count}` : option.name,
+      name: details.name ?? (count > 1 && kind !== 'text' && kind !== 'presentation' ? `${option.name} ${count}` : option.name),
       visible: true,
       layout: kind === 'camera'
         ? { x: 100 - count * 24, y: 72, width: 22, height: 22 }
@@ -1138,12 +1403,12 @@ export default function Studio() {
       ...details,
     };
     setSources((list) => [...list, newSource]);
-    if (kind === 'microphone' || kind === 'desktop-audio') {
+    if (kind === 'microphone' || kind === 'desktop-audio' || kind === 'music') {
       setChannels((list) => [...list, {
         id: newSource.id,
         sceneId,
         name: newSource.name,
-        icon: kind === 'microphone' ? Mic : Volume2,
+        icon: kind === 'microphone' ? Mic : kind === 'music' ? Music2 : Volume2,
         db: -6,
         muted: false,
       }]);
@@ -1152,46 +1417,47 @@ export default function Studio() {
   };
 
   const beginProgramSourceDrag = (event: ReactPointerEvent, source: Source, mode: 'move' | 'resize') => {
-    if (!programCanvasRef.current) return;
+    if (!previewSetupCanvasRef.current) return;
     event.preventDefault();
     event.stopPropagation();
-    const layout = source.layout ?? { x: 8, y: 8, width: 42, height: 42 };
+    const layout = getPreviewSetupLayout(source);
     setSelectedProgramSource(source.id);
-    layerInteraction.current = { id: source.id, selectedBefore: selectedProgramSource === source.id, moved: false };
-    sourceDrag.current = { id: source.id, mode, startX: event.clientX, startY: event.clientY, layout };
+    previewSetupDrag.current = { id: source.id, mode, startX: event.clientX, startY: event.clientY, layout };
     (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
   };
 
   const moveProgramSource = (event: ReactPointerEvent) => {
-    const drag = sourceDrag.current;
-    const canvas = programCanvasRef.current;
+    const drag = previewSetupDrag.current;
+    const canvas = previewSetupCanvasRef.current;
     if (!drag || !canvas) return;
     const bounds = canvas.getBoundingClientRect();
     if (!bounds.width || !bounds.height) return;
     const dx = ((event.clientX - drag.startX) / bounds.width) * 100;
     const dy = ((event.clientY - drag.startY) / bounds.height) * 100;
-    if (Math.abs(dx) > 0.2 || Math.abs(dy) > 0.2) {
-      if (layerInteraction.current?.id === drag.id) layerInteraction.current.moved = true;
-    }
-    setSources((list) => list.map((source) => {
-      if (source.id !== drag.id) return source;
-      const layout = drag.layout;
-      return { ...source, layout: drag.mode === 'move'
+    const layout = drag.layout;
+    setPreviewSetupLayouts((current) => ({ ...current, [drag.id]: drag.mode === 'move'
         ? { ...layout, x: Math.max(0, Math.min(100 - layout.width, layout.x + dx)), y: Math.max(0, Math.min(100 - layout.height, layout.y + dy)) }
-        : { ...layout, width: Math.max(8, Math.min(100 - layout.x, layout.width + dx)), height: Math.max(8, Math.min(100 - layout.y, layout.height + dy)) } };
-    }));
+        : { ...layout, width: Math.max(8, Math.min(100 - layout.x, layout.width + dx)), height: Math.max(8, Math.min(100 - layout.y, layout.height + dy)) } }));
   };
 
   const updateProgramLayout = (id: number, patch: Partial<NonNullable<Source['layout']>>) => {
-    setSources((list) => list.map((source) => {
-      if (source.id !== id) return source;
-      const layout = getProgramLayout(source);
+    const source = previewSetupOverlays.find((item) => item.id === id);
+    if (!source) return;
+    setPreviewSetupLayouts((current) => {
+      const layout = current[id] ?? getProgramLayout(source);
       const width = Math.max(8, Math.min(100, patch.width ?? layout.width));
       const height = Math.max(8, Math.min(100, patch.height ?? layout.height));
       const x = Math.max(0, Math.min(100 - width, patch.x ?? layout.x));
       const y = Math.max(0, Math.min(100 - height, patch.y ?? layout.y));
-      return { ...source, layout: { x, y, width, height } };
-    }));
+      return { ...current, [id]: { x, y, width, height } };
+    });
+  };
+
+  const takePreviewSetupOnAir = () => {
+    setSources((current) => current.map((source) => previewSetupLayouts[source.id] ? { ...source, layout: previewSetupLayouts[source.id] } : source));
+    setPreview(previewSetupRef);
+    setOnAir(previewSetupRef);
+    setSelectedProgramSource(null);
   };
 
   const showCameraOnly = (cameraId?: number) => {
@@ -1274,6 +1540,10 @@ export default function Studio() {
       sourceFileRef.current?.click();
       return;
     }
+    if (kind === 'music') {
+      musicFileRef.current?.click();
+      return;
+    }
     if (kind === 'camera' && cameraLimitReached) {
       setSourceError('A scene can have up to 3 camera sources.');
       return;
@@ -1325,6 +1595,64 @@ export default function Studio() {
     }
   };
 
+  const addMusicAssetAsSource = (asset: StudioMusicAssetWithUrl) => {
+    const source = createSource('music', { name: asset.name, mediaAssetId: asset.id, loop: true });
+    if (source) {
+      setAddSourceOpen(false);
+      setSourceError('');
+    }
+  };
+
+  const importMusicFile = async (file?: File) => {
+    if (!file) return;
+    setSourceError('');
+    try {
+      const stored: StudioMusicAsset = { id: `music-${crypto.randomUUID()}`, name: file.name, blob: file, createdAt: Date.now() };
+      await saveStudioMusic(stored);
+      const asset = { ...stored, url: URL.createObjectURL(stored.blob) };
+      sourceObjectUrls.current.push(asset.url);
+      setMusicAssets((current) => [asset, ...current]);
+    } catch {
+      setSourceError('Could not save this audio file. Please try another file.');
+    }
+  };
+
+  const previewMusic = (asset: StudioMusicAssetWithUrl) => {
+    if (previewingMusicId === asset.id) {
+      musicPreviewElement.current?.pause();
+      musicPreviewElement.current = null;
+      setPreviewingMusicId(null);
+      return;
+    }
+    musicPreviewElement.current?.pause();
+    const audio = new Audio(asset.url);
+    audio.onended = () => { setPreviewingMusicId(null); musicPreviewElement.current = null; };
+    musicPreviewElement.current = audio;
+    setPreviewingMusicId(asset.id);
+    void audio.play().catch(() => { setPreviewingMusicId(null); musicPreviewElement.current = null; setSourceError('Could not preview this audio file.'); });
+  };
+
+  const attachMusicStream = (sourceId: number, audio: HTMLAudioElement) => {
+    if (musicStreams.current.has(sourceId)) return;
+    const capturable = audio as HTMLAudioElement & { captureStream?: () => MediaStream };
+    const stream = capturable.captureStream?.();
+    if (!stream?.getAudioTracks().length) return;
+    const source = sources.find((item) => item.id === sourceId);
+    const channel = channels.find((item) => item.id === sourceId);
+    stream.getAudioTracks().forEach((track) => { track.enabled = (source?.visible ?? true) && !(channel?.muted ?? false); });
+    musicStreams.current.set(sourceId, stream);
+    sourceStreams.current.set(sourceId, stream);
+    setSources((current) => current.map((item) => item.id === sourceId ? { ...item, stream } : item));
+  };
+
+  const toggleMusicPlayback = (sourceId: number) => {
+    const audio = musicElements.current.get(sourceId);
+    if (!audio) return;
+    if (audio.paused) {
+      void audio.play().then(() => attachMusicStream(sourceId, audio)).catch(() => setSourceError('Could not play this music track.'));
+    } else audio.pause();
+  };
+
   const reconnectSource = async (source: Source) => {
     try {
       const captured = await captureStream(source.kind, source.id, source.deviceId);
@@ -1354,10 +1682,31 @@ export default function Studio() {
   };
 
   const removeSource = (id: number) => {
+    musicElements.current.get(id)?.pause();
+    musicElements.current.delete(id);
+    musicStreams.current.delete(id);
+    setMusicPlaying((current) => { const next = { ...current }; delete next[id]; return next; });
     sourceStreams.current.get(id)?.getTracks().forEach((track) => track.stop());
     sourceStreams.current.delete(id);
     setChannels((list) => list.filter((channel) => channel.id !== id));
     setSources((list) => list.filter((source) => source.id !== id));
+  };
+
+  const deleteMusicAsset = async (asset: StudioMusicAssetWithUrl) => {
+    try {
+      await deleteStudioMusicAsset(asset.id);
+      if (previewingMusicId === asset.id) {
+        musicPreviewElement.current?.pause();
+        musicPreviewElement.current = null;
+        setPreviewingMusicId(null);
+      }
+      sources.filter((source) => source.kind === 'music' && source.mediaAssetId === asset.id).forEach((source) => removeSource(source.id));
+      URL.revokeObjectURL(asset.url);
+      sourceObjectUrls.current = sourceObjectUrls.current.filter((url) => url !== asset.url);
+      setMusicAssets((current) => current.filter((item) => item.id !== asset.id));
+    } catch {
+      setSourceError('Could not delete this music track. Please try again.');
+    }
   };
 
   const reorderSources = (draggedId: number, targetId: number) => {
@@ -1377,7 +1726,7 @@ export default function Studio() {
   const updateChannel = (id: number, patch: Partial<Channel>) => {
     if (patch.muted !== undefined) {
       const sourceVisible = sources.find((source) => source.id === id)?.visible ?? true;
-      sourceStreams.current.get(id)?.getAudioTracks().forEach((track) => { track.enabled = sourceVisible && !patch.muted; });
+      (sourceStreams.current.get(id) ?? sources.find((source) => source.id === id)?.stream)?.getAudioTracks().forEach((track) => { track.enabled = sourceVisible && !patch.muted; });
     }
     setChannels((list) => list.map((c) => (c.id === id ? { ...c, ...patch } : c)));
   };
@@ -1412,6 +1761,80 @@ export default function Studio() {
     liveAudioInputs.current.forEach((input) => input.disconnect());
     liveAudioInputs.current.clear();
     liveAudioGains.current.clear();
+  };
+
+  const clearRecordingAudio = () => {
+    recordingAudioRecorder.current = null;
+    recordingAudioInputs.current.forEach((input) => input.disconnect());
+    recordingAudioInputs.current.clear();
+    recordingAudioGains.current.clear();
+    recordingAudioDestination.current = null;
+    void recordingAudioContext.current?.close();
+    recordingAudioContext.current = null;
+  };
+
+  const startRecordingSession = async () => {
+    const bridge = window.faithstreamWindow;
+    const output = programCanvasRef.current;
+    if (!bridge || !output || typeof bridge.startRecording !== 'function') return;
+    let context: AudioContext | null = null;
+    try {
+      const bounds = output.getBoundingClientRect();
+      const started = await bridge.startRecording({ capture: { x: Math.round(bounds.x), y: Math.round(bounds.y), width: Math.round(bounds.width), height: Math.round(bounds.height) } });
+      if (!started.ok) return;
+      context = new AudioContext();
+      await context.resume();
+      const destination = context.createMediaStreamDestination();
+      recordingAudioContext.current = context;
+      recordingAudioDestination.current = destination;
+      mixerChannels.forEach((channel) => {
+        const source = sources.find((item) => item.id === channel.id);
+        const tracks = source?.stream?.getAudioTracks().filter((track) => track.readyState === 'live') ?? [];
+        if (!tracks.length) return;
+        const input = context!.createMediaStreamSource(new MediaStream(tracks));
+        const gain = context!.createGain();
+        gain.gain.value = source?.visible && !channel.muted ? 10 ** (channel.db / 20) : 0;
+        input.connect(gain).connect(destination);
+        recordingAudioInputs.current.set(channel.id, input);
+        recordingAudioGains.current.set(channel.id, gain);
+      });
+      if (!MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) throw new Error('This computer cannot encode recording audio.');
+      const recorder = new MediaRecorder(destination.stream, { mimeType: 'audio/webm;codecs=opus' });
+      let pendingAudio = Promise.resolve();
+      recorder.ondataavailable = (event) => {
+        if (!event.data.size) return;
+        pendingAudio = pendingAudio.then(async () => {
+          const chunk = await event.data.arrayBuffer();
+          bridge.sendRecordingAudio(chunk);
+        });
+      };
+      recorder.onerror = () => {
+        if (recorder.state !== 'inactive') recorder.stop();
+      };
+      recorder.onstop = () => {
+        setRecording(false);
+        void pendingAudio.then(() => bridge.stopRecording()).finally(clearRecordingAudio);
+      };
+      recordingAudioRecorder.current = recorder;
+      recorder.start(250);
+      setRecording(true);
+    } catch (error) {
+      try { await bridge.stopRecording?.(); } catch { /* The desktop recorder may not have started. */ }
+      void context?.close();
+      clearRecordingAudio();
+      setRecording(false);
+      console.error('Could not start recording.', error);
+    }
+  };
+
+  const stopRecordingSession = () => {
+    const recorder = recordingAudioRecorder.current;
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    else {
+      void window.faithstreamWindow?.stopRecording();
+      clearRecordingAudio();
+      setRecording(false);
+    }
   };
 
   const finishLive = () => {
@@ -1546,7 +1969,7 @@ export default function Studio() {
       {studioOutputTab === 'stream' ? (
       <>
       {/* Top row: takes all the leftover height */}
-      <div className="grid min-h-0 flex-1 grid-cols-[1fr_1fr_0.5fr] gap-3">
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1.1fr)_minmax(0,1.5fr)_minmax(190px,0.8fr)_minmax(180px,0.7fr)] gap-3">
         {/* Left: Preview (big), Selected slide + On air side by side, then ONE next-step button */}
         <div className="flex min-h-0 flex-col gap-2">
           <Fit grow={3} className="rounded-xl border border-sky-500/50">
@@ -1666,16 +2089,61 @@ export default function Studio() {
         {/* Program shows the visual sources that will make up this scene. */}
         <Panel
           title="Program"
+          className="min-w-0 overflow-hidden"
           action={
-            live ? (
-              <span className="rounded bg-red-600 px-2 py-0.5 text-xs font-bold text-white">LIVE</span>
-            ) : (
-              <span className="text-xs text-warm-white/50">Standby</span>
-            )
+            live ? <span className="rounded bg-red-600 px-2 py-1 text-[10px] font-bold text-white">LIVE</span> : <span className="text-[10px] text-warm-white/50">Standby</span>
           }
         >
-          <div className="flex shrink-0 flex-col gap-2">
-            <section>
+          <div className="mb-2 flex shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-black/20 p-2">
+            <span className="flex shrink-0 items-center gap-1.5 rounded-md bg-sky-500/15 px-2 py-1.5 text-[11px] font-semibold text-sky-200"><Monitor size={13} /> Slides</span>
+            <select id="stream-output-monitor" aria-label="Streaming output monitor" value={targetDisplayId ?? ''} onChange={(event) => setTargetDisplayId(Number(event.target.value))} className="h-9 min-w-0 flex-1 rounded-md border border-white/15 bg-slate-950 px-2.5 text-xs text-warm-white outline-none focus:border-brand" disabled={!studioDisplays.length}>
+              {studioDisplays.map((display) => <option key={display.id} value={display.id}>{display.name}</option>)}
+            </select>
+            <button type="button" aria-label="Show slides on monitor" title="Show the on-air slide on this monitor" onClick={() => { void openStreamDisplay(); }} disabled={!studioDisplays.length} className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-brand px-2.5 text-xs font-bold text-white shadow-lg shadow-brand/15 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"><Monitor size={14} /> Show slides</button>
+          </div>
+          <p className="mb-2 shrink-0 text-[10px] text-warm-white/45">{previewMode ? '↓ / ↑ changes Preview · Enter puts it on air' : '↓ / ↑ changes the on-air slide'}</p>
+          <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-hidden">
+            <div className="grid shrink-0 grid-cols-2 gap-2">
+            <section className="min-w-0 rounded-lg border border-white/10 bg-black/10 p-2">
+              <div className="mb-1 flex items-center justify-between gap-1">
+                <h3 className="text-[11px] font-semibold text-sky-200">Preview setup</h3>
+                <button type="button" onClick={takePreviewSetupOnAir} className="flex shrink-0 items-center gap-1 rounded-md bg-brand px-2 py-1 text-[10px] font-bold text-white hover:brightness-110"><ArrowRight size={12} /> Take to air</button>
+              </div>
+              <div
+                ref={previewSetupCanvasRef}
+                className="relative mx-auto aspect-video w-full overflow-hidden rounded-lg border border-white/15 bg-slate-950 touch-none"
+                style={{ containerType: 'inline-size' }}
+                onPointerMove={moveProgramSource}
+                onPointerUp={() => { previewSetupDrag.current = null; }}
+                onPointerCancel={() => { previewSetupDrag.current = null; }}
+                onPointerDown={(event) => { if (event.target === event.currentTarget) setSelectedProgramSource(null); }}
+              >
+                <div className="absolute inset-0 bg-black" />
+                {previewSetupOverlays.map((source) => {
+                  const layout = getPreviewSetupLayout(source);
+                  const selectedLayer = selectedProgramSource === source.id;
+                  return <div
+                    key={source.id}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`${source.name}. Drag to position; drag the corner to resize in Preview setup.`}
+                    onPointerDown={(event) => beginProgramSourceDrag(event, source, 'move')}
+                    onClick={() => setSelectedProgramSource(source.id)}
+                    onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelectedProgramSource(source.id); }}
+                    className={`absolute cursor-move touch-none ${selectedLayer ? 'outline outline-2 outline-sky-400' : 'hover:outline hover:outline-1 hover:outline-white/60'}`}
+                    style={{ left: `${layout.x}%`, top: `${layout.y}%`, width: `${layout.width}%`, height: `${layout.height}%`, zIndex: previewSceneSources.length - previewSceneSources.findIndex((item) => item.id === source.id) }}
+                  >
+                    <SourcePreview source={source} media={source.mediaAssetId ? mediaUrls[source.mediaAssetId] : undefined} slide={previewSetupSlide.slide} bg={previewSetupSlide.bg} showLabel={false} />
+                    {selectedLayer && <button type="button" aria-label={`Resize ${source.name}`} title="Drag to resize" onPointerDown={(event) => beginProgramSourceDrag(event, source, 'resize')} className="absolute -bottom-1.5 -right-1.5 z-30 h-3.5 w-3.5 cursor-nwse-resize rounded-sm border border-white bg-sky-500 shadow" />}
+                  </div>;
+                })}
+              </div>
+              {selectedProgramOverlay && selectedProgramLayout && <div data-program-layout-controls className="mt-1.5 flex items-end gap-1 rounded-lg border border-white/10 bg-black/20 p-1.5">
+                <div className="mr-auto min-w-0 pb-1"><p className="truncate text-[9px] font-semibold text-warm-white">{selectedProgramOverlay.name}</p><p className="text-[8px] text-warm-white/45">Preview size</p></div>
+                {([['X', 'x', 100 - selectedProgramLayout.width], ['Y', 'y', 100 - selectedProgramLayout.height], ['W', 'width', 100 - selectedProgramLayout.x], ['H', 'height', 100 - selectedProgramLayout.y]] as const).map(([label, key, max]) => <label key={key} className="flex w-9 shrink-0 flex-col gap-1 text-[8px] text-warm-white/55">{label}<input type="number" min={key === 'width' || key === 'height' ? 8 : 0} max={max} value={selectedProgramLayout[key]} onChange={(event) => updateProgramLayout(selectedProgramOverlay.id, { [key]: Number(event.currentTarget.value) })} className="w-full rounded border border-white/10 bg-slate-950 px-0.5 py-1 text-center text-[9px] text-white outline-none focus:border-sky-400" /></label>)}
+              </div>}
+            </section>
+            <section className="min-w-0 rounded-lg border border-white/10 bg-black/10 p-2">
               <div className="mb-1 flex items-center justify-between">
                 <h3 className="text-[11px] font-semibold text-warm-white/75">On-air output</h3>
                 <div className="flex items-center gap-2">
@@ -1689,35 +2157,17 @@ export default function Studio() {
               </div>
               <div
                 ref={programCanvasRef}
-                className="relative mx-auto aspect-video w-full max-w-[380px] overflow-hidden rounded-lg border border-red-500/40 bg-slate-950 touch-none"
+                className="relative mx-auto aspect-video w-full max-w-[380px] overflow-hidden border border-white/15 bg-slate-950 touch-none"
                 style={{ containerType: 'inline-size' }}
-                onPointerMove={moveProgramSource}
-                onPointerUp={() => { sourceDrag.current = null; }}
-                onPointerCancel={() => { sourceDrag.current = null; }}
-                onPointerDown={(event) => { if (event.target === event.currentTarget) setSelectedProgramSource(null); }}
               >
-                {showPresentationInProgram ? (
-                  <SlideView bg={airing.bg} slide={airing.slide} scale={8} minRem={0.5} />
-                ) : <div className="absolute inset-0 bg-black" />}
+                <div className="absolute inset-0 bg-black" />
                 {visibleProgramOverlays.map((source) => {
                   const layout = getProgramLayout(source);
-                  const selectedLayer = selectedProgramSource === source.id;
                   return (
                     <div
                       key={source.id}
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`${source.name}. Drag to position; drag the corner to resize.`}
-                      onPointerDown={(event) => beginProgramSourceDrag(event, source, 'move')}
-                      onClick={() => {
-                        const interaction = layerInteraction.current;
-                        layerInteraction.current = null;
-                        if (interaction?.id === source.id && interaction.moved) return;
-                        setSelectedProgramSource(interaction?.id === source.id && interaction.selectedBefore ? null : source.id);
-                      }}
-                      onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelectedProgramSource(source.id); }}
-                      className={`absolute cursor-move touch-none ${selectedLayer ? 'z-20 outline outline-2 outline-sky-400' : 'z-10 hover:outline hover:outline-1 hover:outline-white/60'}`}
-                      style={{ left: `${layout.x}%`, top: `${layout.y}%`, width: `${layout.width}%`, height: `${layout.height}%` }}
+                      className="absolute"
+                      style={{ left: `${layout.x}%`, top: `${layout.y}%`, width: `${layout.width}%`, height: `${layout.height}%`, zIndex: onAirSceneSources.length - onAirSceneSources.findIndex((item) => item.id === source.id) }}
                     >
                       <SourcePreview
                         source={source}
@@ -1726,50 +2176,19 @@ export default function Studio() {
                         bg={airing.bg}
                         showLabel={false}
                       />
-                      {selectedLayer && (
-                        <button
-                          type="button"
-                          aria-label={`Resize ${source.name}`}
-                          title="Drag to resize"
-                          onPointerDown={(event) => beginProgramSourceDrag(event, source, 'resize')}
-                          className="absolute -bottom-1.5 -right-1.5 z-30 h-3.5 w-3.5 cursor-nwse-resize rounded-sm border border-white bg-sky-500 shadow"
-                        />
-                      )}
                     </div>
                   );
                 })}
               </div>
-              <p className="mx-auto mt-1 max-w-[380px] text-[10px] text-warm-white/45">
-                Drag a camera, image, video, screen, or text layer to position it. Drag its blue corner to resize.
-              </p>
-              {selectedProgramOverlay && selectedProgramLayout && (
-                <div data-program-layout-controls className="mx-auto mt-2 flex max-w-[450px] items-end gap-2 rounded-lg border border-white/10 bg-black/20 p-2">
-                  <div className="mr-auto min-w-0 pb-1">
-                    <p className="text-[10px] font-semibold text-warm-white">Adjust {selectedProgramOverlay.name}</p>
-                    <p className="text-[9px] text-warm-white/45">Position and size (%)</p>
-                  </div>
-                  {([
-                    ['X', 'x', 100 - selectedProgramLayout.width],
-                    ['Y', 'y', 100 - selectedProgramLayout.height],
-                    ['W', 'width', 100 - selectedProgramLayout.x],
-                    ['H', 'height', 100 - selectedProgramLayout.y],
-                  ] as const).map(([label, key, max]) => (
-                    <label key={key} className="flex w-12 shrink-0 flex-col gap-1 text-[9px] text-warm-white/55">
-                      {label}
-                      <input type="number" min={key === 'width' || key === 'height' ? 8 : 0} max={max} value={selectedProgramLayout[key]} onChange={(event) => updateProgramLayout(selectedProgramOverlay.id, { [key]: Number(event.currentTarget.value) })} className="w-full rounded border border-white/10 bg-slate-950 px-1 py-1 text-center text-[10px] text-white outline-none focus:border-sky-400" />
-                    </label>
-                  ))}
-                  {selectedProgramOverlay.kind === 'camera' && <button onClick={() => showCameraOnly()} title="Fill the output with this camera" className="shrink-0 rounded border border-sky-400/40 px-2 py-1.5 text-[9px] text-sky-200 hover:bg-sky-400/10">Fill</button>}
-                </div>
-              )}
             </section>
+            </div>
 
-            <section>
+            <section className="min-w-0 shrink-0">
               <div className="mb-1 flex items-center justify-between">
                 <h3 className="text-[11px] font-semibold text-warm-white/75">Camera sources</h3>
                 <span className="text-[10px] text-warm-white/45">{cameraSources.length}/3</span>
               </div>
-              <div className="mx-auto w-full max-w-[450px]">
+              <div className="mx-auto w-full max-w-full">
                 {cameraSources.length ? (
                   <div className="grid grid-cols-3 gap-2">
                     {cameraSources.map((source) => (
@@ -1786,63 +2205,59 @@ export default function Studio() {
 
           </div>
 
-          <div className="mb-1.5 mt-3 flex shrink-0 items-baseline justify-between gap-2">
-            <h3 className="truncate text-sm font-bold text-warm-white">Slides: {scene.name}</h3>
-            <span className="shrink-0 text-xs text-warm-white/50">Click a slide to select it</span>
-          </div>
+        </Panel>
 
-          <div className="grid min-h-0 flex-1 grid-cols-3 content-start gap-2 overflow-y-auto">
-            {scene.slides.length === 0 && <p className="col-span-full rounded-lg border border-dashed border-white/10 p-4 text-center text-xs text-warm-white/45">Add a presentation to create a scene.</p>}
+        <Panel title="Slides" className="min-w-0">
+          <div className="mb-2 flex shrink-0 items-baseline justify-between gap-2">
+            <h3 className="truncate text-xs font-semibold text-warm-white/80">{scene.name}</h3>
+            <span className="shrink-0 text-[10px] text-warm-white/50">{scene.slides.length}</span>
+          </div>
+          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,.35) transparent' }}>
+            {scene.slides.length === 0 && <p className="rounded-lg border border-dashed border-white/10 p-3 text-center text-xs text-warm-white/45">Add a presentation to create a scene.</p>}
             {scene.slides.map((sl, i) => {
               const ref: Ref = { sceneId, slideIdx: i };
+              const cardKey = `${sceneId}:${i}`;
               const isSelected = same(selected, ref);
               const inPreview = same(preview, ref);
               const isOnAir = same(onAir, ref);
-              return (
-                <div key={i} style={{ containerType: 'inline-size' }}>
-                  <button
-                    onClick={() => selectSlide(i)}
-                    onDoubleClick={() => sendToPreview(ref)}
-                    title="Click to select, double-click to send to Preview"
-                    aria-pressed={isSelected}
-                    className={`relative block aspect-video w-full overflow-hidden rounded-lg border-2 transition ${
-                      isSelected
-                        ? 'border-brand ring-2 ring-brand/40'
-                        : 'border-white/10 hover:border-white/40'
-                    }`}
-                  >
-                    <SlideView bg={scene.bg} slide={sl} scale={8} minRem={0.5} />
-                    <span className="absolute bottom-1 left-1 rounded bg-black/65 px-1 text-[10px] font-semibold text-white">
-                      {i + 1}
-                    </span>
-                    <div className="absolute right-1 top-1 flex flex-col items-end gap-0.5">
-                      {isOnAir && (
-                        <span className="rounded bg-red-600 px-1 text-[9px] font-bold text-white">
-                          On air
-                        </span>
-                      )}
-                      {inPreview && (
-                        <span className="rounded bg-sky-600 px-1 text-[9px] font-bold text-white">
-                          Preview
-                        </span>
-                      )}
-                    </div>
-                  </button>
-                </div>
-              );
+              return <div key={i} ref={(element) => { if (element) slideCardRefs.current.set(cardKey, element); else slideCardRefs.current.delete(cardKey); }} className="min-w-0 shrink-0">
+                <button
+                  onClick={() => selectSlide(i)}
+                  onDoubleClick={() => sendToPreview(ref)}
+                  title="Click to select, double-click to send to Preview"
+                  aria-pressed={isSelected}
+                  className={`relative block aspect-video w-full overflow-hidden rounded-lg border-2 transition ${isSelected ? 'border-brand ring-2 ring-brand/40' : 'border-white/10 hover:border-white/40'}`}
+                >
+                  <SlideView bg={scene.bg} slide={sl} scale={8} minRem={0.5} />
+                  <span className="absolute bottom-1 left-1 rounded bg-black/65 px-1 text-[10px] font-semibold text-white">{i + 1}</span>
+                  <div className="absolute right-1 top-1 flex flex-col items-end gap-0.5">
+                    {isOnAir && <span className="rounded bg-red-600 px-1 text-[9px] font-bold text-white">On air</span>}
+                    {inPreview && <span className="rounded bg-sky-600 px-1 text-[9px] font-bold text-white">Preview</span>}
+                  </div>
+                </button>
+                <p className="mt-1 truncate px-0.5 text-[11px] font-medium text-warm-white/80" title={sl.title?.trim() || `Slide ${i + 1}`}>{sl.title?.trim() || `Slide ${i + 1}`}</p>
+              </div>;
             })}
           </div>
         </Panel>
 
-        {/* Right: Scenes (list scrolls inside its own panel if it ever gets long) */}
+        {/* Sidebar keeps Scenes and Music together while the active list uses the full height. */}
         <Panel
-          title="Scenes"
+          title={sidebarPanel === 'scenes' ? 'Scenes' : 'Music'}
+          className="min-w-0"
           action={
-            <button aria-label="Add scene" onClick={beginAddScene} className="text-warm-white/70 hover:text-brand">
-              <Plus size={18} />
-            </button>
+            sidebarPanel === 'scenes' ? (
+              <button aria-label="Add scene" onClick={beginAddScene} className="text-warm-white/70 hover:text-brand"><Plus size={18} /></button>
+            ) : (
+              <button type="button" onClick={() => musicFileRef.current?.click()} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold text-warm-white/75 hover:bg-white/5 hover:text-white"><Plus size={14} /> Upload</button>
+            )
           }
         >
+          <div role="tablist" aria-label="Studio sidebar panels" className="mb-2 flex shrink-0 gap-1 rounded-lg bg-black/20 p-1">
+            <button type="button" role="tab" aria-selected={sidebarPanel === 'scenes'} onClick={() => setSidebarPanel('scenes')} className={`flex-1 rounded-md px-2 py-1 text-xs font-semibold ${sidebarPanel === 'scenes' ? 'bg-white/10 text-white' : 'text-warm-white/55 hover:text-white'}`}>Scenes</button>
+            <button type="button" role="tab" aria-selected={sidebarPanel === 'music'} onClick={() => setSidebarPanel('music')} className={`flex-1 rounded-md px-2 py-1 text-xs font-semibold ${sidebarPanel === 'music' ? 'bg-white/10 text-white' : 'text-warm-white/55 hover:text-white'}`}>Music</button>
+          </div>
+          {sidebarPanel === 'scenes' ? <>
           <ul className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto">
             {scenes.length === 0 && <li className="rounded-lg border border-dashed border-white/10 p-3 text-xs leading-relaxed text-warm-white/45">No scenes yet. Add one to bring a saved presentation into Studio.</li>}
             {scenes.map((s) => (
@@ -1878,6 +2293,22 @@ export default function Studio() {
             ))}
           </ul>
           <button onClick={beginAddScene} className="mt-2 flex w-full shrink-0 items-center justify-center gap-2 rounded-lg border border-white/10 py-1.5 text-sm text-warm-white hover:bg-white/5"><Plus size={16} />Add Scene</button>
+          </> : <>
+          <input ref={musicFileRef} type="file" accept="audio/*" className="hidden" onChange={(event) => { void importMusicFile(event.currentTarget.files?.[0]); event.currentTarget.value = ''; }} />
+          {musicAssets.length ? (
+            <ul className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,.35) transparent' }}>
+              {musicAssets.map((asset) => {
+                const added = sceneSources.some((source) => source.kind === 'music' && source.mediaAssetId === asset.id);
+                return <li key={asset.id} className="flex min-w-0 items-center gap-1 rounded-lg px-1 py-1 hover:bg-white/5">
+                  <button type="button" onClick={() => previewMusic(asset)} title={previewingMusicId === asset.id ? 'Stop preview' : `Preview ${asset.name}`} aria-label={previewingMusicId === asset.id ? `Stop preview of ${asset.name}` : `Preview ${asset.name}`} className="shrink-0 rounded p-1.5 text-brand hover:bg-white/10">{previewingMusicId === asset.id ? <Pause size={13} /> : <Play size={13} />}</button>
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-warm-white/75" title={asset.name}>{asset.name}</span>
+                  <button type="button" disabled={added} onClick={() => addMusicAssetAsSource(asset)} className="shrink-0 rounded px-2 py-1 text-[10px] font-semibold text-brand hover:bg-brand/10 disabled:text-warm-white/35">{added ? 'Added' : 'Add'}</button>
+                  <button type="button" aria-label={`Delete ${asset.name}`} title="Delete track" onClick={() => { void deleteMusicAsset(asset); }} className="shrink-0 rounded p-1.5 text-warm-white/40 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={13} /></button>
+                </li>;
+              })}
+            </ul>
+          ) : <button type="button" onClick={() => musicFileRef.current?.click()} className="flex min-h-20 flex-1 items-center justify-center rounded-lg border border-dashed border-white/10 px-3 text-center text-xs text-warm-white/45 hover:border-brand/40 hover:text-warm-white/70">Upload a track to build your music library.</button>}
+          </>}
         </Panel>
       </div>
 
@@ -1899,7 +2330,7 @@ export default function Studio() {
                 {(['Video', 'Audio', 'Overlay'] as const).map((group) => (
                   <div key={group} className="mb-1 last:mb-0">
                     <p className="px-2 pb-1 pt-2 text-[10px] font-bold uppercase tracking-wider text-warm-white/40">{group}</p>
-                    {SOURCE_OPTIONS.filter((option) => option.group === group).map(({ kind, name, icon: Icon }) => {
+                    {SOURCE_OPTIONS.filter((option) => option.group === group && option.kind !== 'music').map(({ kind, name, icon: Icon }) => {
                       const disabled = kind === 'camera' && cameraLimitReached;
                       return (
                         <button key={kind} disabled={disabled} onClick={() => { void addSource(kind); }} className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-left text-xs text-warm-white/80 hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40">
@@ -1917,6 +2348,7 @@ export default function Studio() {
                 {sceneSources.map((source) => {
                   const { id, name, kind, visible } = source;
                   const Icon = SOURCE_OPTIONS.find((option) => option.kind === kind)?.icon ?? Type;
+                  const musicAsset = kind === 'music' ? musicAssets.find((asset) => asset.id === source.mediaAssetId) : undefined;
                   return (
                     <li
                       key={id}
@@ -1926,9 +2358,27 @@ export default function Studio() {
                       onDrop={(event) => { event.preventDefault(); reorderSources(Number(event.dataTransfer.getData('text/source-id')), id); }}
                       className="group flex items-center gap-2 rounded-lg border border-white/5 bg-white/[0.02] px-2 py-1.5 text-sm text-warm-white"
                     >
+                      {kind === 'music' && musicAsset && <audio
+                        ref={(element) => { if (element) musicElements.current.set(id, element); else musicElements.current.delete(id); }}
+                        src={musicAsset.url}
+                        loop={source.loop ?? false}
+                        onPlay={(event) => { setMusicPlaying((current) => ({ ...current, [id]: true })); attachMusicStream(id, event.currentTarget); }}
+                        onPause={() => setMusicPlaying((current) => ({ ...current, [id]: false }))}
+                        onEnded={() => setMusicPlaying((current) => ({ ...current, [id]: false }))}
+                        className="hidden"
+                      />}
                       <GripVertical size={14} className="shrink-0 cursor-grab text-warm-white/35" />
                       <Icon size={15} className="shrink-0 text-warm-white/70" />
                       <span className="min-w-0 flex-1 truncate">{name}</span>
+                      {kind === 'music' && <>
+                        <button type="button" aria-label={musicPlaying[id] ? `Pause ${name}` : `Play ${name}`} title={musicPlaying[id] ? 'Pause track' : 'Play track'} onClick={() => toggleMusicPlayback(id)} className="text-warm-white/70 hover:text-brand">{musicPlaying[id] ? <Pause size={14} /> : <Play size={14} />}</button>
+                        <button type="button" aria-pressed={source.loop ?? false} title={source.loop ? 'Loop enabled' : 'Play once'} onClick={() => {
+                          const loop = !source.loop;
+                          const audio = musicElements.current.get(id);
+                          if (audio) audio.loop = loop;
+                          setSources((current) => current.map((item) => item.id === id ? { ...item, loop } : item));
+                        }} className={`rounded px-1 text-[9px] ${source.loop ? 'text-brand' : 'text-warm-white/40 hover:text-warm-white'}`}>{source.loop ? 'LOOP' : 'ONCE'}</button>
+                      </>}
                       <button aria-label={visible ? `Hide ${name}` : `Show ${name}`} title={visible ? 'Hide source' : 'Show source'} onClick={() => toggleSource(id)} className="text-warm-white/60 hover:text-brand">
                         {visible ? <Eye size={15} /> : <EyeOff size={15} />}
                       </button>
@@ -2077,7 +2527,7 @@ export default function Studio() {
               {live ? 'End Stream' : 'Go Live'}
             </button>
             <button
-              onClick={() => setRecording((v) => !v)}
+              onClick={() => recording ? stopRecordingSession() : void startRecordingSession()}
               className="flex items-center justify-center gap-2 rounded-lg border border-white/20 py-2.5 text-sm font-medium text-warm-white hover:bg-white/5"
             >
               <Circle size={16} className={recording ? 'fill-red-500 text-red-500' : ''} />
@@ -2387,13 +2837,15 @@ export default function Studio() {
 
 /** Full-screen, control-free slideshow output rendered in a separate monitor window. */
 export function StudioDisplayOutput() {
-  const [scenes, setScenes] = useState<Scene[]>(loadSlideshowScenes);
+  const [outputMode, setOutputMode] = useState<'stream' | 'slideshow'>(() => localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? 'stream' : 'slideshow');
+  const [scenes, setScenes] = useState<Scene[]>(() => outputMode === 'stream' ? loadStudioScenes() : loadSlideshowScenes());
   const [currentRef, setCurrentRef] = useState<Ref>(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(STUDIO_OUTPUT_REF_KEY) ?? 'null') as Ref | null;
+      const key = localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? STUDIO_STREAM_OUTPUT_REF_KEY : STUDIO_OUTPUT_REF_KEY;
+      const saved = JSON.parse(localStorage.getItem(key) ?? 'null') as Ref | null;
       if (saved && Number.isFinite(saved.sceneId) && Number.isFinite(saved.slideIdx)) return saved;
     } catch { /* Start from the first available slide. */ }
-    const firstScene = loadSlideshowScenes()[0];
+    const firstScene = (localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? loadStudioScenes() : loadSlideshowScenes())[0];
     return { sceneId: firstScene?.id ?? 0, slideIdx: 0 };
   });
   const [assets, setAssets] = useState<Record<string, { type: 'image' | 'video'; url: string }>>({});
@@ -2412,8 +2864,20 @@ export function StudioDisplayOutput() {
       setAssets(next);
     }).catch(() => setAssets({}));
     const onStorage = (event: StorageEvent) => {
-      if (event.key === STUDIO_SLIDESHOW_SCENES_KEY) setScenes(loadSlideshowScenes());
-      if (event.key === STUDIO_OUTPUT_REF_KEY && event.newValue) {
+      if (event.key === STUDIO_DISPLAY_MODE_KEY) {
+        const mode = event.newValue === 'stream' ? 'stream' : 'slideshow';
+        setOutputMode(mode);
+        setScenes(mode === 'stream' ? loadStudioScenes() : loadSlideshowScenes());
+        const key = mode === 'stream' ? STUDIO_STREAM_OUTPUT_REF_KEY : STUDIO_OUTPUT_REF_KEY;
+        try {
+          const next = JSON.parse(localStorage.getItem(key) ?? 'null') as Ref | null;
+          if (next && Number.isFinite(next.sceneId) && Number.isFinite(next.slideIdx)) setCurrentRef(next);
+        } catch { /* Keep the current output while a new mode initializes. */ }
+      }
+      if (event.key === STUDIO_SLIDESHOW_SCENES_KEY && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) !== 'stream') setScenes(loadSlideshowScenes());
+      if (event.key === STUDIO_SCENES_KEY && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream') setScenes(loadStudioScenes());
+      const activeRefKey = localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? STUDIO_STREAM_OUTPUT_REF_KEY : STUDIO_OUTPUT_REF_KEY;
+      if (event.key === activeRefKey && event.newValue) {
         try {
           const next = JSON.parse(event.newValue) as Ref;
           if (Number.isFinite(next.sceneId) && Number.isFinite(next.slideIdx)) setCurrentRef(next);
@@ -2430,11 +2894,14 @@ export function StudioDisplayOutput() {
         : ['ArrowLeft', 'ArrowUp', 'PageUp'].includes(event.key) ? -1 : 0;
       if (!direction) return;
       event.preventDefault();
+      const mode = localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? 'stream' : 'slideshow';
+      const outputKey = mode === 'stream' ? STUDIO_STREAM_OUTPUT_REF_KEY : STUDIO_OUTPUT_REF_KEY;
       setCurrentRef((current) => {
-        const scene = loadSlideshowScenes().find((item) => item.id === current.sceneId);
+        const scene = (mode === 'stream' ? loadStudioScenes() : loadSlideshowScenes()).find((item) => item.id === current.sceneId);
         const count = scene?.slides.length ?? 0;
-        const next = { ...current, slideIdx: Math.max(0, Math.min(count - 1, current.slideIdx + direction)) };
-        try { localStorage.setItem(STUDIO_OUTPUT_REF_KEY, JSON.stringify(next)); } catch { /* Keep the current output visible. */ }
+        if (!count) return current;
+        const next = { ...current, slideIdx: (current.slideIdx + direction + count) % count };
+        try { localStorage.setItem(outputKey, JSON.stringify(next)); } catch { /* Keep the current output visible. */ }
         return next;
       });
     };

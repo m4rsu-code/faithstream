@@ -34,6 +34,7 @@ import {
   Trash2,
   Triangle,
   Type,
+  Upload,
   Unlock,
   Underline,
   Video,
@@ -697,6 +698,7 @@ export default function Presentation() {
         ? { ...project, name: projectName.trim() || 'Untitled presentation', slides: savedSlides, updatedAt: Date.now() }
         : project);
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+      window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
       return next;
     });
   }, [slides, activeProjectId, projectName]);
@@ -720,6 +722,7 @@ export default function Presentation() {
   const stageRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
+  const slideImportInput = useRef<HTMLInputElement>(null);
   const pictureInput = useRef<HTMLInputElement>(null);
   const videoInput = useRef<HTMLInputElement>(null);
 
@@ -1125,6 +1128,78 @@ export default function Presentation() {
     setDock('Templates');
   };
 
+  const importSlideImages = async (files: FileList | null) => {
+    const selectedFiles = Array.from(files ?? []);
+    const imageFiles = selectedFiles.filter((file) => file.type.startsWith('image/'));
+    const powerpoint = selectedFiles.find((file) => file.name.toLowerCase().endsWith('.pptx'));
+    if (!imageFiles.length && !powerpoint) return;
+    try {
+      const importedSlides: SlideT[] = [];
+      const importedAssets: MediaAsset[] = [];
+      for (const file of imageFiles) {
+        const stored = await saveMediaAsset(file);
+        const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
+        importedAssets.push(asset);
+        const title = file.name.replace(/\.[^.]+$/, '').trim() || `Slide ${importedSlides.length + 1}`;
+        importedSlides.push({
+          id: nextId++,
+          title,
+          bg: BGS[4],
+          dim: 0,
+          bgImage: asset.url,
+          bgAssetId: asset.id,
+          box: null,
+          extraBoxes: [],
+          pictures: [],
+          shapes: [],
+        });
+      }
+      if (powerpoint) {
+        const rendered = await window.faithstreamWindow?.renderPowerPointSlides(powerpoint);
+        if (!rendered?.ok || !rendered.slides?.length) throw new Error(rendered?.message || 'PowerPoint rendering is unavailable.');
+        for (const renderedSlide of rendered.slides) {
+          const binary = atob(renderedSlide.data);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+          const png = new File([bytes], `${renderedSlide.name}.png`, { type: 'image/png' });
+          const stored = await saveMediaAsset(png);
+          const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
+          importedAssets.push(asset);
+          importedSlides.push({
+            id: nextId++,
+            title: renderedSlide.name,
+            bg: BGS[4],
+            dim: 0,
+            bgImage: asset.url,
+            bgAssetId: asset.id,
+            box: null,
+            extraBoxes: [],
+            pictures: [],
+            shapes: [],
+          });
+        }
+      }
+      if (!importedSlides.length) throw new Error('No slides found');
+      setMediaAssets((current) => [...importedAssets, ...current]);
+      const sourceName = powerpoint?.name ?? imageFiles[0]?.name ?? 'Imported slides';
+      const name = sourceName.replace(/\.[^.]+$/, '') || 'Imported slides';
+      const project: PresentationProject = {
+        id: crypto.randomUUID(),
+        name,
+        slides: serializable(importedSlides),
+        updatedAt: Date.now(),
+      };
+      const next = [project, ...projects];
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+      setProjects(next);
+      flash(powerpoint
+        ? `${importedSlides.length} PowerPoint slide${importedSlides.length === 1 ? '' : 's'} imported with their original design.`
+        : `${importedSlides.length} slide${importedSlides.length === 1 ? '' : 's'} imported`);
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Could not import these slides.');
+    }
+  };
+
   const toggleProjectLock = (id: string) => {
     const next = projects.map((project) => project.id === id
       ? { ...project, locked: !project.locked, updatedAt: Date.now() }
@@ -1144,6 +1219,7 @@ export default function Presentation() {
         const next = projects.filter((item) => item.id !== id);
         setProjects(next);
         localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+        window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
         setProjectMenuFor(null);
         setDeleteConfirmation(null);
       },
@@ -1231,10 +1307,26 @@ export default function Presentation() {
                 </div>
               </div>
             </div>
-            <button onClick={createProject} className="flex items-center gap-2 rounded-xl bg-brand px-4 py-3 text-sm font-bold text-navy shadow-lg shadow-black/20 transition hover:brightness-110">
-              <Plus size={18} /> Create Presentation
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={() => slideImportInput.current?.click()} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-3 text-sm font-semibold text-warm-white transition hover:bg-white/5">
+                <Upload size={17} /> Import Slides
+              </button>
+              <button onClick={createProject} className="flex items-center gap-2 rounded-xl bg-brand px-4 py-3 text-sm font-bold text-navy shadow-lg shadow-black/20 transition hover:brightness-110">
+                <Plus size={18} /> Create Presentation
+              </button>
+            </div>
           </div>
+          <input
+            ref={slideImportInput}
+            type="file"
+          accept="image/png,image/jpeg,image/webp,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            multiple
+            hidden
+            onChange={(event) => {
+              void importSlideImages(event.target.files);
+              event.target.value = '';
+            }}
+          />
 
           {projects.length ? (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">

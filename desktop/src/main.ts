@@ -1,5 +1,7 @@
-import { app, BrowserWindow, ipcMain, Menu, screen } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, screen } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -24,8 +26,75 @@ type StreamSession = {
   failed?: boolean;
 };
 
+type RecordingSession = {
+  child: ChildProcessWithoutNullStreams;
+  window: BrowserWindow;
+  filePath: string;
+  active: boolean;
+  failed?: boolean;
+};
+
 let streamSession: StreamSession | null = null;
+let recordingSession: RecordingSession | null = null;
 const studioDisplayWindows = new Map<number, BrowserWindow>();
+
+const exportPowerPointSlides = async (sourcePath: string) => {
+  if (process.platform !== 'win32' || path.extname(sourcePath).toLowerCase() !== '.pptx') {
+    throw new Error('PowerPoint slide rendering is only available for .pptx files on Windows.');
+  }
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'faithstream-pptx-'));
+  const sourceBase64 = Buffer.from(sourcePath, 'utf8').toString('base64');
+  const outputBase64 = Buffer.from(tempDir, 'utf8').toString('base64');
+  const script = `
+$ErrorActionPreference = 'Stop'
+$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${sourceBase64}'))
+$outDir = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${outputBase64}'))
+$app = $null
+$presentation = $null
+try {
+  $app = New-Object -ComObject PowerPoint.Application
+  $presentation = $app.Presentations.Open($source, $true, $false, $false)
+  $slides = @()
+  for ($i = 1; $i -le $presentation.Slides.Count; $i++) {
+    $file = Join-Path $outDir ('slide-' + $i.ToString('D4') + '.png')
+    $presentation.Slides.Item($i).Export($file, 'PNG', 1920, 1080)
+    $slides += [PSCustomObject]@{ name = ('Slide ' + $i); data = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file)) }
+  }
+  ConvertTo-Json -InputObject @($slides) -Compress -Depth 4
+} finally {
+  if ($presentation -ne $null) { $presentation.Close() }
+  if ($app -ne $null) { $app.Quit() }
+}
+`;
+  const encodedScript = Buffer.from(script, 'utf16le').toString('base64');
+  try {
+    const json = await new Promise<string>((resolve, reject) => {
+      const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedScript], { windowsHide: true });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8').on('data', (part: string) => { stdout += part; });
+      child.stderr.setEncoding('utf8').on('data', (part: string) => { stderr += part; });
+      const timer = setTimeout(() => { child.kill(); reject(new Error('PowerPoint took too long to open this file.')); }, 180_000);
+      child.on('error', (error) => { clearTimeout(timer); reject(error); });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        if (code !== 0) reject(new Error(stderr.trim() || 'PowerPoint could not render this file.'));
+        else resolve(stdout.trim());
+      });
+    });
+    const slides = JSON.parse(json) as { name: string; data: string }[];
+    if (!Array.isArray(slides) || slides.length === 0) throw new Error('No slides were found in this PowerPoint file.');
+    return slides;
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+};
+
+const ipcAudioBuffer = (payload: unknown) => {
+  if (payload instanceof ArrayBuffer) return Buffer.from(payload);
+  if (payload instanceof Uint8Array) return Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength);
+  return null;
+};
 
 const sendStreamStatus = (window: BrowserWindow, status: string, message?: string) => {
   if (!window.isDestroyed()) window.webContents.send('stream:status', { status, message });
@@ -43,6 +112,90 @@ const stopStream = () => {
   const killTimer = setTimeout(() => session.child.kill(), 5000);
   session.child.once('close', () => clearTimeout(killTimer));
   if (!session.failed) sendStreamStatus(session.window, 'stopping');
+  return true;
+};
+
+const startRecording = async (window: BrowserWindow, capture: StreamStartOptions['capture']) => {
+  if (recordingSession) return { ok: false, message: 'A recording is already running.' };
+  if (!ffmpegPath) return { ok: false, message: 'The video encoder is unavailable on this computer.' };
+  if (![capture.x, capture.y, capture.width, capture.height].every(Number.isFinite) || capture.width < 100 || capture.height < 50) {
+    return { ok: false, message: 'The on-air preview is not ready to record.' };
+  }
+  const chosen = await dialog.showSaveDialog(window, {
+    title: 'Save FaithStream recording',
+    defaultPath: path.join(app.getPath('videos'), `FaithStream-${new Date().toISOString().replace(/[:.]/g, '-')}.mp4`),
+    filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
+  });
+  if (chosen.canceled || !chosen.filePath) return { ok: false, canceled: true };
+
+  const filePath = chosen.filePath.toLowerCase().endsWith('.mp4') ? chosen.filePath : `${chosen.filePath}.mp4`;
+  const ffmpegArgs = [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'image2pipe', '-framerate', '30', '-vcodec', 'png', '-i', 'pipe:0',
+    '-f', 'webm', '-i', 'pipe:3',
+    '-map', '0:v:0', '-map', '1:a:0',
+    '-vf', 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p',
+    '-r', '30', '-c:v', 'libx264', '-preset', 'medium', '-crf', '16', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-movflags', '+faststart', filePath,
+  ];
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    child = spawn(ffmpegPath, ffmpegArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] }) as ChildProcessWithoutNullStreams;
+  } catch {
+    return { ok: false, message: 'Could not start the video encoder.' };
+  }
+
+  const session: RecordingSession = { child, window, filePath, active: true };
+  let encoderError = '';
+  recordingSession = session;
+  child.once('error', () => {
+    session.failed = true;
+    session.active = false;
+    if (recordingSession === session) recordingSession = null;
+    if (!window.isDestroyed()) window.webContents.send('recording:status', { status: 'error', message: 'The video encoder could not start.' });
+  });
+  child.once('close', (code) => {
+    session.active = false;
+    if (recordingSession === session) recordingSession = null;
+    if (window.isDestroyed()) return;
+    const detail = encoderError.trim().slice(-700);
+    window.webContents.send('recording:status', !session.failed && code === 0
+      ? { status: 'saved', filePath }
+      : { status: 'error', message: detail ? `Recording could not be finalized: ${detail}` : 'The recording encoder stopped before it could finalize the MP4.' });
+  });
+  child.stderr.on('data', (chunk: Buffer) => {
+    const text = chunk.toString('utf8');
+    encoderError = (encoderError + text).slice(-2000);
+    if (/error|failed|invalid/i.test(text)) session.failed = true;
+  });
+
+  void (async () => {
+    const interval = 1000 / 30;
+    while (session.active && recordingSession === session && !window.isDestroyed()) {
+      const startedAt = Date.now();
+      try {
+        const frame = await window.webContents.capturePage(capture);
+        if (!session.active || child.stdin.destroyed) break;
+        if (!child.stdin.write(frame.toPNG())) await new Promise<void>((resolve) => child.stdin.once('drain', resolve));
+      } catch {
+        session.failed = true;
+        session.active = false;
+        child.kill();
+        break;
+      }
+      await delay(Math.max(0, interval - (Date.now() - startedAt)));
+    }
+  })();
+  return { ok: true, filePath };
+};
+
+const stopRecording = (window: BrowserWindow) => {
+  const session = recordingSession;
+  if (!session || session.window !== window) return false;
+  session.active = false;
+  session.child.stdin.end();
+  const audioPipe = session.child.stdio[3];
+  if (audioPipe instanceof Writable) audioPipe.end();
   return true;
 };
 
@@ -145,10 +298,10 @@ if (started) {
 
 const createWindow = () => {
   const mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
-    minWidth: 1100,
-    minHeight: 700,
+    width: 1024,
+    height: 700,
+    minWidth: 920,
+    minHeight: 620,
     autoHideMenuBar: true,
     title: 'FaithStream',
 
@@ -170,8 +323,14 @@ const createWindow = () => {
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.key !== 'F11' || input.alt || input.control || input.meta) return;
+    event.preventDefault();
+    mainWindow.setFullScreen(!mainWindow.isFullScreen());
+  });
   mainWindow.on('closed', () => {
     if (streamSession?.window === mainWindow) stopStream();
+    if (recordingSession?.window === mainWindow) stopRecording(mainWindow);
   });
 
   // Load the Vite development server or the packaged renderer.
@@ -191,6 +350,17 @@ const createWindow = () => {
 };
 
 app.whenReady().then(() => {
+  ipcMain.handle('presentation:render-pptx', async (event, sourcePath: unknown) => {
+    if (!BrowserWindow.fromWebContents(event.sender) || typeof sourcePath !== 'string' || sourcePath.length > 32_768) {
+      return { ok: false, message: 'Choose a PowerPoint file to import.' };
+    }
+    try {
+      const slides = await exportPowerPointSlides(sourcePath);
+      return { ok: true, slides };
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : 'PowerPoint could not render this file.' };
+    }
+  });
   ipcMain.handle('stream:start', (event, payload: unknown) => {
     if (!payload || typeof payload !== 'object') return { ok: false, message: 'Stream settings are incomplete.' };
     const window = BrowserWindow.fromWebContents(event.sender);
@@ -199,13 +369,33 @@ app.whenReady().then(() => {
   });
   ipcMain.on('stream:audio', (event, payload: unknown) => {
     const session = streamSession;
-    if (!session || event.sender !== session.window.webContents || !(payload instanceof ArrayBuffer) || payload.byteLength > 1024 * 1024) return;
+    const chunk = ipcAudioBuffer(payload);
+    if (!session || event.sender !== session.window.webContents || !chunk || chunk.byteLength > 1024 * 1024) return;
     const audioPipe = session.child.stdio[3];
-    if (audioPipe instanceof Writable && !audioPipe.destroyed) audioPipe.write(Buffer.from(payload));
+    if (audioPipe instanceof Writable && !audioPipe.destroyed) audioPipe.write(chunk);
   });
   ipcMain.handle('stream:stop', (event) => {
     if (streamSession?.window.webContents !== event.sender) return false;
     return stopStream();
+  });
+  ipcMain.handle('recording:start', async (event, payload: unknown) => {
+    if (!payload || typeof payload !== 'object') return { ok: false, message: 'Recording settings are incomplete.' };
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window) return { ok: false, message: 'Studio window is unavailable.' };
+    const capture = (payload as { capture?: StreamStartOptions['capture'] }).capture;
+    if (!capture) return { ok: false, message: 'The On-air output is not ready to record.' };
+    return startRecording(window, capture);
+  });
+  ipcMain.on('recording:audio', (event, payload: unknown) => {
+    const session = recordingSession;
+    const chunk = ipcAudioBuffer(payload);
+    if (!session || event.sender !== session.window.webContents || !chunk || chunk.byteLength > 1024 * 1024) return;
+    const audioPipe = session.child.stdio[3];
+    if (audioPipe instanceof Writable && !audioPipe.destroyed) audioPipe.write(chunk);
+  });
+  ipcMain.handle('recording:stop', (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    return window ? stopRecording(window) : false;
   });
 
   ipcMain.handle('studio:get-displays', () => {
@@ -270,6 +460,44 @@ app.whenReady().then(() => {
     return true;
   });
   ipcMain.handle('window:close', (event) => BrowserWindow.fromWebContents(event.sender)?.close());
+  ipcMain.handle('window:set-authenticated-mode', (event, authenticated: unknown) => {
+    if (typeof authenticated !== 'boolean') return false;
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window) return false;
+    if (authenticated) {
+      window.setMinimumSize(1100, 700);
+      const { workArea } = screen.getDisplayMatching(window.getBounds());
+      window.setBounds(workArea);
+      window.show();
+      window.setFullScreen(false);
+      window.focus();
+    } else {
+      const restoreLoginWindow = () => {
+        if (window.isDestroyed()) return;
+        if (window.isMaximized()) window.unmaximize();
+        window.setMinimumSize(920, 620);
+        window.setSize(1024, 700);
+        window.center();
+      };
+      if (window.isFullScreen()) {
+        let restored = false;
+        let restoreTimer: ReturnType<typeof setTimeout> | undefined;
+        const finishRestore = () => {
+          if (restored) return;
+          restored = true;
+          if (restoreTimer) clearTimeout(restoreTimer);
+          window.removeListener('leave-full-screen', finishRestore);
+          restoreLoginWindow();
+        };
+        window.once('leave-full-screen', finishRestore);
+        restoreTimer = setTimeout(finishRestore, 600);
+        window.setFullScreen(false);
+      } else {
+        restoreLoginWindow();
+      }
+    }
+    return true;
+  });
 
   // Remove the default File, Edit, View, and Window menus.
   Menu.setApplicationMenu(null);
