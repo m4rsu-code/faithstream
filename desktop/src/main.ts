@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, screen } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Writable } from 'node:stream';
@@ -37,6 +37,40 @@ type RecordingSession = {
 let streamSession: StreamSession | null = null;
 let recordingSession: RecordingSession | null = null;
 const studioDisplayWindows = new Map<number, BrowserWindow>();
+
+const optimizeImportedVideo = async (sourcePath: string) => {
+  if (!ffmpegPath) return { ok: false as const, message: 'The video optimizer is unavailable on this computer.' };
+  const sourceInfo = await stat(sourcePath);
+  if (!sourceInfo.isFile()) return { ok: false as const, message: 'Choose a video file to optimize.' };
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'faithstream-media-'));
+  const outputPath = path.join(tempDir, 'optimized.mp4');
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(ffmpegPath!, [
+        '-hide_banner', '-loglevel', 'error', '-y', '-i', sourcePath,
+        '-map', '0:v:0', '-map', '0:a?',
+        '-vf', "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', outputPath,
+      ], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      let errorText = '';
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => { errorText += chunk; });
+      const timer = setTimeout(() => { child.kill(); reject(new Error('Video optimization took too long.')) }, 30 * 60 * 1000);
+      child.once('error', (error) => { clearTimeout(timer); reject(error); });
+      child.once('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(errorText.trim() || 'Could not optimize this video.'));
+      });
+    });
+    const outputInfo = await stat(outputPath);
+    if (outputInfo.size >= sourceInfo.size) return { ok: true as const, optimized: false, originalBytes: sourceInfo.size, optimizedBytes: sourceInfo.size };
+    const data = await readFile(outputPath);
+    return { ok: true as const, optimized: true, originalBytes: sourceInfo.size, optimizedBytes: outputInfo.size, data: Uint8Array.from(data) };
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+};
 
 const exportPowerPointSlides = async (sourcePath: string) => {
   if (process.platform !== 'win32' || path.extname(sourcePath).toLowerCase() !== '.pptx') {
@@ -359,6 +393,16 @@ app.whenReady().then(() => {
       return { ok: true, slides };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : 'PowerPoint could not render this file.' };
+    }
+  });
+  ipcMain.handle('media:optimize-video', async (event, sourcePath: unknown) => {
+    if (!BrowserWindow.fromWebContents(event.sender) || typeof sourcePath !== 'string' || sourcePath.length > 32_768) {
+      return { ok: false, message: 'Choose a video file to optimize.' };
+    }
+    try {
+      return await optimizeImportedVideo(sourcePath);
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : 'Could not optimize this video.' };
     }
   });
   ipcMain.handle('stream:start', (event, payload: unknown) => {

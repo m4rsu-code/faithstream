@@ -7,6 +7,7 @@ import {
   type PointerEvent as RPointerEvent,
   type ReactNode,
 } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   AlignCenter,
   AlignLeft,
@@ -21,6 +22,7 @@ import {
   Image as ImageIcon,
   Italic,
   LayoutTemplate,
+  Loader2,
   FolderOpen,
   Lock,
   MoreHorizontal,
@@ -33,6 +35,7 @@ import {
   Star,
   Trash2,
   Triangle,
+  Timer,
   Type,
   Upload,
   Unlock,
@@ -43,6 +46,8 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import ScripturePickerModal from '../components/modal/ScripturePickerModal';
 import ConfirmationModal from '../components/modal/ConfirmationModal';
+import CountdownDisplay, { type CountdownSettings } from '../components/CountdownDisplay';
+import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimization';
 import GOOGLE_FONT_FAMILIES from '../data/google-font-families.json';
 
 /* ---------- Types & data ---------- */
@@ -70,9 +75,9 @@ type TextBox = {
   h: number;
 };
 
-type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number };
+type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; aspectRatio?: number };
 type ShapeT = { id: number; kind: 'rectangle' | 'circle' | 'triangle' | 'line' | 'star' | 'arrow'; x: number; y: number; w: number; h: number; fill: string };
-type MediaAsset = { id: string; name: string; type: 'image' | 'video'; blob: Blob; createdAt: number; url: string };
+type MediaAsset = { id: string; name: string; type: 'image' | 'video'; category?: 'background' | 'slide'; blob: Blob; originalBlob?: Blob; optimized?: boolean; createdAt: number; url: string };
 type StoredMediaAsset = Omit<MediaAsset, 'url'>;
 
 type SlideT = {
@@ -82,11 +87,13 @@ type SlideT = {
   dim: number; // 0-80, % darkening over the background
   bgImage?: string;
   bgVideo?: string;
+  bgVideoMuted?: boolean;
   bgAssetId?: string;
   box: TextBox | null;
   extraBoxes?: { id: number; box: TextBox }[];
   pictures?: PictureT[];
   shapes?: ShapeT[];
+  countdown?: CountdownSettings;
   locked?: boolean;
 };
 
@@ -243,8 +250,9 @@ const readMediaAssets = async (): Promise<StoredMediaAsset[]> => {
   });
 };
 
-const saveMediaAsset = async (file: File): Promise<StoredMediaAsset> => {
-  const asset: StoredMediaAsset = { id: crypto.randomUUID(), name: file.name, type: file.type.startsWith('video/') ? 'video' : 'image', blob: file, createdAt: Date.now() };
+const saveMediaAsset = async (file: File, category: 'background' | 'slide' = 'background'): Promise<StoredMediaAsset> => {
+  const prepared = await prepareMediaFile(file);
+  const asset: StoredMediaAsset = { id: crypto.randomUUID(), name: file.name, type: file.type.startsWith('video/') ? 'video' : 'image', category, blob: prepared.file, originalBlob: prepared.originalFile, optimized: !!prepared.originalFile, createdAt: Date.now() };
   const db = await openMediaDb();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(MEDIA_STORE, 'readwrite');
@@ -283,6 +291,11 @@ const loadSlides = (): SlideT[] => {
 };
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
+const toLocalDateTimeInput = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+};
 const slideName = (s: SlideT) => s.title;
 
 /* ---------- Slide rendering (used by the canvas, thumbnails, templates and preview) ---------- */
@@ -356,7 +369,7 @@ function TextBoxView({ box }: { box: TextBox }) {
 }
 
 /** Fills its (relative, 16:9) parent. Everything inside scales with the slide's width. */
-function SlideRender({ slide }: { slide: SlideT }) {
+function SlideRender({ slide, onVideoSelect }: { slide: SlideT; onVideoSelect?: (id: number) => void }) {
   return (
     <div
       className={`absolute inset-0 overflow-hidden bg-linear-to-br ${slide.bg}`}
@@ -370,16 +383,19 @@ function SlideRender({ slide }: { slide: SlideT }) {
           src={slide.bgVideo}
           autoPlay
           loop
-          muted
+          muted={slide.bgVideoMuted ?? true}
           playsInline
           className="absolute inset-0 h-full w-full object-cover"
         />
       )}
       <div className="absolute inset-0 bg-black" style={{ opacity: slide.dim / 100 }} />
-      {slide.pictures?.map((picture) => <img key={picture.id} src={picture.src} alt="" draggable={false} className="absolute object-contain" style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%` }} />)}
+      {slide.pictures?.map((picture) => picture.mediaType === 'video'
+        ? <video key={picture.id} data-slide-video-id={picture.id} src={picture.src} controls playsInline muted={picture.muted ?? false} onPointerDown={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} onClick={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} className="pointer-events-auto absolute object-contain" style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%` }} />
+        : <img key={picture.id} src={picture.src} alt="" draggable={false} className="absolute object-contain" style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%` }} />)}
       {slide.shapes?.map((shape) => <div key={shape.id} className="absolute" style={{ left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
       {slide.box && <TextBoxView box={slide.box} />}
       {slide.extraBoxes?.map(({ id, box }) => <TextBoxView key={id} box={box} />)}
+      {slide.countdown && <CountdownDisplay countdown={slide.countdown} />}
     </div>
   );
 }
@@ -634,6 +650,8 @@ const HANDLES: Record<Exclude<Mode, 'move'>, string> = {
 };
 
 export default function Presentation() {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [slides, setSlides] = useState<SlideT[]>(loadSlides);
   const [projects, setProjects] = useState<PresentationProject[]>(loadProjects);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
@@ -646,18 +664,26 @@ export default function Presentation() {
   const [menuFor, setMenuFor] = useState<number | null>(null);
   const [projectMenuFor, setProjectMenuFor] = useState<string | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
+  const [videoPreviewAsset, setVideoPreviewAsset] = useState<MediaAsset | null>(null);
+  const [leaveConfirmationOpen, setLeaveConfirmationOpen] = useState(false);
+  const [pendingNavigation, setPendingNavigation] = useState<string | null>(null);
   const [draggingSlide, setDraggingSlide] = useState<number | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [scripturePickerOpen, setScripturePickerOpen] = useState(false);
   const [status, setStatus] = useState('');
+  const [mediaImporting, setMediaImporting] = useState<string | null>(null);
+  const [slideImportProgress, setSlideImportProgress] = useState<{ message: string; current: number; total: number } | null>(null);
   const [selectedBoxId, setSelectedBoxId] = useState<number | null>(null);
   const [isBoxSelected, setIsBoxSelected] = useState(false);
   const [selectedPictureId, setSelectedPictureId] = useState<number | null>(null);
   const [selectedShapeId, setSelectedShapeId] = useState<number | null>(null);
+  const [selectedCountdown, setSelectedCountdown] = useState(false);
   const [alignmentGuides, setAlignmentGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
   const [fontPickerOpen, setFontPickerOpen] = useState(false);
   const [fontSearch, setFontSearch] = useState('');
   const fontPickerRef = useRef<HTMLDivElement>(null);
+  const originalProjectRef = useRef<PresentationProject | null>(null);
+  const newDraftProjectIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -669,13 +695,21 @@ export default function Presentation() {
       setMediaAssets(assets);
       setSlides((current) => current.map((slide) => {
         const asset = assets.find((item) => item.id === slide.bgAssetId);
-        return asset ? { ...slide, bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : slide;
+        const pictures = slide.pictures?.map((picture) => {
+          const pictureAsset = picture.assetId ? assets.find((item) => item.id === picture.assetId) : undefined;
+          return pictureAsset ? { ...picture, src: pictureAsset.url } : picture;
+        });
+        return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), pictures };
       }));
       setProjects((current) => current.map((project) => ({
         ...project,
         slides: project.slides.map((slide) => {
           const asset = assets.find((item) => item.id === slide.bgAssetId);
-          return asset ? { ...slide, bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : slide;
+          const pictures = slide.pictures?.map((picture) => {
+            const pictureAsset = picture.assetId ? assets.find((item) => item.id === picture.assetId) : undefined;
+            return pictureAsset ? { ...picture, src: pictureAsset.url } : picture;
+          });
+          return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), pictures };
         }),
       })));
     }).catch(() => { if (!cancelled) setStatus('Could not load the media library'); });
@@ -692,7 +726,7 @@ export default function Presentation() {
 
   useEffect(() => {
     if (!activeProjectId) return;
-    const savedSlides = slides.map((slide) => ({ ...slide, bgImage: slide.bgAssetId ? undefined : slide.bgImage, bgVideo: undefined }));
+    const savedSlides = slides.map((slide) => ({ ...slide, bgImage: slide.bgAssetId ? undefined : slide.bgImage, bgVideo: undefined, pictures: slide.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) }));
     setProjects((current) => {
       const next = current.map((project) => project.id === activeProjectId
         ? { ...project, name: projectName.trim() || 'Untitled presentation', slides: savedSlides, updatedAt: Date.now() }
@@ -721,18 +755,25 @@ export default function Presentation() {
 
   const stageRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
-  const imageInput = useRef<HTMLInputElement>(null);
   const slideImportInput = useRef<HTMLInputElement>(null);
-  const pictureInput = useRef<HTMLInputElement>(null);
-  const videoInput = useRef<HTMLInputElement>(null);
+  const contentInput = useRef<HTMLInputElement>(null);
 
   const cur = slides[index];
   const box = selectedBoxId === null
     ? cur.box
     : cur.extraBoxes?.find((item) => item.id === selectedBoxId)?.box ?? null;
   const selectedShape = (cur.shapes ?? []).find((shape) => shape.id === selectedShapeId);
+  const selectedPicture = (cur.pictures ?? []).find((picture) => picture.id === selectedPictureId);
   const activeProject = projects.find((project) => project.id === activeProjectId);
   const projectLocked = !!activeProject?.locked;
+  const legacyImportedSlideAssetIds = new Set(projects.flatMap((project) => {
+    const imageOnlyDeck = project.slides.length > 1 && project.slides.every((slide) => !!slide.bgAssetId && !slide.box && !slide.extraBoxes?.length);
+    return imageOnlyDeck ? project.slides.map((slide) => slide.bgAssetId).filter((id): id is string => !!id) : [];
+  }));
+  const backgroundAssets = mediaAssets.filter((asset) => asset.category !== 'slide'
+    && !legacyImportedSlideAssetIds.has(asset.id)
+    && !/^slide\s+\d+\.png$/i.test(asset.name));
+  const contentAssets = backgroundAssets;
   const allBoxes: { id: number | null; box: TextBox }[] = [
     ...(cur.box ? [{ id: null, box: cur.box }] : []),
     ...(cur.extraBoxes ?? []),
@@ -741,7 +782,7 @@ export default function Presentation() {
     .filter((family) => family.toLocaleLowerCase().includes(fontSearch.trim().toLocaleLowerCase()))
     .slice(0, 60);
 
-  useEffect(() => { setSelectedBoxId(null); setIsBoxSelected(false); setSelectedPictureId(null); setSelectedShapeId(null); setMenuFor(null); }, [index, activeProjectId]);
+  useEffect(() => { setSelectedBoxId(null); setIsBoxSelected(false); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); setMenuFor(null); }, [index, activeProjectId]);
 
   /* ----- editing helpers ----- */
 
@@ -764,7 +805,101 @@ export default function Presentation() {
   }));
 
   const updatePicture = (id: number, patch: Partial<PictureT>) => !cur.locked && setSlides((l) => l.map((s, i) => i === index ? { ...s, pictures: (s.pictures ?? []).map((picture) => picture.id === id ? { ...picture, ...patch } : picture) } : s));
+  const selectPicture = (id: number) => {
+    setSelectedPictureId(id);
+    setSelectedShapeId(null);
+    setSelectedCountdown(false);
+    setSelectedBoxId(null);
+    setIsBoxSelected(false);
+  };
+  const toggleSelectedVideoPlayback = () => {
+    if (!selectedPicture || selectedPicture.mediaType !== 'video') return;
+    const video = stageRef.current?.querySelector<HTMLVideoElement>(`video[data-slide-video-id="${selectedPicture.id}"]`);
+    if (!video) return;
+    if (video.paused) void video.play().catch(() => setStatus('Could not play this video. Use the player controls on the slide.'));
+    else video.pause();
+  };
   const updateShape = (id: number, patch: Partial<ShapeT>) => !cur.locked && setSlides((l) => l.map((s, i) => i === index ? { ...s, shapes: (s.shapes ?? []).map((shape) => shape.id === id ? { ...shape, ...patch } : shape) } : s));
+
+  const normalizedCountdown = (countdown: CountdownSettings): Required<CountdownSettings> => ({
+    targetAt: countdown.targetAt, label: countdown.label, color: countdown.color, align: countdown.align ?? 'center',
+    x: countdown.x ?? 10, y: countdown.y ?? 30, w: countdown.w ?? 80, h: countdown.h ?? 40, size: countdown.size ?? 112,
+  });
+  const updateCountdown = (patch: Partial<CountdownSettings>) => {
+    if (!cur.countdown || cur.locked) return;
+    updateSlide({ countdown: { ...normalizedCountdown(cur.countdown), ...patch } });
+  };
+
+  const startCountdownInteraction = (mode: Mode) => (event: RPointerEvent) => {
+    if (cur.locked || !cur.countdown || !stageRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    stageRef.current.focus({ preventScroll: true });
+    setSelectedCountdown(true);
+    setSelectedPictureId(null); setSelectedShapeId(null); setSelectedBoxId(null); setIsBoxSelected(false);
+    setTab('Content');
+    const initial = normalizedCountdown(cur.countdown);
+    const rect = stageRef.current.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const move = (pointer: PointerEvent) => {
+      const dx = (pointer.clientX - startX) / rect.width * 100;
+      const dy = (pointer.clientY - startY) / rect.height * 100;
+      if (mode === 'move') {
+        const nextX = clamp(initial.x + dx, 0, 100 - initial.w);
+        const nextY = clamp(initial.y + dy, 0, 100 - initial.h);
+        const others = [
+          ...allBoxes.map((item) => item.box),
+          ...(cur.pictures ?? []),
+        ];
+        const xTargets = [
+          { position: 50 - initial.w / 2, line: 50 }, { position: 0, line: 0 }, { position: 100 - initial.w, line: 100 },
+          ...others.flatMap((item) => [
+            { position: item.x, line: item.x },
+            { position: item.x + (item.w - initial.w) / 2, line: item.x + item.w / 2 },
+            { position: item.x + item.w - initial.w, line: item.x + item.w },
+          ]),
+        ];
+        const yTargets = [
+          { position: 50 - initial.h / 2, line: 50 }, { position: 0, line: 0 }, { position: 100 - initial.h, line: 100 },
+          ...others.flatMap((item) => [
+            { position: item.y, line: item.y },
+            { position: item.y + (item.h - initial.h) / 2, line: item.y + item.h / 2 },
+            { position: item.y + item.h - initial.h, line: item.y + item.h },
+          ]),
+        ];
+        const nearest = (value: number, targets: { position: number; line: number }[]) => targets
+          .map((target) => ({ ...target, distance: Math.abs(value - target.position) }))
+          .filter((target) => target.distance < 1.6)
+          .sort((a, b) => a.distance - b.distance)[0];
+        const snapX = nearest(nextX, xTargets);
+        const snapY = nearest(nextY, yTargets);
+        setAlignmentGuides({ x: snapX?.line ?? null, y: snapY?.line ?? null });
+        updateCountdown({ x: snapX?.position ?? nextX, y: snapY?.position ?? nextY });
+        return;
+      }
+      setAlignmentGuides({ x: null, y: null });
+      const MIN = 8;
+      let x = initial.x;
+      let y = initial.y;
+      let w = initial.w;
+      let h = initial.h;
+      if (mode.includes('e')) w = clamp(initial.w + dx, MIN, 100 - x);
+      if (mode.includes('w')) {
+        x = clamp(initial.x + dx, 0, initial.x + initial.w - MIN);
+        w = initial.w + (initial.x - x);
+      }
+      if (mode.includes('s')) h = clamp(initial.h + dy, MIN, 100 - y);
+      if (mode.includes('n')) {
+        y = clamp(initial.y + dy, 0, initial.y + initial.h - MIN);
+        h = initial.h + (initial.y - y);
+      }
+      updateCountdown({ x, y, w, h });
+    };
+    const stop = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop); setAlignmentGuides({ x: null, y: null }); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+  };
 
   const addShape = (kind: ShapeT['kind']) => {
     if (cur.locked) return;
@@ -772,6 +907,7 @@ export default function Presentation() {
     const isLine = kind === 'line';
     updateSlide({ shapes: [...(cur.shapes ?? []), { id, kind, x: 39, y: 38, w: isLine ? 28 : 22, h: isLine ? 1.5 : 24, fill: '#CB874C' }] });
     setSelectedShapeId(id);
+    setSelectedCountdown(false);
     setSelectedPictureId(null);
     setSelectedBoxId(null);
     setIsBoxSelected(false);
@@ -834,17 +970,94 @@ export default function Presentation() {
     window.addEventListener('pointerup', stop);
   };
 
-  const addPicture = (file?: File) => {
+  const addPicture = async (file?: File) => {
     if (cur.locked || !file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
+    setMediaImporting(file.name);
+    try {
+      const stored = await saveMediaAsset(file);
+      const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
+      setMediaAssets((items) => [asset, ...items.filter((item) => item.id !== asset.id)]);
       const id = nextId++;
-      updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: String(reader.result), x: 34, y: 28, w: 32, h: 44 }] });
+      updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'image', x: 34, y: 28, w: 32, h: 44 }] });
       setSelectedPictureId(id);
       setSelectedBoxId(null);
       setIsBoxSelected(false);
-    };
-    reader.readAsDataURL(file);
+      setMediaImporting(null);
+      flash(asset.optimized ? `Optimized copy ready (${formatMediaSizeInKb(asset.blob.size)}). Original kept in the library.` : `Added ${file.name} (${formatMediaSizeInKb(asset.blob.size)}).`);
+    } catch {
+      setMediaImporting(null);
+      setStatus('Could not add this image to the slide');
+    }
+  };
+
+  const addSlideVideo = async (file?: File) => {
+    if (!file || cur.locked) return;
+    setMediaImporting(file.name);
+    try {
+      const stored = await saveMediaAsset(file);
+      const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
+      setMediaAssets((items) => [asset, ...items.filter((item) => item.id !== asset.id)]);
+      const aspectRatio = await new Promise<number>((resolve) => {
+        const probe = document.createElement('video');
+        probe.preload = 'metadata';
+        const fallback = window.setTimeout(() => resolve(16 / 9), 3000);
+        probe.onloadedmetadata = () => { window.clearTimeout(fallback); resolve(probe.videoWidth > 0 && probe.videoHeight > 0 ? probe.videoWidth / probe.videoHeight : 16 / 9); };
+        probe.onerror = () => { window.clearTimeout(fallback); resolve(16 / 9); };
+        probe.src = asset.url;
+      });
+      const maxWidth = Math.min(72, 70 * aspectRatio);
+      const width = Math.min(56, maxWidth);
+      const height = width / aspectRatio;
+      const id = nextId++;
+      updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'video', muted: false, aspectRatio, x: (100 - width) / 2, y: (100 - height) / 2, w: width, h: height }] });
+      setSelectedPictureId(id);
+      setSelectedBoxId(null);
+      setIsBoxSelected(false);
+      setSelectedShapeId(null);
+      setMediaImporting(null);
+      flash(`Video added (${formatMediaSizeInKb(asset.blob.size)}). Its player controls are on the slide.`);
+    } catch {
+      setMediaImporting(null);
+      setStatus('Could not add this video to the slide');
+    }
+  };
+
+  const addContentMedia = (file?: File) => {
+    if (!file) return;
+    if (file.type.startsWith('video/')) void addSlideVideo(file);
+    else if (file.type.startsWith('image/')) void addPicture(file);
+    else setStatus('Choose an image or video file');
+  };
+
+  const addRecentContentMedia = (asset: MediaAsset) => {
+    if (cur.locked) return;
+    if (asset.type === 'video') {
+      void (async () => {
+        const aspectRatio = await new Promise<number>((resolve) => {
+          const probe = document.createElement('video');
+          probe.preload = 'metadata';
+          const fallback = window.setTimeout(() => resolve(16 / 9), 3000);
+          probe.onloadedmetadata = () => { window.clearTimeout(fallback); resolve(probe.videoWidth > 0 && probe.videoHeight > 0 ? probe.videoWidth / probe.videoHeight : 16 / 9); };
+          probe.onerror = () => { window.clearTimeout(fallback); resolve(16 / 9); };
+          probe.src = asset.url;
+        });
+        const width = Math.min(56, 70 * aspectRatio);
+        const height = width / aspectRatio;
+        const id = nextId++;
+        updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'video', muted: false, aspectRatio, x: (100 - width) / 2, y: (100 - height) / 2, w: width, h: height }] });
+        setSelectedPictureId(id);
+        setSelectedBoxId(null);
+        setIsBoxSelected(false);
+        setSelectedShapeId(null);
+      })();
+      return;
+    }
+    const id = nextId++;
+    updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'image', x: 34, y: 28, w: 32, h: 44 }] });
+    setSelectedPictureId(id);
+    setSelectedBoxId(null);
+    setIsBoxSelected(false);
+    setSelectedShapeId(null);
   };
 
   const startPictureDrag = (picture: PictureT) => (event: RPointerEvent) => {
@@ -854,6 +1067,7 @@ export default function Presentation() {
     stageRef.current.focus({ preventScroll: true });
     setSelectedPictureId(picture.id);
     setSelectedShapeId(null);
+    setSelectedCountdown(false);
     setSelectedBoxId(null);
     setIsBoxSelected(false);
     const rect = stageRef.current.getBoundingClientRect();
@@ -887,6 +1101,40 @@ export default function Presentation() {
     window.addEventListener('pointerup', stop);
   };
 
+  const startPictureResize = (picture: PictureT, handle: Exclude<Mode, 'move'>) => (event: RPointerEvent) => {
+    if (cur.locked || !stageRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = stageRef.current.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const ratio = picture.aspectRatio ?? picture.w / Math.max(1, picture.h);
+    const east = handle.includes('e');
+    const west = handle.includes('w');
+    const south = handle.includes('s');
+    const north = handle.includes('n');
+    const right = picture.x + picture.w;
+    const bottom = picture.y + picture.h;
+    const resize = (pointer: PointerEvent) => {
+      const dx = (pointer.clientX - startX) / rect.width * 100;
+      const dy = (pointer.clientY - startY) / rect.height * 100;
+      const widthFromX = picture.w + (east ? dx : west ? -dx : 0);
+      const widthFromY = picture.w + (south ? dy * ratio : north ? -dy * ratio : 0);
+      const maxWidth = Math.min(east ? 100 - picture.x : right, (south ? 100 - picture.y : north ? bottom : 100) * ratio);
+      const width = clamp(Math.abs(dx) >= Math.abs(dy * ratio) ? widthFromX : widthFromY, 8, Math.max(8, maxWidth));
+      const height = width / ratio;
+      const x = west ? right - width : picture.x;
+      const y = north ? bottom - height : picture.y;
+      updatePicture(picture.id, { x, y, w: width, h: height });
+    };
+    const stop = () => {
+      window.removeEventListener('pointermove', resize);
+      window.removeEventListener('pointerup', stop);
+    };
+    window.addEventListener('pointermove', resize);
+    window.addEventListener('pointerup', stop);
+  };
+
   const deleteTextBox = (id: number | null) => {
     if (id === null) updateSlide({ box: null });
     else updateSlide({ extraBoxes: (cur.extraBoxes ?? []).filter((item) => item.id !== id) });
@@ -900,9 +1148,12 @@ export default function Presentation() {
       if (cur.locked || projectLocked) return;
       const target = event.target as HTMLElement;
       if (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
-      if ((!box || !isBoxSelected) && selectedPictureId === null && selectedShapeId === null) return;
+      if ((!box || !isBoxSelected) && selectedPictureId === null && selectedShapeId === null && !selectedCountdown) return;
       event.preventDefault();
-      if (selectedPictureId !== null) {
+      if (selectedCountdown) {
+        updateSlide({ countdown: undefined });
+        setSelectedCountdown(false);
+      } else if (selectedPictureId !== null) {
         updateSlide({ pictures: (cur.pictures ?? []).filter((picture) => picture.id !== selectedPictureId) });
         setSelectedPictureId(null);
       } else if (selectedShapeId !== null) {
@@ -912,7 +1163,7 @@ export default function Presentation() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [box, isBoxSelected, selectedBoxId, selectedPictureId, selectedShapeId, index, cur.locked, projectLocked]);
+  }, [box, isBoxSelected, selectedBoxId, selectedPictureId, selectedShapeId, selectedCountdown, index, cur.locked, projectLocked]);
 
   const insertSlide = (s: SlideT, at = index + 1) => {
     if (projectLocked) return;
@@ -981,8 +1232,32 @@ export default function Presentation() {
     updateSlide({ extraBoxes: [...(cur.extraBoxes ?? []), newBox] });
     setSelectedBoxId(id);
     setIsBoxSelected(true);
+    setSelectedCountdown(false);
     setTab('Content');
     setTimeout(() => textRef.current?.select(), 0);
+  };
+
+  const addCountdownSlide = () => {
+    if (projectLocked) return;
+    const countdownSlide: SlideT = {
+      id: nextId++,
+      title: 'Countdown',
+      bg: cur.bg,
+      dim: cur.dim,
+      box: null,
+      countdown: { targetAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), label: 'Event starts in', color: '#FFFFFF', x: 10, y: 30, w: 80, h: 40, size: 112 },
+    };
+    setSlides((current) => {
+      const next = [...current];
+      next.splice(index + 1, 0, countdownSlide);
+      return next;
+    });
+    setIndex(index + 1);
+    setSelectedBoxId(null);
+    setIsBoxSelected(false);
+    setSelectedPictureId(null);
+    setSelectedShapeId(null);
+    setTab('Content');
   };
 
   const applyTextPreset = (p: { text: string; size: number }) => {
@@ -1011,24 +1286,9 @@ export default function Presentation() {
       bgAssetId: asset.id,
       bgImage: asset.type === 'image' ? asset.url : undefined,
       bgVideo: asset.type === 'video' ? asset.url : undefined,
+      bgVideoMuted: asset.type === 'video' ? (cur.bgVideoMuted ?? true) : undefined,
     });
   };
-
-  const importBackground = async (file?: File) => {
-    if (!file) return;
-    try {
-      const stored = await saveMediaAsset(file);
-      const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
-      setMediaAssets((items) => [asset, ...items.filter((item) => item.id !== asset.id)]);
-      applyMediaAsset(asset);
-    } catch {
-      setStatus('Could not add this file to the media library');
-    }
-  };
-
-  const pickImage = (file?: File) => { void importBackground(file); };
-
-  const pickVideo = (file?: File) => { void importBackground(file); };
 
   /* ----- drag to move / resize the text box on the canvas ----- */
 
@@ -1111,7 +1371,38 @@ export default function Presentation() {
   /* ----- save / export ----- */
 
   // Media files are stored in IndexedDB; a slide only keeps the library asset ID.
-  const serializable = (deck: SlideT[] = slides) => deck.map((s) => ({ ...s, bgImage: s.bgAssetId ? undefined : s.bgImage, bgVideo: undefined }));
+  const serializable = (deck: SlideT[] = slides) => deck.map((s) => ({ ...s, bgImage: s.bgAssetId ? undefined : s.bgImage, bgVideo: undefined, pictures: s.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) }));
+  const presentationSnapshot = (name: string, deck: SlideT[]) => JSON.stringify({
+    name: name.trim() || 'Untitled presentation',
+    slides: serializable(deck),
+  });
+  const hasEditorChanges = () => {
+    const original = originalProjectRef.current;
+    return (!!activeProjectId && newDraftProjectIdRef.current === activeProjectId)
+      || (!!original && presentationSnapshot(projectName, slides) !== presentationSnapshot(original.name, original.slides));
+  };
+
+  useEffect(() => {
+    if (!activeProjectId) return;
+    const interceptPageNavigation = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const target = event.target instanceof Element ? event.target.closest('a[href]') as HTMLAnchorElement | null : null;
+      if (!target || target.target === '_blank') return;
+      let nextPath: string;
+      try {
+        const hash = new URL(target.href, window.location.href).hash;
+        if (!hash.startsWith('#/')) return;
+        nextPath = hash.slice(1).split('?')[0];
+      } catch { return; }
+      if (nextPath === location.pathname || !hasEditorChanges()) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setPendingNavigation(nextPath);
+      setLeaveConfirmationOpen(true);
+    };
+    document.addEventListener('click', interceptPageNavigation, true);
+    return () => document.removeEventListener('click', interceptPageNavigation, true);
+  }, [activeProjectId, location.pathname, projectName, slides]);
 
   const createProject = () => {
     const id = crypto.randomUUID();
@@ -1125,6 +1416,9 @@ export default function Presentation() {
     setIndex(0);
     setProjectName(name);
     setActiveProjectId(id);
+    originalProjectRef.current = null;
+    newDraftProjectIdRef.current = id;
+    setLeaveConfirmationOpen(false);
     setDock('Templates');
   };
 
@@ -1133,11 +1427,13 @@ export default function Presentation() {
     const imageFiles = selectedFiles.filter((file) => file.type.startsWith('image/'));
     const powerpoint = selectedFiles.find((file) => file.name.toLowerCase().endsWith('.pptx'));
     if (!imageFiles.length && !powerpoint) return;
+    setSlideImportProgress({ message: 'Preparing slides…', current: 0, total: Math.max(1, imageFiles.length) });
     try {
       const importedSlides: SlideT[] = [];
       const importedAssets: MediaAsset[] = [];
-      for (const file of imageFiles) {
-        const stored = await saveMediaAsset(file);
+      for (const [fileIndex, file] of imageFiles.entries()) {
+        setSlideImportProgress({ message: `Saving ${file.name}`, current: fileIndex, total: imageFiles.length });
+        const stored = await saveMediaAsset(file, 'slide');
         const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
         importedAssets.push(asset);
         const title = file.name.replace(/\.[^.]+$/, '').trim() || `Slide ${importedSlides.length + 1}`;
@@ -1153,16 +1449,19 @@ export default function Presentation() {
           pictures: [],
           shapes: [],
         });
+        setSlideImportProgress({ message: `Saving ${file.name}`, current: fileIndex + 1, total: imageFiles.length });
       }
       if (powerpoint) {
+        setSlideImportProgress({ message: `Reading ${powerpoint.name}`, current: 0, total: 0 });
         const rendered = await window.faithstreamWindow?.renderPowerPointSlides(powerpoint);
         if (!rendered?.ok || !rendered.slides?.length) throw new Error(rendered?.message || 'PowerPoint rendering is unavailable.');
-        for (const renderedSlide of rendered.slides) {
+        setSlideImportProgress({ message: `Saving PowerPoint slides`, current: 0, total: rendered.slides.length });
+        for (const [slideIndex, renderedSlide] of rendered.slides.entries()) {
           const binary = atob(renderedSlide.data);
           const bytes = new Uint8Array(binary.length);
           for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
           const png = new File([bytes], `${renderedSlide.name}.png`, { type: 'image/png' });
-          const stored = await saveMediaAsset(png);
+          const stored = await saveMediaAsset(png, 'slide');
           const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
           importedAssets.push(asset);
           importedSlides.push({
@@ -1177,6 +1476,7 @@ export default function Presentation() {
             pictures: [],
             shapes: [],
           });
+          setSlideImportProgress({ message: `Saving ${renderedSlide.name}`, current: slideIndex + 1, total: rendered.slides.length });
         }
       }
       if (!importedSlides.length) throw new Error('No slides found');
@@ -1192,10 +1492,11 @@ export default function Presentation() {
       const next = [project, ...projects];
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
       setProjects(next);
-      flash(powerpoint
-        ? `${importedSlides.length} PowerPoint slide${importedSlides.length === 1 ? '' : 's'} imported with their original design.`
-        : `${importedSlides.length} slide${importedSlides.length === 1 ? '' : 's'} imported`);
+      setSlideImportProgress(null);
+      const totalKb = importedAssets.reduce((sum, asset) => sum + asset.blob.size, 0);
+      flash(`${importedSlides.length} ${powerpoint ? 'PowerPoint ' : ''}slide${importedSlides.length === 1 ? '' : 's'} imported with original design · ${formatMediaSizeInKb(totalKb)} media stored`);
     } catch (error) {
+      setSlideImportProgress(null);
       flash(error instanceof Error ? error.message : 'Could not import these slides.');
     }
   };
@@ -1227,6 +1528,9 @@ export default function Presentation() {
   };
 
   const openProject = (project: PresentationProject) => {
+    originalProjectRef.current = { ...project, slides: serializable(project.slides) };
+    newDraftProjectIdRef.current = null;
+    setLeaveConfirmationOpen(false);
     setSlides(project.slides.map((slide) => {
       const asset = mediaAssets.find((item) => item.id === slide.bgAssetId);
       return asset ? { ...slide, bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : slide;
@@ -1248,24 +1552,26 @@ export default function Presentation() {
       URL.revokeObjectURL(asset.url);
       setMediaAssets((current) => current.filter((item) => item.id !== asset.id));
       setSlides((current) => {
-        const next = current.map((slide) => slide.bgAssetId === asset.id
-          ? { ...slide, bgAssetId: undefined, bgImage: undefined, bgVideo: undefined }
-          : slide);
+        const next = current.map((slide) => ({
+          ...(slide.bgAssetId === asset.id ? { ...slide, bgAssetId: undefined, bgImage: undefined, bgVideo: undefined } : slide),
+          pictures: slide.pictures?.filter((picture) => picture.assetId !== asset.id),
+        }));
         try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* Keep the editor usable if storage is full. */ }
         return next;
       });
       setProjects((current) => {
         const next = current.map((project) => ({
           ...project,
-          slides: project.slides.map((slide) => slide.bgAssetId === asset.id
-            ? { ...slide, bgAssetId: undefined, bgImage: undefined, bgVideo: undefined }
-            : slide),
+          slides: project.slides.map((slide) => ({
+            ...(slide.bgAssetId === asset.id ? { ...slide, bgAssetId: undefined, bgImage: undefined, bgVideo: undefined } : slide),
+            pictures: slide.pictures?.filter((picture) => picture.assetId !== asset.id),
+          })),
         }));
         try { localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next)); } catch { /* Keep the editor usable if storage is full. */ }
         return next;
       });
       setDeleteConfirmation(null);
-      flash('Background deleted from the media library');
+      flash('Upload deleted from the media library');
     } catch {
       setDeleteConfirmation(null);
       flash('Could not delete this background');
@@ -1284,11 +1590,58 @@ export default function Presentation() {
       const next = [project, ...projects.filter((item) => item.id !== id)];
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
       setProjects(next);
+      window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
+      originalProjectRef.current = null;
+      newDraftProjectIdRef.current = null;
+      setLeaveConfirmationOpen(false);
       setActiveProjectId(null);
       setStatus('');
+      return true;
     } catch {
       flash('Could not save: images are too large');
+      return false;
     }
+  };
+
+  const requestBackToPresentations = () => {
+    if (hasEditorChanges()) {
+      setLeaveConfirmationOpen(true);
+      return;
+    }
+    originalProjectRef.current = null;
+    setActiveProjectId(null);
+  };
+
+  const discardEditorChanges = () => {
+    const original = originalProjectRef.current;
+    const draftId = newDraftProjectIdRef.current;
+    if (original || draftId) {
+      const next = draftId
+        ? projects.filter((project) => project.id !== draftId)
+        : projects.map((project) => project.id === original!.id ? original! : project);
+      try {
+        localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+        setProjects(next);
+        window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
+      } catch {
+        flash('Could not discard changes on this device.');
+        return;
+      }
+    }
+    originalProjectRef.current = null;
+    newDraftProjectIdRef.current = null;
+    setLeaveConfirmationOpen(false);
+    setActiveProjectId(null);
+    const target = pendingNavigation;
+    setPendingNavigation(null);
+    if (target) navigate(target);
+  };
+
+  const keepChangesAndContinue = () => {
+    const target = pendingNavigation;
+    if (!save()) return;
+    setPendingNavigation(null);
+    if (target) navigate(target);
   };
 
   /* ----- render ----- */
@@ -1308,8 +1661,8 @@ export default function Presentation() {
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button onClick={() => slideImportInput.current?.click()} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-3 text-sm font-semibold text-warm-white transition hover:bg-white/5">
-                <Upload size={17} /> Import Slides
+              <button disabled={slideImportProgress !== null} onClick={() => slideImportInput.current?.click()} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-3 text-sm font-semibold text-warm-white transition hover:bg-white/5 disabled:cursor-wait disabled:opacity-70">
+                {slideImportProgress ? <Loader2 size={17} className="animate-spin" /> : <Upload size={17} />} {slideImportProgress ? 'Importing…' : 'Import Slides'}
               </button>
               <button onClick={createProject} className="flex items-center gap-2 rounded-xl bg-brand px-4 py-3 text-sm font-bold text-navy shadow-lg shadow-black/20 transition hover:brightness-110">
                 <Plus size={18} /> Create Presentation
@@ -1327,6 +1680,23 @@ export default function Presentation() {
               event.target.value = '';
             }}
           />
+
+          {slideImportProgress && <div role="status" aria-live="polite" className="mb-5 rounded-xl border border-brand/30 bg-brand/5 p-4">
+            <div className="flex items-center gap-3">
+              <Loader2 size={18} className="shrink-0 animate-spin text-brand" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-3 text-sm">
+                  <span className="truncate font-medium text-warm-white">{slideImportProgress.message}</span>
+                  {slideImportProgress.total > 0 && <span className="shrink-0 text-xs tabular-nums text-warm-white/60">{slideImportProgress.current} / {slideImportProgress.total}</span>}
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+                  {slideImportProgress.total > 0
+                    ? <div className="h-full rounded-full bg-brand transition-[width] duration-200" style={{ width: `${Math.min(100, slideImportProgress.current / slideImportProgress.total * 100)}%` }} />
+                    : <div className="h-full w-1/3 animate-pulse rounded-full bg-brand" />}
+                </div>
+              </div>
+            </div>
+          </div>}
 
           {projects.length ? (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -1384,12 +1754,12 @@ export default function Presentation() {
     );
   }
 
-  const toolbarBelow = !!box && box.y < 16;
+  const toolbarBelow = selectedCountdown ? (cur.countdown?.y ?? 30) < 16 : !!box && box.y < 16;
 
   return (
     <div className="relative flex h-full min-h-0 flex-col gap-3">
       <div className="flex shrink-0 items-center gap-3 rounded-xl border border-white/10 bg-panel px-3 py-2">
-        <button onClick={() => setActiveProjectId(null)} aria-label="Back to presentations" title="Back to presentations" className="rounded-lg p-2 text-warm-white/70 hover:bg-white/5 hover:text-white"><ChevronLeft size={19} /></button>
+        <button onClick={requestBackToPresentations} aria-label="Back to presentations" title="Back to presentations" className="rounded-lg p-2 text-warm-white/70 hover:bg-white/5 hover:text-white"><ChevronLeft size={19} /></button>
         <FolderOpen size={17} className="shrink-0 text-brand" />
         <input aria-label="Presentation name" value={projectName} onChange={(event) => setProjectName(event.target.value)} className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-warm-white outline-none placeholder:text-warm-white/35" placeholder="Presentation name" />
         <span className="hidden text-xs text-warm-white/45 sm:block">{slides.length} {slides.length === 1 ? 'slide' : 'slides'}</span>
@@ -1503,7 +1873,7 @@ export default function Presentation() {
             <div
               ref={stageRef}
               tabIndex={0}
-              onClick={() => { setIsBoxSelected(false); setSelectedPictureId(null); setSelectedShapeId(null); }}
+              onClick={() => { setIsBoxSelected(false); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); }}
               aria-label="Slide canvas. Select a text box and press Backspace or Delete to remove it."
               className="relative"
               style={{
@@ -1512,25 +1882,44 @@ export default function Presentation() {
               }}
             >
               <div className="absolute inset-0 overflow-hidden rounded-lg border border-white/10">
-                <SlideRender slide={cur} />
+                <SlideRender slide={cur} onVideoSelect={selectPicture} />
               </div>
 
               {alignmentGuides.x !== null && <div aria-hidden className="pointer-events-none absolute inset-y-0 z-30 border-l border-dashed border-cyan-300 shadow-[0_0_5px_rgba(103,232,249,.8)]" style={{ left: `${alignmentGuides.x}%` }} />}
               {alignmentGuides.y !== null && <div aria-hidden className="pointer-events-none absolute inset-x-0 z-30 border-t border-dashed border-cyan-300 shadow-[0_0_5px_rgba(103,232,249,.8)]" style={{ top: `${alignmentGuides.y}%` }} />}
 
-              {(cur.pictures ?? []).map((picture) => <div key={picture.id} onPointerDown={startPictureDrag(picture)} onClick={(e) => { e.stopPropagation(); setSelectedPictureId(picture.id); }} className={`absolute z-10 cursor-move ${selectedPictureId === picture.id ? 'border border-cyan-300' : 'border border-transparent'}`} style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, touchAction: 'none' }}>
-                {selectedPictureId === picture.id && <button onPointerDown={(e) => e.stopPropagation()} onClick={() => { updateSlide({ pictures: (cur.pictures ?? []).filter((item) => item.id !== picture.id) }); setSelectedPictureId(null); }} aria-label="Delete image" className="absolute -right-2 -top-2 z-30 rounded-full bg-red-600 p-1 text-white shadow"><Trash2 size={12} /></button>}
+              {(cur.pictures ?? []).map((picture) => <div key={picture.id} onPointerDown={picture.mediaType === 'video' ? undefined : startPictureDrag(picture)} onClick={(e) => { if (picture.mediaType === 'video') return; e.stopPropagation(); setSelectedPictureId(picture.id); setSelectedCountdown(false); }} className={`absolute z-10 ${picture.mediaType === 'video' ? 'pointer-events-none' : 'cursor-move'} ${selectedPictureId === picture.id ? 'border-2 border-cyan-300' : 'border border-transparent'}`} style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, touchAction: 'none' }}>
+                {picture.mediaType === 'video' && <div onPointerDown={startPictureDrag(picture)} onClick={(event) => { event.stopPropagation(); setSelectedPictureId(picture.id); setSelectedCountdown(false); }} aria-label="Drag to move video" className="pointer-events-auto absolute inset-x-0 -top-3 h-3 cursor-move" />}
+                {picture.mediaType === 'video' && selectedPictureId === picture.id && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((handle) => <span key={handle} onPointerDown={startPictureResize(picture, handle)} className={`pointer-events-auto absolute z-20 h-3.5 w-3.5 rounded-sm border-2 border-cyan-700 bg-white shadow ${HANDLES[handle]}`} />)}
+                {selectedPictureId === picture.id && <button onPointerDown={(e) => e.stopPropagation()} onClick={() => { updateSlide({ pictures: (cur.pictures ?? []).filter((item) => item.id !== picture.id) }); setSelectedPictureId(null); }} aria-label={picture.mediaType === 'video' ? 'Delete video' : 'Delete image'} className="pointer-events-auto absolute -right-2 -top-2 z-30 rounded-full bg-red-600 p-1 text-white shadow"><Trash2 size={12} /></button>}
               </div>)}
 
-              {(cur.shapes ?? []).map((shape) => <div key={shape.id} onPointerDown={startShapeDrag(shape)} onClick={(event) => { event.stopPropagation(); setSelectedShapeId(shape.id); setSelectedPictureId(null); setSelectedBoxId(null); setIsBoxSelected(false); }} className={`absolute z-10 cursor-move ${selectedShapeId === shape.id ? 'border border-cyan-300' : 'border border-transparent'}`} style={{ left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, touchAction: 'none' }}>
+              {(cur.shapes ?? []).map((shape) => <div key={shape.id} onPointerDown={startShapeDrag(shape)} onClick={(event) => { event.stopPropagation(); setSelectedShapeId(shape.id); setSelectedPictureId(null); setSelectedCountdown(false); setSelectedBoxId(null); setIsBoxSelected(false); }} className={`absolute z-10 cursor-move ${selectedShapeId === shape.id ? 'border border-cyan-300' : 'border border-transparent'}`} style={{ left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, touchAction: 'none' }}>
                 {selectedShapeId === shape.id && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((handle) => <span key={handle} onPointerDown={startShapeResize(shape, handle)} className={`absolute z-20 h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[handle]}`} />)}
                 {selectedShapeId === shape.id && <button onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); updateSlide({ shapes: (cur.shapes ?? []).filter((item) => item.id !== shape.id) }); setSelectedShapeId(null); }} aria-label="Delete shape" className="absolute -right-2 -top-2 z-30 rounded-full bg-red-600 p-1 text-white shadow"><Trash2 size={12} /></button>}
               </div>)}
 
+              {cur.countdown && <div
+                onPointerDown={startCountdownInteraction('move')}
+                onClick={(event) => { event.stopPropagation(); setSelectedCountdown(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedBoxId(null); setIsBoxSelected(false); }}
+                className={`absolute z-20 cursor-move ${selectedCountdown ? 'border border-white' : 'border border-transparent'}`}
+                style={{ left: `${cur.countdown.x ?? 10}%`, top: `${cur.countdown.y ?? 30}%`, width: `${cur.countdown.w ?? 80}%`, height: `${cur.countdown.h ?? 40}%`, touchAction: 'none' }}
+                aria-label="Countdown text box. Drag to move, drag a corner to resize, or press Backspace to remove."
+              >
+                {selectedCountdown && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((handle) => <span key={handle} onPointerDown={startCountdownInteraction(handle)} className={`absolute z-20 h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[handle]}`} />)}
+                {selectedCountdown && <div onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} className={`absolute left-1/2 z-30 flex -translate-x-1/2 cursor-default items-center gap-0.5 rounded-lg border border-white/10 bg-navy/95 p-1 shadow-xl ${toolbarBelow ? 'top-full mt-3' : 'bottom-full mb-3'}`}>
+                  <IconBtn label="Add text box" onClick={addText}><Plus size={15} /></IconBtn>
+                  <IconBtn label="Align left" active={(cur.countdown.align ?? 'center') === 'left'} onClick={() => updateCountdown({ align: 'left' })}><AlignLeft size={15} /></IconBtn>
+                  <IconBtn label="Align center" active={(cur.countdown.align ?? 'center') === 'center'} onClick={() => updateCountdown({ align: 'center' })}><AlignCenter size={15} /></IconBtn>
+                  <IconBtn label="Align right" active={(cur.countdown.align ?? 'center') === 'right'} onClick={() => updateCountdown({ align: 'right' })}><AlignRight size={15} /></IconBtn>
+                  <IconBtn label="Delete countdown" onClick={() => { updateSlide({ countdown: undefined }); setSelectedCountdown(false); }}><Trash2 size={15} /></IconBtn>
+                </div>}
+              </div>}
+
               {allBoxes.map(({ id, box: textBox }) => {
                 const selected = isBoxSelected && id === selectedBoxId;
                 const align = (value: Align) => updateBoxById(id, { align: value });
-                return <div key={id ?? 'main'} onPointerDown={startDrag('move', id, textBox)} className={`absolute z-10 cursor-move ${selected ? 'border border-white' : 'border border-transparent'}`} onClick={(e) => { e.stopPropagation(); setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); }} style={{ left: `${textBox.x}%`, top: `${textBox.y}%`, width: `${textBox.w}%`, height: `${textBox.h}%`, touchAction: 'none' }}>
+                return <div key={id ?? 'main'} onPointerDown={startDrag('move', id, textBox)} className={`absolute z-10 cursor-move ${selected ? 'border border-white' : 'border border-transparent'}`} onClick={(e) => { e.stopPropagation(); setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); }} style={{ left: `${textBox.x}%`, top: `${textBox.y}%`, width: `${textBox.w}%`, height: `${textBox.h}%`, touchAction: 'none' }}>
                   {selected && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((h) => <span key={h} onPointerDown={startDrag(h, id, textBox)} className={`absolute h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[h]}`} />)}
                   {selected && <div onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} className={`absolute left-1/2 z-20 flex -translate-x-1/2 cursor-default items-center gap-0.5 rounded-lg border border-white/10 bg-navy/95 p-1 shadow-xl ${toolbarBelow ? 'top-full mt-3' : 'bottom-full mb-3'}`}>
                     <IconBtn label="Add text box" onClick={addText}><Plus size={15} /></IconBtn>
@@ -1608,8 +1997,82 @@ export default function Presentation() {
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            {tab === 'Content' && <div className="mb-5">
+              <button type="button" disabled={mediaImporting !== null || cur.locked} onClick={() => contentInput.current?.click()} className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2.5 text-xs font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:cursor-wait disabled:opacity-50"><Plus size={15} /> Add image or video</button>
+              <p className="mt-2 text-[10px] leading-relaxed text-warm-white/50">Images and videos you add here can also be reused as backgrounds.</p>
+              {mediaImporting && <div role="status" aria-live="polite" className="mt-2 flex items-center gap-2 rounded-lg border border-brand/20 bg-brand/5 px-3 py-2 text-[11px] text-warm-white/75"><Loader2 size={14} className="animate-spin text-brand" /> Adding {mediaImporting}…</div>}
+              <div className="mt-4">
+                <div className="mb-2 flex items-center justify-between"><p className="text-xs font-semibold text-warm-white/80">Recent uploads</p><span className="text-[10px] text-warm-white/45">{contentAssets.length}</span></div>
+                {contentAssets.length === 0 ? <p className="rounded-lg border border-dashed border-white/15 p-3 text-center text-[11px] text-warm-white/50">Your added images and videos will appear here.</p> : <div className="grid max-h-48 grid-cols-2 gap-2 overflow-y-auto pr-1">
+                  {contentAssets.map((asset) => <div key={asset.id} className="group relative overflow-hidden rounded-lg border border-white/10 transition hover:border-brand/60">
+                    <button type="button" disabled={cur.locked} onClick={() => addRecentContentMedia(asset)} title={`Add ${asset.name} to this slide`} className="block w-full text-left disabled:opacity-50">
+                      <span className="relative block aspect-video overflow-hidden bg-navy">{asset.type === 'image' ? <img src={asset.url} alt="" className="h-full w-full object-cover" /> : <video src={asset.url} muted className="h-full w-full object-cover" />}<span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white">{asset.type === 'video' ? 'VIDEO' : 'IMAGE'}</span></span>
+                      <span className="block truncate px-1.5 pt-1 text-[10px] text-warm-white/75">{asset.name}</span><span className="block px-1.5 pb-1 text-[9px] text-warm-white/45">{formatMediaSizeInKb(asset.blob.size)}</span>
+                    </button>
+                    <button type="button" aria-label={`Delete ${asset.name}`} title={`Delete ${asset.name}`} onClick={() => setDeleteConfirmation({ title: 'Delete uploaded file?', message: `Delete “${asset.name}” from Recent Uploads? It will also be removed from any slides and backgrounds using this file.`, onConfirm: () => { void deleteMediaAsset(asset); } })} className="absolute right-1 top-1 z-10 rounded-md border border-white/15 bg-black/75 p-1.5 text-white/75 opacity-0 shadow transition hover:bg-red-600 hover:text-white focus:opacity-100 group-hover:opacity-100"><Trash2 size={12} /></button>
+                  </div>)}
+                </div>}
+              </div>
+            </div>}
+            {tab === 'Content' && cur.countdown && <div className="mb-5 flex flex-col gap-3 rounded-xl border border-brand/25 bg-brand/5 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <SectionTitle>Countdown timer</SectionTitle>
+                <button type="button" onClick={() => updateSlide({ countdown: undefined })} className="rounded-md px-2 py-1 text-[11px] font-semibold text-red-300 hover:bg-red-500/10">Remove</button>
+              </div>
+              <p className="text-[11px] text-warm-white/55">Select the timer on the slide to move or resize its area. Change the number size below.</p>
+              <label className="block text-xs text-warm-white/70">Label
+                <input value={cur.countdown.label} onChange={(event) => updateCountdown({ label: event.target.value })} className={`${fieldClass} mt-1`} placeholder="Event starts in" />
+              </label>
+              <label className="block text-xs text-warm-white/70">Event date and time
+                <input type="datetime-local" value={toLocalDateTimeInput(cur.countdown.targetAt)} onChange={(event) => {
+                  const target = new Date(event.target.value);
+                  if (!Number.isNaN(target.getTime())) updateCountdown({ targetAt: target.toISOString() });
+                }} className={`${fieldClass} mt-1`} />
+              </label>
+              <label className="block text-xs text-warm-white/70">Number size
+                <div className="mt-1 flex items-center gap-2"><input type="range" min="32" max="240" step="4" value={cur.countdown.size ?? 112} onChange={(event) => updateCountdown({ size: Number(event.target.value) })} className="w-full accent-brand" /><span className="w-12 text-right tabular-nums">{cur.countdown.size ?? 112}px</span></div>
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {([['x', 'Left'], ['y', 'Top'], ['w', 'Width'], ['h', 'Height']] as const).map(([key, label]) => <label key={key} className="block text-xs text-warm-white/70">{label} (%)
+                  <input type="number" min="0" max="100" value={Math.round(cur.countdown?.[key] ?? ({ x: 10, y: 30, w: 80, h: 40 }[key]))} onChange={(event) => updateCountdown({ [key]: clamp(Number(event.target.value) || 0, 0, 100) })} className={`${fieldClass} mt-1`} />
+                </label>)}
+              </div>
+              <div className="flex items-center justify-between text-xs text-warm-white/75">Timer color<ColorField label="Countdown color" value={cur.countdown.color} onChange={(color) => updateCountdown({ color })} /></div>
+              <p className="text-[11px] text-warm-white/50">This slide counts down in real time to the event.</p>
+            </div>}
             {tab === 'Content' &&
-              (selectedShape ? (
+              (selectedPicture?.mediaType === 'video' ? (
+                <div className="flex flex-col gap-3">
+                  <SectionTitle>Slide video</SectionTitle>
+                  <p className="text-xs leading-relaxed text-warm-white/55">Select the video on the slide to show its resize handles. Use the player controls to play or pause. Resizing changes its display size without changing the uploaded file.</p>
+                  <button type="button" onClick={toggleSelectedVideoPlayback} className="flex items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-xs font-semibold text-warm-white hover:bg-white/5"><Play size={14} /> Play / pause video</button>
+                  <button type="button" aria-pressed={!(selectedPicture.muted ?? false)} onClick={() => updatePicture(selectedPicture.id, { muted: !(selectedPicture.muted ?? false) })} className="flex items-center justify-between rounded-lg border border-white/15 px-3 py-2 text-xs text-warm-white hover:bg-white/5"><span>Video audio</span><span className="font-semibold text-brand">{selectedPicture.muted ? 'Muted' : 'On'}</span></button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="text-xs text-warm-white/70">Width (%)
+                      <input type="number" min="8" max="100" value={Math.round(selectedPicture.w)} onChange={(event) => {
+                        const ratio = selectedPicture.aspectRatio ?? 16 / 9;
+                        let width = clamp(Number(event.target.value) || 8, 8, 100);
+                        let height = width / ratio;
+                        if (height > 100) { height = 100; width = height * ratio; }
+                        updatePicture(selectedPicture.id, { w: width, h: height, x: clamp(selectedPicture.x, 0, 100 - width), y: clamp(selectedPicture.y, 0, 100 - height) });
+                      }} className={`${fieldClass} mt-1`} />
+                    </label>
+                    <label className="text-xs text-warm-white/70">Height (%)
+                      <input type="number" min="8" max="100" value={Math.round(selectedPicture.h)} onChange={(event) => {
+                        const ratio = selectedPicture.aspectRatio ?? 16 / 9;
+                        let height = clamp(Number(event.target.value) || 8, 8, 100);
+                        let width = height * ratio;
+                        if (width > 100) { width = 100; height = width / ratio; }
+                        updatePicture(selectedPicture.id, { w: width, h: height, x: clamp(selectedPicture.x, 0, 100 - width), y: clamp(selectedPicture.y, 0, 100 - height) });
+                      }} className={`${fieldClass} mt-1`} />
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="text-xs text-warm-white/70">Left (%)<input type="number" min="0" max={Math.floor(100 - selectedPicture.w)} value={Math.round(selectedPicture.x)} onChange={(event) => updatePicture(selectedPicture.id, { x: clamp(Number(event.target.value) || 0, 0, 100 - selectedPicture.w) })} className={`${fieldClass} mt-1`} /></label>
+                    <label className="text-xs text-warm-white/70">Top (%)<input type="number" min="0" max={Math.floor(100 - selectedPicture.h)} value={Math.round(selectedPicture.y)} onChange={(event) => updatePicture(selectedPicture.id, { y: clamp(Number(event.target.value) || 0, 0, 100 - selectedPicture.h) })} className={`${fieldClass} mt-1`} /></label>
+                  </div>
+                </div>
+              ) : selectedShape ? (
                 <div className="flex flex-col gap-4">
                   <SectionTitle>Shape</SectionTitle>
                   <p className="text-sm capitalize text-warm-white">{selectedShape.kind}</p>
@@ -1831,32 +2294,27 @@ export default function Presentation() {
                     ))}
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <button onClick={() => imageInput.current?.click()} className="flex items-center justify-center gap-2 rounded-lg border border-white/15 py-2 text-xs text-warm-white hover:bg-white/5">
-                    <ImageIcon size={14} /> Upload image
-                  </button>
-                  <button onClick={() => videoInput.current?.click()} className="flex items-center justify-center gap-2 rounded-lg border border-white/15 py-2 text-xs text-warm-white hover:bg-white/5">
-                    <Video size={14} /> Upload video
-                  </button>
-                </div>
+                <p className="text-[10px] leading-relaxed text-warm-white/45">Choose from uploads added in Content. Smaller high quality copies are used when they save space; original uploads are kept.</p>
                 <div>
                   <div className="mb-2 flex items-center justify-between">
                     <p className="text-xs font-semibold text-warm-white/80">Recent uploads</p>
-                    <span className="text-[10px] text-warm-white/45">{mediaAssets.length} saved</span>
+                    <span className="text-[10px] text-warm-white/45">{backgroundAssets.length} saved</span>
                   </div>
-                  {mediaAssets.length === 0 ? (
-                    <p className="rounded-lg border border-dashed border-white/15 p-3 text-center text-[11px] text-warm-white/50">Imported photos and videos will appear here for reuse.</p>
+                  {backgroundAssets.length === 0 ? (
+                    <p className="rounded-lg border border-dashed border-white/15 p-3 text-center text-[11px] text-warm-white/50">Images and videos added in Content will appear here to use as backgrounds.</p>
                   ) : (
                     <div className="grid max-h-48 grid-cols-2 gap-2 overflow-y-auto pr-1">
-                      {mediaAssets.map((asset) => (
+                      {backgroundAssets.map((asset) => (
                         <div key={asset.id} className={`group relative overflow-hidden rounded-lg border transition ${cur.bgAssetId === asset.id ? 'border-brand ring-1 ring-brand/40' : 'border-white/10 hover:border-white/40'}`}>
-                          <button onClick={() => applyMediaAsset(asset)} title={`Use ${asset.name}`} className="block w-full text-left">
+                          <button onClick={() => applyMediaAsset(asset)} title={`Set ${asset.name} as the slide background`} className="block w-full text-left">
                             <span className="relative block aspect-video overflow-hidden bg-navy">
                               {asset.type === 'image' ? <img src={asset.url} alt={asset.name} className="h-full w-full object-cover" /> : <video src={asset.url} muted className="h-full w-full object-cover" />}
                               {asset.type === 'video' && <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white">VIDEO</span>}
                             </span>
-                            <span className="block truncate px-1.5 py-1 text-[10px] text-warm-white/75">{asset.name}</span>
+                            <span className="block truncate px-1.5 pt-1 text-[10px] text-warm-white/75">{asset.name}</span>
+                            <span className="block truncate px-1.5 pb-1 text-[9px] text-warm-white/45">{asset.optimized && asset.originalBlob ? `${formatMediaSizeInKb(asset.originalBlob.size)} → ` : ''}{formatMediaSizeInKb(asset.blob.size)}{asset.optimized ? ' · optimized copy' : ''}</span>
                           </button>
+                          {asset.type === 'video' && <button type="button" aria-label={`Preview ${asset.name}`} title={`Play preview of ${asset.name}`} onClick={() => setVideoPreviewAsset(asset)} className="absolute bottom-2 right-2 z-10 rounded-md bg-black/80 p-1.5 text-white hover:bg-brand"><Play size={13} /></button>}
                           <button type="button" aria-label={`Delete ${asset.name}`} title={`Delete ${asset.name}`} onClick={() => setDeleteConfirmation({
                             title: 'Delete uploaded background?',
                             message: `Delete “${asset.name}” from saved uploads? Slides using this file will switch back to their color background.`,
@@ -1869,6 +2327,17 @@ export default function Presentation() {
                     </div>
                   )}
                 </div>
+                {cur.bgVideo && (
+                  <button
+                    type="button"
+                    aria-pressed={!(cur.bgVideoMuted ?? true)}
+                    onClick={() => updateSlide({ bgVideoMuted: !(cur.bgVideoMuted ?? true) })}
+                    className="flex items-center justify-between rounded-lg border border-white/10 px-3 py-2 text-xs text-warm-white hover:bg-white/5"
+                  >
+                    <span>Background video audio</span>
+                    <span className="font-semibold text-brand">{cur.bgVideoMuted ?? true ? 'Muted' : 'On'}</span>
+                  </button>
+                )}
                 <label className="block text-sm text-warm-white">
                   <span className="flex justify-between text-xs text-warm-white/70">
                     Darken background <span>{cur.dim}%</span>
@@ -1932,6 +2401,7 @@ export default function Presentation() {
 
           {dock === 'Text' && (
             <>
+              <ActionCard icon={Timer} label="Countdown slide" hint="Create a live event countdown" onClick={addCountdownSlide} />
               <ActionCard icon={Type} label="Add text box" hint="Type on this slide" onClick={addText} />
               {TEXT_PRESETS.map((p) => (
                 <button
@@ -1954,8 +2424,6 @@ export default function Presentation() {
 
           {dock === 'Media' && (
             <>
-              <ActionCard icon={ImageIcon} label="Add picture" hint="Place a photo on this slide" onClick={() => pictureInput.current?.click()} />
-              <ActionCard icon={Video} label="Upload video" hint="Use a video as background" onClick={() => videoInput.current?.click()} />
               {BGS.map((b) => (
                 <button
                   key={b}
@@ -2010,37 +2478,16 @@ export default function Presentation() {
         </div>
       </div>
 
-      <input
-        ref={pictureInput}
-        type="file"
-        accept="image/*"
-        hidden
-        onChange={(e) => {
-          addPicture(e.target.files?.[0]);
-          e.target.value = '';
-        }}
-      />
-      <input
-        ref={imageInput}
-        type="file"
-        accept="image/*"
-        hidden
-        onChange={(e) => {
-          pickImage(e.target.files?.[0]);
-          e.target.value = '';
-        }}
-      />
-      <input
-        ref={videoInput}
-        type="file"
-        accept="video/*"
-        hidden
-        onChange={(e) => {
-          pickVideo(e.target.files?.[0]);
-          e.target.value = '';
-        }}
-      />
+      <input ref={contentInput} type="file" accept="image/*,video/*" hidden onChange={(event) => { addContentMedia(event.target.files?.[0]); event.target.value = ''; }} />
 
+      {videoPreviewAsset && <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/85 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoPreviewAsset(null); }}>
+        <section role="dialog" aria-modal="true" aria-label={`Preview ${videoPreviewAsset.name}`} className="w-full max-w-4xl rounded-2xl border border-white/10 bg-[#101d2a] p-4 shadow-2xl">
+          <div className="mb-3 flex items-center justify-between gap-3"><h2 className="truncate text-sm font-semibold text-warm-white">{videoPreviewAsset.name}</h2><button type="button" onClick={() => setVideoPreviewAsset(null)} aria-label="Close video preview" className="rounded-lg p-2 text-warm-white/60 hover:bg-white/10 hover:text-white"><X size={17} /></button></div>
+          <video src={videoPreviewAsset.url} controls autoPlay playsInline className="max-h-[70vh] w-full rounded-lg bg-black" />
+          <p className="mt-3 text-xs text-warm-white/55">This upload is from the background library. Add videos that need player controls from the Content tab.</p>
+          <div className="mt-2 flex justify-end"><button type="button" onClick={() => { applyMediaAsset(videoPreviewAsset); setVideoPreviewAsset(null); }} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy">Use as background</button></div>
+        </section>
+      </div>}
       {previewing && <PreviewOverlay slides={slides} start={index} onClose={() => setPreviewing(false)} />}
       <ScripturePickerModal
         open={scripturePickerOpen}
@@ -2070,7 +2517,7 @@ export default function Presentation() {
           <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-amber-300/10 text-amber-200"><Lock size={22} /></span>
           <h2 className="mt-4 text-lg font-semibold text-warm-white">Presentation locked</h2>
           <p className="mt-2 text-sm text-warm-white/55">Unlock this presentation from its options menu before editing its slides.</p>
-          <button onClick={() => setActiveProjectId(null)} className="mt-5 rounded-lg bg-brand px-4 py-2.5 text-sm font-bold text-navy hover:brightness-110">Back to presentations</button>
+          <button onClick={requestBackToPresentations} className="mt-5 rounded-lg bg-brand px-4 py-2.5 text-sm font-bold text-navy hover:brightness-110">Back to presentations</button>
         </div>
       </div>}
       <ConfirmationModal
@@ -2080,6 +2527,17 @@ export default function Presentation() {
         onCancel={() => setDeleteConfirmation(null)}
         onConfirm={() => deleteConfirmation?.onConfirm()}
       />
+      {leaveConfirmationOpen && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) { setLeaveConfirmationOpen(false); setPendingNavigation(null); } }}>
+        <section role="alertdialog" aria-modal="true" aria-labelledby="leave-presentation-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
+          <h2 id="leave-presentation-title" className="text-base font-bold text-warm-white">You have unsaved changes</h2>
+          <p className="mt-2 text-sm leading-relaxed text-warm-white/60">Save your slide changes before leaving this presentation, or discard them?</p>
+          <div className="mt-6 flex flex-wrap justify-end gap-2">
+            <button type="button" onClick={() => { setLeaveConfirmationOpen(false); setPendingNavigation(null); }} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-warm-white/75 hover:bg-white/5">Keep editing</button>
+            <button type="button" onClick={discardEditorChanges} className="rounded-lg border border-red-400/30 px-4 py-2 text-sm font-semibold text-red-200 hover:bg-red-500/10">Discard changes</button>
+            <button type="button" onClick={keepChangesAndContinue} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy hover:brightness-110">Keep changes</button>
+          </div>
+        </section>
+      </div>}
     </div>
   );
 }

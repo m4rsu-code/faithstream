@@ -10,6 +10,14 @@ interface Window {
       message?: string;
       slides?: { name: string; data: string }[];
     }>;
+    optimizeVideo: (file: File) => Promise<{
+      ok: boolean;
+      optimized?: boolean;
+      originalBytes?: number;
+      optimizedBytes?: number;
+      data?: Uint8Array;
+      message?: string;
+    }>;
     minimize: () => Promise<void>;
     toggleMaximize: () => Promise<boolean>;
     close: () => Promise<void>;

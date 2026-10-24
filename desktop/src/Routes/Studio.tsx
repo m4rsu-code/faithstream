@@ -8,6 +8,7 @@ import {
   EyeOff,
   GripVertical,
   Image,
+  Loader2,
   Mic,
   Monitor,
   Music2,
@@ -27,10 +28,12 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import ConfirmationModal from '../components/modal/ConfirmationModal';
+import CountdownDisplay, { type CountdownSettings } from '../components/CountdownDisplay';
+import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimization';
 
 /* ---------- Data ---------- */
 
-type Slide = { text: string; ref?: string; bg?: string; bgImage?: string; bgVideo?: string; bgAssetId?: string; dim?: number; textColor?: string; title?: string };
+type Slide = { text: string; ref?: string; bg?: string; bgImage?: string; bgVideo?: string; bgVideoMuted?: boolean; bgAssetId?: string; dim?: number; textColor?: string; title?: string; countdown?: CountdownSettings };
 
 type PresentationTextBox = {
   text: string; font: string; size: number; color: string; bold: boolean; italic: boolean;
@@ -38,13 +41,14 @@ type PresentationTextBox = {
   boxBgOn: boolean; autoSize: boolean; lineHeight: number; letterSpacing: number;
   x: number; y: number; w: number; h: number;
 };
-type PresentationPicture = { id: number; src: string; x: number; y: number; w: number; h: number };
+type PresentationPicture = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean };
 type PresentationShape = { id: number; kind: string; x: number; y: number; w: number; h: number; fill: string };
 type PresentationDesign = {
   box?: PresentationTextBox | null;
   extraBoxes?: { id: number; box: PresentationTextBox }[];
   pictures?: PresentationPicture[];
   shapes?: PresentationShape[];
+  countdown?: CountdownSettings;
 };
 type StudioSlide = Slide & { design?: PresentationDesign };
 
@@ -64,14 +68,16 @@ type SavedPresentationSlide = {
   dim?: number;
   bgImage?: string;
   bgVideo?: string;
+  bgVideoMuted?: boolean;
   bgAssetId?: string;
   box?: PresentationTextBox | null;
   extraBoxes?: { id: number; box: PresentationTextBox }[];
   pictures?: PresentationPicture[];
   shapes?: PresentationShape[];
+  countdown?: CountdownSettings;
 };
 type SavedPresentation = { id: string; name: string; slides: SavedPresentationSlide[]; locked?: boolean };
-type StudioMedia = { id: string; type: 'image' | 'video'; blob: Blob };
+type StudioMedia = { id: string; type: 'image' | 'video'; blob: Blob; originalBlob?: Blob; optimized?: boolean };
 type StudioMusicAsset = { id: string; name: string; blob: Blob; createdAt: number };
 type StudioMusicAssetWithUrl = StudioMusicAsset & { url: string };
 const STUDIO_SCENES_KEY = 'faithstream.studio-scenes';
@@ -110,6 +116,7 @@ const loadStudioScenes = (): Scene[] => {
           return {
             ...studioSlide,
             title: savedSlide.title || studioSlide.title || `Slide ${index + 1}`,
+            countdown: savedSlide.countdown,
             ...(!studioSlide.design ? { design: { box: savedSlide.box, extraBoxes: savedSlide.extraBoxes, pictures: savedSlide.pictures, shapes: savedSlide.shapes } } : {}),
           };
         }),
@@ -360,11 +367,14 @@ function SlideView({
     return (
       <div className={`relative h-full w-full overflow-hidden bg-gradient-to-br ${slide.bg ?? bg}`} style={{ containerType: 'inline-size' }}>
         {slide.bgImage && <img src={slide.bgImage} alt="" className="absolute inset-0 h-full w-full object-cover" />}
-        {slide.bgVideo && <video src={slide.bgVideo} autoPlay muted loop playsInline className="absolute inset-0 h-full w-full object-cover" />}
+        {slide.bgVideo && <video src={slide.bgVideo} autoPlay muted={slide.bgVideoMuted ?? true} loop playsInline className="absolute inset-0 h-full w-full object-cover" />}
         <div className="absolute inset-0 bg-black" style={{ opacity: (slide.dim ?? 0) / 100 }} />
-        {slide.design.pictures?.map((picture) => <img key={picture.id} src={picture.src} alt="" draggable={false} className="absolute object-contain" style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%` }} />)}
+        {slide.design.pictures?.map((picture) => picture.mediaType === 'video'
+          ? <video key={picture.id} src={picture.src} controls playsInline muted={picture.muted ?? false} className="absolute object-contain" style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%` }} />
+          : <img key={picture.id} src={picture.src} alt="" draggable={false} className="absolute object-contain" style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%` }} />)}
         {slide.design.shapes?.map((shape) => <div key={shape.id} className="absolute" style={{ left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
         {boxes.map((box, index) => <ProgramTextBox key={index} box={box} />)}
+        {slide.countdown && <CountdownDisplay countdown={slide.countdown} />}
       </div>
     );
   }
@@ -373,8 +383,9 @@ function SlideView({
       className={`relative flex h-full w-full flex-col items-center justify-center overflow-hidden bg-gradient-to-br p-2 text-center text-white ${slide?.bg ?? bg}`}
       style={slide?.bgImage ? { backgroundImage: `linear-gradient(rgba(0,0,0,${(slide.dim ?? 20) / 100}), rgba(0,0,0,${(slide.dim ?? 20) / 100})), url("${slide.bgImage}")`, backgroundSize: 'cover', backgroundPosition: 'center' } : undefined}
     >
-      {slide?.bgVideo && <video src={slide.bgVideo} autoPlay muted loop playsInline className="absolute inset-0 h-full w-full object-cover" />}
+      {slide?.bgVideo && <video src={slide.bgVideo} autoPlay muted={slide.bgVideoMuted ?? true} loop playsInline className="absolute inset-0 h-full w-full object-cover" />}
       {slide?.bgVideo && <div className="absolute inset-0 bg-black/20" />}
+      {slide?.countdown && <CountdownDisplay countdown={slide.countdown} />}
       {slide && scale && (
         <div className="relative z-10" style={{ fontSize: `clamp(${minRem}rem, ${scale}cqw, ${maxRem}rem)`, color: slide.textColor ?? '#fff' }}>
           <p className="whitespace-pre-line font-bold leading-snug drop-shadow">{slide.text}</p>
@@ -594,11 +605,12 @@ export default function Studio() {
   const [scenes, setScenes] = useState<Scene[]>(loadStudioScenes);
   const [slideshowScenes, setSlideshowScenes] = useState<Scene[]>(loadSlideshowScenes);
   const [savedPresentations, setSavedPresentations] = useState<SavedPresentation[]>([]);
-  const [mediaUrls, setMediaUrls] = useState<Record<string, { type: 'image' | 'video'; url: string }>>({});
+  const [mediaUrls, setMediaUrls] = useState<Record<string, { type: 'image' | 'video'; url: string; sizeBytes?: number; originalBytes?: number; optimized?: boolean }>>({});
   const [addSceneOpen, setAddSceneOpen] = useState(false);
   const [selectedPresentationId, setSelectedPresentationId] = useState('');
   const [sceneToDelete, setSceneToDelete] = useState<Scene | null>(null);
   const [sceneDeleteTab, setSceneDeleteTab] = useState<'stream' | 'slideshow'>('stream');
+  const [clearScenesTab, setClearScenesTab] = useState<'stream' | 'slideshow' | null>(null);
   const [addSceneTab, setAddSceneTab] = useState<'stream' | 'slideshow'>('stream');
   const [sceneId, setSceneId] = useState(() => scenes[0]?.id ?? 0); // scene whose slides are listed (Scenes panel)
   const [sidebarPanel, setSidebarPanel] = useState<'scenes' | 'music'>('scenes');
@@ -637,6 +649,7 @@ export default function Studio() {
   const [previewingMusicId, setPreviewingMusicId] = useState<string | null>(null);
   const [addSourceOpen, setAddSourceOpen] = useState(false);
   const [sourceError, setSourceError] = useState('');
+  const [mediaPreparing, setMediaPreparing] = useState('');
   const [audioError, setAudioError] = useState('');
   const [sourceEditor, setSourceEditor] = useState<Source | null>(null);
   const [sourceDraft, setSourceDraft] = useState('');
@@ -725,7 +738,7 @@ export default function Studio() {
   useEffect(() => {
     const storedScenes = scenes.map((scene) => ({
       ...scene,
-      slides: scene.slides.map((slide) => slide.bgAssetId ? { ...slide, bgImage: undefined, bgVideo: undefined } : slide),
+      slides: scene.slides.map((slide) => ({ ...(slide.bgAssetId ? { ...slide, bgImage: undefined, bgVideo: undefined } : slide), design: slide.design ? { ...slide.design, pictures: slide.design.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) } : undefined })),
     }));
     try { localStorage.setItem(STUDIO_SCENES_KEY, JSON.stringify(storedScenes)); } catch { /* Keep the active Studio session usable if storage is unavailable. */ }
   }, [scenes]);
@@ -733,7 +746,7 @@ export default function Studio() {
   useEffect(() => {
     const storedScenes = slideshowScenes.map((scene) => ({
       ...scene,
-      slides: scene.slides.map((slide) => slide.bgAssetId ? { ...slide, bgImage: undefined, bgVideo: undefined } : slide),
+      slides: scene.slides.map((slide) => ({ ...(slide.bgAssetId ? { ...slide, bgImage: undefined, bgVideo: undefined } : slide), design: slide.design ? { ...slide.design, pictures: slide.design.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) } : undefined })),
     }));
     try { localStorage.setItem(STUDIO_SLIDESHOW_SCENES_KEY, JSON.stringify(storedScenes)); } catch { /* Keep the slideshow session usable if storage is unavailable. */ }
   }, [slideshowScenes]);
@@ -750,7 +763,7 @@ export default function Studio() {
           name: presentation.name || scene.name,
           slides: scene.slides.map((slide, index) => {
             const savedSlide = presentation.slides[index];
-            return savedSlide ? { ...slide, title: savedSlide.title || slide.title || `Slide ${index + 1}` } : slide;
+            return savedSlide ? { ...slide, title: savedSlide.title || slide.title || `Slide ${index + 1}`, countdown: savedSlide.countdown } : slide;
           }),
         };
       });
@@ -939,23 +952,25 @@ export default function Studio() {
       const entries = assets.map((asset) => {
         const url = URL.createObjectURL(asset.blob);
         urls.push(url);
-        return [asset.id, { type: asset.type, url }] as const;
+        return [asset.id, { type: asset.type, url, sizeBytes: asset.blob.size, originalBytes: asset.originalBlob?.size, optimized: asset.optimized }] as const;
       });
       if (cancelled) { urls.forEach(URL.revokeObjectURL); return; }
-      const loadedUrls = Object.fromEntries(entries) as Record<string, { type: 'image' | 'video'; url: string }>;
+      const loadedUrls = Object.fromEntries(entries) as Record<string, { type: 'image' | 'video'; url: string; sizeBytes?: number; originalBytes?: number; optimized?: boolean }>;
       setMediaUrls(loadedUrls);
       setScenes((current) => current.map((scene) => ({
         ...scene,
         slides: scene.slides.map((slide) => {
           const asset = slide.bgAssetId ? loadedUrls[slide.bgAssetId] : undefined;
-          return asset ? { ...slide, bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : slide;
+          const design = slide.design ? { ...slide.design, pictures: slide.design.pictures?.map((picture) => picture.assetId && loadedUrls[picture.assetId] ? { ...picture, src: loadedUrls[picture.assetId].url } : picture) } : undefined;
+          return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), design };
         }),
       })));
       setSlideshowScenes((current) => current.map((scene) => ({
         ...scene,
         slides: scene.slides.map((slide) => {
           const asset = slide.bgAssetId ? loadedUrls[slide.bgAssetId] : undefined;
-          return asset ? { ...slide, bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : slide;
+          const design = slide.design ? { ...slide.design, pictures: slide.design.pictures?.map((picture) => picture.assetId && loadedUrls[picture.assetId] ? { ...picture, src: loadedUrls[picture.assetId].url } : picture) } : undefined;
+          return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), design };
         }),
       })));
       markStartupResourceReady('studio-media');
@@ -1006,8 +1021,10 @@ export default function Studio() {
         bgAssetId: slide.bgAssetId,
         bgImage: asset?.type === 'image' ? asset.url : slide.bgAssetId ? undefined : slide.bgImage,
         bgVideo: asset?.type === 'video' ? asset.url : slide.bgAssetId ? undefined : slide.bgVideo,
+        bgVideoMuted: slide.bgVideoMuted ?? true,
         dim: slide.dim,
         textColor: slide.box?.color,
+        countdown: slide.countdown,
         design: { box: slide.box, extraBoxes: slide.extraBoxes, pictures: slide.pictures, shapes: slide.shapes },
       };
     });
@@ -1074,6 +1091,28 @@ export default function Studio() {
   const askDeleteScene = (scene: Scene, tab: 'stream' | 'slideshow') => {
     setSceneDeleteTab(tab);
     setSceneToDelete(scene);
+  };
+
+  const clearAllScenes = (tab: 'stream' | 'slideshow') => {
+    if (tab === 'slideshow') {
+      setSlideshowScenes([]);
+      setOfflineSlide({ sceneId: 0, slideIdx: 0 });
+      setOfflineEditing(false);
+    } else {
+      sourceStreams.current.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
+      sourceStreams.current.clear();
+      setSources((current) => current.map((source) => ({ ...source, sceneId: 0, stream: undefined })));
+      setChannels((current) => current.map((channel) => ({ ...channel, sceneId: 0 })));
+      setScenes([]);
+      setSceneId(0);
+      setSelected({ sceneId: 0, slideIdx: 0 });
+      setPreview({ sceneId: 0, slideIdx: 0 });
+      setOnAir({ sceneId: 0, slideIdx: 0 });
+      setSelectedProgramSource(null);
+      setCameraOnlySnapshot(null);
+      setEditing(false);
+    }
+    setClearScenesTab(null);
   };
 
   const removeScene = (scene: Scene) => {
@@ -1581,16 +1620,20 @@ export default function Studio() {
   const addMediaSource = async (file?: File) => {
     if (!file) return;
     setSourceError('');
+    setMediaPreparing(file.name);
     const id = Math.max(0, ...sources.map((source) => source.id)) + 1;
     const mediaAssetId = `studio-source-${id}-${Date.now()}`;
     const type = file.type.startsWith('video/') ? 'video' : 'image';
     try {
-      await saveStudioMedia({ id: mediaAssetId, type, blob: file });
-      const url = URL.createObjectURL(file);
+      const prepared = await prepareMediaFile(file);
+      await saveStudioMedia({ id: mediaAssetId, type, blob: prepared.file, originalBlob: prepared.originalFile, optimized: !!prepared.originalFile });
+      const url = URL.createObjectURL(prepared.file);
       sourceObjectUrls.current.push(url);
-      setMediaUrls((current) => ({ ...current, [mediaAssetId]: { type, url } }));
-      createSource('media', { id, name: file.name, mediaAssetId });
+      setMediaUrls((current) => ({ ...current, [mediaAssetId]: { type, url, sizeBytes: prepared.file.size, originalBytes: prepared.originalFile?.size, optimized: !!prepared.originalFile } }));
+      createSource('media', { id, name: file.name, mediaAssetId, loop: true });
+      setMediaPreparing('');
     } catch {
+      setMediaPreparing('');
       setSourceError('Could not save that media file locally. Please try another file.');
     }
   };
@@ -2247,7 +2290,10 @@ export default function Studio() {
           className="min-w-0"
           action={
             sidebarPanel === 'scenes' ? (
-              <button aria-label="Add scene" onClick={beginAddScene} className="text-warm-white/70 hover:text-brand"><Plus size={18} /></button>
+              <div className="flex items-center gap-1">
+                <button type="button" onClick={() => setClearScenesTab('stream')} disabled={!scenes.length} title="Remove all scenes" className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-semibold text-red-300/80 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 size={12} />Clear all</button>
+                <button aria-label="Add scene" onClick={beginAddScene} className="rounded p-1 text-warm-white/70 hover:bg-white/5 hover:text-brand"><Plus size={18} /></button>
+              </div>
             ) : (
               <button type="button" onClick={() => musicFileRef.current?.click()} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold text-warm-white/75 hover:bg-white/5 hover:text-white"><Plus size={14} /> Upload</button>
             )
@@ -2349,6 +2395,7 @@ export default function Studio() {
                   const { id, name, kind, visible } = source;
                   const Icon = SOURCE_OPTIONS.find((option) => option.kind === kind)?.icon ?? Type;
                   const musicAsset = kind === 'music' ? musicAssets.find((asset) => asset.id === source.mediaAssetId) : undefined;
+                  const mediaAsset = kind === 'media' && source.mediaAssetId ? mediaUrls[source.mediaAssetId] : undefined;
                   return (
                     <li
                       key={id}
@@ -2369,7 +2416,7 @@ export default function Studio() {
                       />}
                       <GripVertical size={14} className="shrink-0 cursor-grab text-warm-white/35" />
                       <Icon size={15} className="shrink-0 text-warm-white/70" />
-                      <span className="min-w-0 flex-1 truncate">{name}</span>
+                      <span className="flex min-w-0 flex-1 flex-col truncate"><span className="truncate">{name}</span>{mediaAsset?.sizeBytes !== undefined && <span className="truncate text-[9px] text-warm-white/40">{mediaAsset.optimized && mediaAsset.originalBytes ? `${formatMediaSizeInKb(mediaAsset.originalBytes)} → ` : ''}{formatMediaSizeInKb(mediaAsset.sizeBytes)}{mediaAsset.optimized ? ' · optimized' : ''}</span>}</span>
                       {kind === 'music' && <>
                         <button type="button" aria-label={musicPlaying[id] ? `Pause ${name}` : `Play ${name}`} title={musicPlaying[id] ? 'Pause track' : 'Play track'} onClick={() => toggleMusicPlayback(id)} className="text-warm-white/70 hover:text-brand">{musicPlaying[id] ? <Pause size={14} /> : <Play size={14} />}</button>
                         <button type="button" aria-pressed={source.loop ?? false} title={source.loop ? 'Loop enabled' : 'Play once'} onClick={() => {
@@ -2405,6 +2452,7 @@ export default function Studio() {
               </div>
             )}
             {sourceError && <p role="alert" className="mt-2 rounded-md bg-red-500/10 px-2 py-1.5 text-[11px] text-red-200">{sourceError}</p>}
+            {mediaPreparing && <p role="status" aria-live="polite" className="mt-2 flex items-center gap-2 rounded-md bg-brand/5 px-2 py-1.5 text-[11px] text-warm-white/70"><Loader2 size={13} className="animate-spin text-brand" /> Optimizing {mediaPreparing}…</p>}
           </div>
           <input ref={sourceFileRef} type="file" accept="image/*,video/*" className="hidden" onChange={(event) => { void addMediaSource(event.currentTarget.files?.[0]); event.currentTarget.value = ''; }} />
         </Panel>
@@ -2596,7 +2644,10 @@ export default function Studio() {
             <div className="order-3 flex min-h-0 flex-col rounded-xl border border-white/10 bg-panel p-3">
                 <div className="mb-2 flex shrink-0 items-center justify-between">
                   <h3 className="text-sm font-semibold text-white">Scenes</h3>
-                  <button type="button" aria-label="Add scene" title="Add scene" onClick={beginAddScene} className="rounded p-1 text-warm-white/60 hover:bg-white/10 hover:text-white"><Plus size={15} /></button>
+                  <div className="flex items-center gap-1">
+                    <button type="button" onClick={() => setClearScenesTab('slideshow')} disabled={!slideshowScenes.length} title="Remove all scenes" className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-semibold text-red-300/80 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 size={12} />Clear all</button>
+                    <button type="button" aria-label="Add scene" title="Add scene" onClick={beginAddScene} className="rounded p-1 text-warm-white/60 hover:bg-white/10 hover:text-white"><Plus size={15} /></button>
+                  </div>
                 </div>
                 <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto overscroll-contain pr-1">
                   {slideshowScenes.map((item) => <div key={item.id} className="group relative">
@@ -2830,6 +2881,16 @@ export default function Studio() {
         message={sceneToDelete ? `Delete “${sceneToDelete.name}” and remove it from Studio? This cannot be undone.` : ''}
         onCancel={() => setSceneToDelete(null)}
         onConfirm={() => { if (sceneToDelete) sceneDeleteTab === 'slideshow' ? removeSlideshowScene(sceneToDelete) : removeScene(sceneToDelete); }}
+      />
+      <ConfirmationModal
+        open={clearScenesTab !== null}
+        title="Remove all scenes?"
+        message={clearScenesTab === 'slideshow'
+          ? `Remove all ${slideshowScenes.length} scenes from Slideshow? Your saved presentations will remain in Presentations.`
+          : `Remove all ${scenes.length} scenes from Streaming? The streaming output will go blank. Your saved presentations will remain in Presentations.`}
+        confirmLabel="Remove all"
+        onCancel={() => setClearScenesTab(null)}
+        onConfirm={() => { if (clearScenesTab) clearAllScenes(clearScenesTab); }}
       />
     </div>
   );

@@ -85,7 +85,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     if (!startingUp) return;
     let cancelled = false;
     const waitForPaint = () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    const minimumDisplayTime = new Promise<void>((resolve) => window.setTimeout(resolve, 1400));
+    const minimumDisplayTime = new Promise<void>((resolve) => window.setTimeout(resolve, 3000));
     const waitForInitialResources = async () => {
       await waitForPaint();
       const fontReady = document.fonts?.ready ?? Promise.resolve();

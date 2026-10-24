@@ -12,6 +12,15 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
       message?: string;
       slides?: { name: string; data: string }[];
     }>,
+  optimizeVideo: (file: File) =>
+    ipcRenderer.invoke('media:optimize-video', webUtils.getPathForFile(file)) as Promise<{
+      ok: boolean;
+      optimized?: boolean;
+      originalBytes?: number;
+      optimizedBytes?: number;
+      data?: Uint8Array;
+      message?: string;
+    }>,
   minimize: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   close: () => ipcRenderer.invoke('window:close'),
