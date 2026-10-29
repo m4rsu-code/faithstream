@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Check, CircleUserRound, LogOut, MonitorPlay, Palette, Radio, Settings as SettingsIcon, ShieldCheck, SlidersHorizontal } from 'lucide-react';
 import type { FormEvent, ReactNode } from 'react';
-import { signOutLocalAccount, updateLocalAccountName } from '../components/AuthGate';
+import { signOutLocalAccount, updateLocalAccountProfile } from '../components/AuthGate';
 
 const KEYS = {
   previewMode: 'faithstream.studio-preview-mode',
@@ -91,6 +91,7 @@ export default function Settings() {
     return themes.some((option) => option.id === saved) ? saved as ThemeName : 'midnight';
   });
   const [savedMessage, setSavedMessage] = useState('');
+  const [profileSaving, setProfileSaving] = useState(false);
 
   useEffect(() => { localStorage.setItem(KEYS.previewMode, String(previewMode)); }, [previewMode]);
   useEffect(() => { localStorage.setItem(KEYS.confirmEnd, String(confirmEnd)); }, [confirmEnd]);
@@ -102,22 +103,25 @@ export default function Settings() {
     localStorage.setItem(KEYS.theme, theme);
   }, [theme]);
 
-  const saveProfile = (event: FormEvent<HTMLFormElement>) => {
+  const saveProfile = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const next = {
       name: profile.name.trim() || defaultProfile.name,
       role: profile.role.trim() || defaultProfile.role,
-      email: profile.email.trim(),
     };
+    setProfileSaving(true);
+    setSavedMessage('Saving to your account…');
     try {
-      localStorage.setItem(KEYS.profile, JSON.stringify(next));
-      updateLocalAccountName(next.name);
-      setProfile(next);
-      window.dispatchEvent(new CustomEvent('faithstream:profile-updated', { detail: next }));
-      setSavedMessage('Profile saved');
+      const user = await updateLocalAccountProfile(next.name, next.role);
+      setProfile({ name: user.name, role: user.role, email: user.email_address });
+      setSavedMessage('Profile saved to your account');
       window.setTimeout(() => setSavedMessage(''), 2200);
-    } catch {
-      setSavedMessage('Could not save profile on this device');
+    } catch (cause) {
+      setSavedMessage(cause instanceof Error && cause.message !== 'Failed to fetch'
+        ? cause.message
+        : 'Could not reach the server. Check your connection and try again.');
+    } finally {
+      setProfileSaving(false);
     }
   };
 
@@ -135,7 +139,7 @@ export default function Settings() {
         </header>
 
         <div className="grid gap-4">
-          <SettingsCard icon={CircleUserRound} title="Your profile" description="Choose the name and role shown in FaithStream.">
+          <SettingsCard icon={CircleUserRound} title="Your profile" description="Your name and role are saved to your FaithStream account. Your sign-in email is fixed.">
             <form onSubmit={saveProfile}>
               <div className="flex items-center gap-3 py-4">
                 <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-brand/20 text-sm font-bold text-brand">
@@ -143,7 +147,7 @@ export default function Settings() {
                 </span>
                 <div>
                   <p className="text-sm font-semibold text-warm-white">{profile.name || 'Your name'}</p>
-                  <p className="text-xs text-warm-white/50">Profile is saved on this device</p>
+                  <p className="text-xs text-warm-white/50">Profile is synced with your account</p>
                 </div>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -153,13 +157,13 @@ export default function Settings() {
                 <label className="text-xs font-medium text-warm-white/65">Role
                   <input value={profile.role} onChange={(event) => setProfile((current) => ({ ...current, role: event.target.value }))} className={selectClass} placeholder="e.g. Media Team" />
                 </label>
-                <label className="text-xs font-medium text-warm-white/65 sm:col-span-2">Email address (optional)
-                  <input type="email" value={profile.email} onChange={(event) => setProfile((current) => ({ ...current, email: event.target.value }))} className={selectClass} placeholder="you@example.com" autoComplete="email" />
+                <label className="text-xs font-medium text-warm-white/65 sm:col-span-2">Email address (read-only)
+                  <input type="email" value={profile.email} readOnly className={`${selectClass} cursor-not-allowed opacity-70`} autoComplete="email" />
                 </label>
               </div>
               <div className="mt-4 flex items-center justify-end gap-3">
                 <span role="status" className="text-xs text-warm-white/55">{savedMessage}</span>
-                <button type="submit" className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy transition hover:brightness-110">Save profile</button>
+                <button type="submit" disabled={profileSaving} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy transition hover:brightness-110 disabled:cursor-wait disabled:opacity-60">{profileSaving ? 'Saving…' : 'Save profile'}</button>
               </div>
             </form>
             <div className="mt-4 flex items-center justify-between border-t border-white/10 pt-4">

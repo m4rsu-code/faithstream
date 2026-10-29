@@ -202,11 +202,34 @@ const INITIAL: SlideT[] = [
 
 const STORAGE_KEY = 'faithstream.presentation';
 const PROJECTS_STORAGE_KEY = 'faithstream.presentations';
+const PRESENTATION_API_URL = ((import.meta as ImportMeta & { env: { VITE_FAITHSTREAM_API_URL?: string } }).env.VITE_FAITHSTREAM_API_URL ?? 'http://127.0.0.1:8000/api').replace(/\/$/, '');
 const MEDIA_DB = 'faithstream.media';
 const MEDIA_STORE = 'assets';
 
-type PresentationProject = { id: string; name: string; slides: SlideT[]; updatedAt: number; locked?: boolean };
+type PresentationProject = { id: string; name: string; slides: SlideT[]; updatedAt: number; locked?: boolean; deviceOnly?: boolean; hasLocalMedia?: boolean };
+type SyncedPresentation = Pick<PresentationProject, 'id' | 'name' | 'slides' | 'updatedAt'> & { hasLocalMedia?: boolean };
 type DeleteConfirmation = { title: string; message: string; onConfirm: () => void };
+
+const prepareProjectForAccountSync = (project: PresentationProject): SyncedPresentation => {
+  let hasLocalMedia = Boolean(project.hasLocalMedia);
+  const slides = project.slides.map((slide) => {
+    if (slide.bgAssetId || slide.bgImage || slide.bgVideo) hasLocalMedia = true;
+    const slideWithoutLocalBackground = { ...slide };
+    delete slideWithoutLocalBackground.bgAssetId;
+    delete slideWithoutLocalBackground.bgImage;
+    delete slideWithoutLocalBackground.bgVideo;
+    const pictures = (slide.pictures ?? []).filter((picture) => {
+      if (picture.assetId || picture.src) {
+        hasLocalMedia = true;
+        return false;
+      }
+      return true;
+    });
+    return { ...slideWithoutLocalBackground, pictures };
+  });
+
+  return { id: project.id, name: project.name, slides, updatedAt: project.updatedAt, hasLocalMedia };
+};
 
 const loadProjects = (): PresentationProject[] => {
   try {
@@ -681,9 +704,97 @@ export default function Presentation() {
   const [alignmentGuides, setAlignmentGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
   const [fontPickerOpen, setFontPickerOpen] = useState(false);
   const [fontSearch, setFontSearch] = useState('');
+  const [accountSyncStatus, setAccountSyncStatus] = useState('Connecting to your account…');
   const fontPickerRef = useRef<HTMLDivElement>(null);
   const originalProjectRef = useRef<PresentationProject | null>(null);
   const newDraftProjectIdRef = useRef<string | null>(null);
+  const accountTokenRef = useRef<string | null>(null);
+  const accountSyncReadyRef = useRef(false);
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+
+  useEffect(() => {
+    let cancelled = false;
+    const connectAndLoadAccountProjects = async () => {
+      const token = await window.faithstreamWindow?.getAuthToken();
+      if (!token) {
+        if (!cancelled) setAccountSyncStatus('Local only — sign in to sync presentations');
+        return;
+      }
+
+      accountTokenRef.current = token;
+      try {
+        const response = await fetch(`${PRESENTATION_API_URL}/presentations`, {
+          headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+        });
+        if (!response.ok) throw new Error('Could not load presentations from your account.');
+        const result = await response.json() as { presentations?: SyncedPresentation[] };
+        const remoteProjects = Array.isArray(result.presentations) ? result.presentations : [];
+        if (cancelled) return;
+
+        const merged = new Map<string, PresentationProject>();
+        for (const project of remoteProjects) {
+          merged.set(project.id, { ...project, hasLocalMedia: Boolean(project.hasLocalMedia) });
+        }
+        for (const existingProject of projectsRef.current) {
+          const project = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(existingProject.id)
+            ? existingProject
+            : { ...existingProject, id: crypto.randomUUID() };
+          const remote = merged.get(project.id);
+          if (!remote || project.updatedAt >= remote.updatedAt) merged.set(project.id, project);
+        }
+        const next = [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+        localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+        accountSyncReadyRef.current = true;
+        setProjects(next);
+        setAccountSyncStatus('Connected — syncing presentations');
+      } catch {
+        if (cancelled) return;
+        accountSyncReadyRef.current = true;
+        setAccountSyncStatus('Offline — changes are saved on this device');
+      }
+    };
+
+    void connectAndLoadAccountProjects().catch(() => {
+      if (!cancelled) setAccountSyncStatus('Local only — unable to connect to the account server');
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!accountSyncReadyRef.current || !accountTokenRef.current) return;
+    const token = accountTokenRef.current;
+    const syncableProjects = projects.filter((project) => !project.deviceOnly && project.id !== activeProjectId);
+    if (!syncableProjects.length) {
+      if (projects.some((project) => project.deviceOnly)) {
+        setAccountSyncStatus('Connected — imported slide files stay on this device');
+      } else if (activeProjectId) {
+        setAccountSyncStatus('Connected — save this presentation to sync it');
+      } else {
+        setAccountSyncStatus('Connected — no presentations to sync yet');
+      }
+      return;
+    }
+
+    setAccountSyncStatus('Syncing presentations…');
+    const timeout = window.setTimeout(() => {
+      void Promise.all(syncableProjects.map(async (project) => {
+        const payload = prepareProjectForAccountSync(project);
+        const response = await fetch(`${PRESENTATION_API_URL}/presentations/${encodeURIComponent(project.id)}`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error('Account sync failed.');
+      })).then(() => {
+        setAccountSyncStatus('Synced to your account · imported media stays on this device');
+      }).catch(() => {
+        setAccountSyncStatus('Sync failed — check your connection; this device still has its local copy');
+      });
+    }, 700);
+
+    return () => window.clearTimeout(timeout);
+  }, [projects, activeProjectId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1488,6 +1599,7 @@ export default function Presentation() {
         name,
         slides: serializable(importedSlides),
         updatedAt: Date.now(),
+        deviceOnly: true,
       };
       const next = [project, ...projects];
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
@@ -1520,6 +1632,16 @@ export default function Presentation() {
         const next = projects.filter((item) => item.id !== id);
         setProjects(next);
         localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+        if (!project.deviceOnly && accountTokenRef.current) {
+          void fetch(`${PRESENTATION_API_URL}/presentations/${encodeURIComponent(project.id)}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${accountTokenRef.current}`, Accept: 'application/json' },
+          }).then((response) => {
+            if (!response.ok) throw new Error('Account deletion failed.');
+          }).catch(() => {
+            setAccountSyncStatus('Could not remove this presentation from account sync; try again while online');
+          });
+        }
         window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
         setProjectMenuFor(null);
         setDeleteConfirmation(null);
@@ -1657,6 +1779,7 @@ export default function Presentation() {
                 <div>
                   <h1 className="text-2xl font-bold text-warm-white">Presentations</h1>
                   <p className="mt-1 text-sm text-warm-white/55">Your saved slide projects, together in one place.</p>
+                  <p className="mt-1 text-xs text-warm-white/40">{accountSyncStatus}</p>
                 </div>
               </div>
             </div>
@@ -1716,6 +1839,7 @@ export default function Presentation() {
                         <div className="min-w-0">
                           <p className="truncate font-semibold text-warm-white">{project.name}</p>
                           <p className="mt-1 text-xs text-warm-white/50">{project.slides.length} {project.slides.length === 1 ? 'slide' : 'slides'} · Updated {new Date(project.updatedAt).toLocaleDateString()}</p>
+                          {(project.hasLocalMedia || project.deviceOnly) && <p className="mt-1 text-[11px] text-amber-200/80">Imported media stays on its original device</p>}
                         </div>
                         <ChevronRight size={18} className="shrink-0 text-warm-white/40 transition group-hover:translate-x-0.5 group-hover:text-brand" />
                       </div>

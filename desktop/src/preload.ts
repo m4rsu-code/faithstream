@@ -1,6 +1,9 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 contextBridge.exposeInMainWorld('faithstreamWindow', {
+  getAuthToken: () => ipcRenderer.invoke('auth:token:get') as Promise<string | null>,
+  saveAuthToken: (token: string) => ipcRenderer.invoke('auth:token:set', token) as Promise<boolean>,
+  clearAuthToken: () => ipcRenderer.invoke('auth:token:clear') as Promise<boolean>,
   getStudioDisplays: () => ipcRenderer.invoke('studio:get-displays'),
   openStudioDisplay: (displayId: number) => ipcRenderer.invoke('studio:open-display', displayId),
   closeStudioDisplay: () => ipcRenderer.invoke('studio:close-display'),

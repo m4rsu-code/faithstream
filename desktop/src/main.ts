@@ -1,6 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, screen } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, screen } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Writable } from 'node:stream';
@@ -37,6 +37,26 @@ type RecordingSession = {
 let streamSession: StreamSession | null = null;
 let recordingSession: RecordingSession | null = null;
 const studioDisplayWindows = new Map<number, BrowserWindow>();
+let authWindow: BrowserWindow | null = null;
+const authTokenPath = () => path.join(app.getPath('userData'), 'auth-token.bin');
+
+const isAuthWindow = (sender: Electron.WebContents) => authWindow?.webContents === sender;
+
+const protectWindowNavigation = (window: BrowserWindow) => {
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('will-navigate', (event, nextUrl) => {
+    try {
+      const current = new URL(window.webContents.getURL());
+      const next = new URL(nextUrl);
+      const sameApp = current.protocol === 'file:'
+        ? next.protocol === 'file:' && next.pathname === current.pathname
+        : next.origin === current.origin;
+      if (!sameApp) event.preventDefault();
+    } catch {
+      event.preventDefault();
+    }
+  });
+};
 
 const optimizeImportedVideo = async (sourcePath: string) => {
   if (!ffmpegPath) return { ok: false as const, message: 'The video optimizer is unavailable on this computer.' };
@@ -355,14 +375,21 @@ const createWindow = () => {
 
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
     },
   });
+  authWindow = mainWindow;
+  protectWindowNavigation(mainWindow);
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown' || input.key !== 'F11' || input.alt || input.control || input.meta) return;
     event.preventDefault();
     mainWindow.setFullScreen(!mainWindow.isFullScreen());
   });
   mainWindow.on('closed', () => {
+    if (authWindow === mainWindow) authWindow = null;
     if (streamSession?.window === mainWindow) stopStream();
     if (recordingSession?.window === mainWindow) stopRecording(mainWindow);
   });
@@ -384,6 +411,33 @@ const createWindow = () => {
 };
 
 app.whenReady().then(() => {
+  ipcMain.handle('auth:token:get', async (event) => {
+    if (!isAuthWindow(event.sender) || !safeStorage.isEncryptionAvailable()) return null;
+    try {
+      return safeStorage.decryptString(await readFile(authTokenPath()));
+    } catch {
+      return null;
+    }
+  });
+  ipcMain.handle('auth:token:set', async (event, token: unknown) => {
+    if (!isAuthWindow(event.sender) || !safeStorage.isEncryptionAvailable() || typeof token !== 'string' || token.length > 4096) return false;
+    try {
+      await writeFile(authTokenPath(), safeStorage.encryptString(token));
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  ipcMain.handle('auth:token:clear', async (event) => {
+    if (!isAuthWindow(event.sender)) return false;
+    try {
+      await rm(authTokenPath(), { force: true });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
   ipcMain.handle('presentation:render-pptx', async (event, sourcePath: unknown) => {
     if (!BrowserWindow.fromWebContents(event.sender) || typeof sourcePath !== 'string' || sourcePath.length > 32_768) {
       return { ok: false, message: 'Choose a PowerPoint file to import.' };
@@ -469,8 +523,15 @@ app.whenReady().then(() => {
       fullscreen: true,
       autoHideMenuBar: true,
       backgroundColor: '#000000',
-      webPreferences: { preload: path.join(__dirname, 'preload.cjs') },
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.cjs'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webSecurity: true,
+      },
     });
+    protectWindowNavigation(outputWindow);
     studioDisplayWindows.set(display.id, outputWindow);
     outputWindow.on('closed', () => { studioDisplayWindows.delete(display.id); });
     if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {

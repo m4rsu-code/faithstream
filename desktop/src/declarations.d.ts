@@ -1,6 +1,9 @@
 /// <reference types="@electron-forge/plugin-vite/forge-vite-env" />
 interface Window {
   faithstreamWindow?: {
+    getAuthToken: () => Promise<string | null>;
+    saveAuthToken: (token: string) => Promise<boolean>;
+    clearAuthToken: () => Promise<boolean>;
     getStudioDisplays: () => Promise<{ id: number; name: string; primary: boolean; bounds: { x: number; y: number; width: number; height: number } }[]>;
     openStudioDisplay: (displayId: number) => Promise<{ ok: boolean; message?: string }>;
     closeStudioDisplay: () => Promise<boolean>;
@@ -50,6 +53,10 @@ declare module '*.svg' {
   export default src;
 }
 declare module '*.jpg' {
+  const src: string;
+  export default src;
+}
+declare module '*.gif' {
   const src: string;
   export default src;
 }
