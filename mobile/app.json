@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "FaithStream Cam",
+    "slug": "faithstream-cam",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "newArchEnabled": false,
+    "plugins": [
+      "expo-dev-client",
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "cameraPermission": "Allow FaithStream Cam to use your camera.",
+          "microphonePermission": "Allow FaithStream Cam to use your microphone."
+        }
+      ]
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "FaithStream Cam connects to FaithStream Studio on your local Wi-Fi network."
+      }
+    },
+    "android": {
+      "package": "com.anonymous.faithstreamcam",
+      "permissions": ["CAMERA", "INTERNET"],
+      "usesCleartextTraffic": true
+    }
+  }
+}
