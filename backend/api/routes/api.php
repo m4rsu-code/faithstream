@@ -8,10 +8,16 @@ Route::post('/register', [AuthController::class, 'register'])->middleware('throt
 Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:5,1');
 Route::post('/forgot-password', [AuthController::class, 'forgotPassword'])->middleware('throttle:3,1');
 Route::post('/email/verification-notification', [AuthController::class, 'resendVerification'])->middleware('throttle:3,1');
+Route::get('/profile-photos/{user}', [AuthController::class, 'showProfilePhoto'])
+    ->middleware('signed:relative')
+    ->name('profile-photos.show');
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/user', [AuthController::class, 'user']);
     Route::patch('/user', [AuthController::class, 'updateUser']);
+    Route::post('/user/profile-photo', [AuthController::class, 'storeProfilePhoto']);
+    Route::delete('/user/profile-photo', [AuthController::class, 'deleteProfilePhoto']);
+    Route::patch('/user/profile-photo/position', [AuthController::class, 'updateProfilePhotoPosition']);
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/presentations', [PresentationProjectController::class, 'index']);
     Route::put('/presentations/{projectId}', [PresentationProjectController::class, 'store']);

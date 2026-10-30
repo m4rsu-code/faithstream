@@ -8,7 +8,10 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class AuthController extends Controller
 {
@@ -125,6 +128,77 @@ class AuthController extends Controller
         return response()->json(['user' => $this->userData($user)]);
     }
 
+    public function storeProfilePhoto(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'photo' => ['required', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
+        ]);
+
+        $user = $request->user();
+        $previousPath = $user->profile_photo_path;
+        $photoPath = $validated['photo']->store('profile-photos/'.$user->id, 'public');
+
+        if (! $photoPath) {
+            return response()->json(['message' => 'Could not save the profile photo. Please try again.'], 500);
+        }
+
+        $user->profile_photo_path = $photoPath;
+        $user->profile_photo_x = 50;
+        $user->profile_photo_y = 50;
+        $user->save();
+
+        if ($previousPath && $previousPath !== $photoPath) {
+            Storage::disk('public')->delete($previousPath);
+        }
+
+        return response()->json(['user' => $this->userData($user)]);
+    }
+
+    public function deleteProfilePhoto(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        $previousPath = $user->profile_photo_path;
+        $user->profile_photo_path = null;
+        $user->profile_photo_x = 50;
+        $user->profile_photo_y = 50;
+        $user->save();
+
+        if ($previousPath) {
+            Storage::disk('public')->delete($previousPath);
+        }
+
+        return response()->json(['user' => $this->userData($user)]);
+    }
+
+    public function updateProfilePhotoPosition(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'x' => ['required', 'integer', 'between:0,100'],
+            'y' => ['required', 'integer', 'between:0,100'],
+        ]);
+
+        $user = $request->user();
+        if (! $user->profile_photo_path) {
+            return response()->json(['message' => 'Add a profile photo before adjusting its position.'], 422);
+        }
+
+        $user->profile_photo_x = $validated['x'];
+        $user->profile_photo_y = $validated['y'];
+        $user->save();
+
+        return response()->json(['user' => $this->userData($user)]);
+    }
+
+    public function showProfilePhoto(User $user): StreamedResponse|JsonResponse
+    {
+        $photoPath = $user->profile_photo_path;
+        if (! $photoPath || ! Storage::disk('public')->exists($photoPath)) {
+            return response()->json(['message' => 'Profile photo not found.'], 404);
+        }
+
+        return Storage::disk('public')->response($photoPath, null, ['Cache-Control' => 'private, max-age=3600']);
+    }
+
     public function logout(Request $request): JsonResponse
     {
         $request->user()->currentAccessToken()?->delete();
@@ -132,9 +206,21 @@ class AuthController extends Controller
         return response()->json(['message' => 'Signed out.']);
     }
 
-    /** @return array{id: int, name: string, email_address: string, role: string} */
+    /** @return array{id: int, name: string, email_address: string, role: string, profile_photo_url: string|null, profile_photo_position: array{x: int, y: int}} */
     private function userData(User $user): array
     {
-        return ['id' => $user->id, 'name' => $user->name, 'email_address' => $user->email, 'role' => $user->role];
+        return [
+            'id' => $user->id,
+            'name' => $user->name,
+            'email_address' => $user->email,
+            'role' => $user->role,
+            'profile_photo_url' => $user->profile_photo_path
+                ? URL::temporarySignedRoute('profile-photos.show', now()->addYear(), ['user' => $user->getKey()], absolute: false)
+                : null,
+            'profile_photo_position' => [
+                'x' => (int) $user->profile_photo_x,
+                'y' => (int) $user->profile_photo_y,
+            ],
+        ];
     }
 }
