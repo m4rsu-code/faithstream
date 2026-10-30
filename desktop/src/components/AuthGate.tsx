@@ -56,10 +56,23 @@ const clearStoredAuthToken = async () => {
   await window.faithstreamWindow?.clearAuthToken();
 };
 
-type ApiUser = { id: number; name: string; email_address: string; role: string };
+type ProfilePhotoPosition = { x: number; y: number };
+type ApiUser = { id: number; name: string; email_address: string; role: string; profile_photo_url: string | null; profile_photo_position: ProfilePhotoPosition };
+const MIN_PROFILE_SAVE_LOADING_MS = 3000;
+
+const waitForMinimumProfileSaveLoading = async (startedAt: number) => {
+  const remaining = MIN_PROFILE_SAVE_LOADING_MS - (Date.now() - startedAt);
+  if (remaining > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, remaining));
+};
 
 const saveUserProfile = (user: ApiUser) => {
-  const profile = { name: user.name, role: user.role, email: user.email_address };
+  const profile = {
+    name: user.name,
+    role: user.role,
+    email: user.email_address,
+    photoUrl: user.profile_photo_url ? new URL(user.profile_photo_url, `${API_BASE_URL}/`).toString() : null,
+    photoPosition: user.profile_photo_position ?? { x: 50, y: 50 },
+  };
   localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
   window.dispatchEvent(new CustomEvent('faithstream:profile-updated', { detail: profile }));
 };
@@ -74,17 +87,73 @@ export const signOutLocalAccount = () => {
 };
 
 export const updateLocalAccountProfile = async (name: string, role: string): Promise<ApiUser> => {
+  const startedAt = Date.now();
+  try {
+    const token = await getStoredAuthToken();
+    if (!token) throw new Error('You must be signed in to update your profile.');
+    const response = await fetch(`${API_BASE_URL}/user`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ name, role }),
+    });
+    const data = await response.json() as { user?: ApiUser; message?: string; errors?: Record<string, string[]> };
+    if (!response.ok || !data.user) {
+      const firstError = data.errors ? Object.values(data.errors).flat()[0] : undefined;
+      throw new Error(firstError ?? data.message ?? 'Could not save your profile.');
+    }
+    await waitForMinimumProfileSaveLoading(startedAt);
+    saveUserProfile(data.user);
+    return data.user;
+  } catch (error) {
+    await waitForMinimumProfileSaveLoading(startedAt);
+    throw error;
+  }
+};
+
+export const updateLocalAccountProfilePhoto = async (photo: File): Promise<ApiUser> => {
   const token = await getStoredAuthToken();
-  if (!token) throw new Error('You must be signed in to update your profile.');
-  const response = await fetch(`${API_BASE_URL}/user`, {
-    method: 'PATCH',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ name, role }),
+  if (!token) throw new Error('You must be signed in to update your profile photo.');
+  const form = new FormData();
+  form.append('photo', photo);
+  const response = await fetch(`${API_BASE_URL}/user/profile-photo`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    body: form,
   });
   const data = await response.json() as { user?: ApiUser; message?: string; errors?: Record<string, string[]> };
   if (!response.ok || !data.user) {
     const firstError = data.errors ? Object.values(data.errors).flat()[0] : undefined;
-    throw new Error(firstError ?? data.message ?? 'Could not save your profile.');
+    throw new Error(firstError ?? data.message ?? 'Could not save your profile photo.');
+  }
+  saveUserProfile(data.user);
+  return data.user;
+};
+
+export const removeLocalAccountProfilePhoto = async (): Promise<ApiUser> => {
+  const token = await getStoredAuthToken();
+  if (!token) throw new Error('You must be signed in to update your profile photo.');
+  const response = await fetch(`${API_BASE_URL}/user/profile-photo`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+  });
+  const data = await response.json() as { user?: ApiUser; message?: string };
+  if (!response.ok || !data.user) throw new Error(data.message ?? 'Could not remove your profile photo.');
+  saveUserProfile(data.user);
+  return data.user;
+};
+
+export const updateLocalAccountProfilePhotoPosition = async (position: ProfilePhotoPosition): Promise<ApiUser> => {
+  const token = await getStoredAuthToken();
+  if (!token) throw new Error('You must be signed in to adjust your profile photo.');
+  const response = await fetch(`${API_BASE_URL}/user/profile-photo/position`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(position),
+  });
+  const data = await response.json() as { user?: ApiUser; message?: string; errors?: Record<string, string[]> };
+  if (!response.ok || !data.user) {
+    const firstError = data.errors ? Object.values(data.errors).flat()[0] : undefined;
+    throw new Error(firstError ?? data.message ?? 'Could not save your profile photo position.');
   }
   saveUserProfile(data.user);
   return data.user;

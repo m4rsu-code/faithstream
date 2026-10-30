@@ -7,6 +7,7 @@ import {
   type PointerEvent as RPointerEvent,
   type ReactNode,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   AlignCenter,
@@ -56,6 +57,7 @@ type Align = 'left' | 'center' | 'right';
 
 type TextBox = {
   text: string; // first line = title, other lines = subtitle
+  layerOrder?: number | 'back' | 'front';
   font: string;
   size: number; // px on a 1280 x 720 slide
   color: string;
@@ -75,8 +77,8 @@ type TextBox = {
   h: number;
 };
 
-type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; aspectRatio?: number };
-type ShapeT = { id: number; kind: 'rectangle' | 'circle' | 'triangle' | 'line' | 'star' | 'arrow'; x: number; y: number; w: number; h: number; fill: string };
+type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; aspectRatio?: number; layerOrder?: number | 'back' | 'front' };
+type ShapeT = { id: number; kind: 'rectangle' | 'circle' | 'triangle' | 'line' | 'star' | 'arrow'; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number };
 type MediaAsset = { id: string; name: string; type: 'image' | 'video'; category?: 'background' | 'slide'; blob: Blob; originalBlob?: Blob; optimized?: boolean; createdAt: number; url: string };
 type StoredMediaAsset = Omit<MediaAsset, 'url'>;
 
@@ -86,9 +88,11 @@ type SlideT = {
   bg: string; // tailwind gradient classes
   dim: number; // 0-80, % darkening over the background
   bgImage?: string;
+  bgPosition?: { x: number; y: number };
   bgVideo?: string;
   bgVideoMuted?: boolean;
   bgAssetId?: string;
+  bgPictureRestore?: PictureT;
   box: TextBox | null;
   extraBoxes?: { id: number; box: TextBox }[];
   pictures?: PictureT[];
@@ -218,6 +222,8 @@ const prepareProjectForAccountSync = (project: PresentationProject): SyncedPrese
     delete slideWithoutLocalBackground.bgAssetId;
     delete slideWithoutLocalBackground.bgImage;
     delete slideWithoutLocalBackground.bgVideo;
+    if (slide.bgPictureRestore) hasLocalMedia = true;
+    delete slideWithoutLocalBackground.bgPictureRestore;
     const pictures = (slide.pictures ?? []).filter((picture) => {
       if (picture.assetId || picture.src) {
         hasLocalMedia = true;
@@ -280,7 +286,11 @@ const saveMediaAsset = async (file: File, category: 'background' | 'slide' = 'ba
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(MEDIA_STORE, 'readwrite');
     transaction.objectStore(MEDIA_STORE).put(asset);
-    transaction.oncomplete = () => { db.close(); resolve(asset); };
+    transaction.oncomplete = () => {
+      db.close();
+      window.dispatchEvent(new CustomEvent('faithstream:media-updated'));
+      resolve(asset);
+    };
     transaction.onerror = () => { db.close(); reject(transaction.error); };
     transaction.onabort = () => { db.close(); reject(transaction.error); };
   });
@@ -314,6 +324,12 @@ const loadSlides = (): SlideT[] => {
 };
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
+const getImageAspectRatio = (src: string) => new Promise<number>((resolve) => {
+  const image = new Image();
+  image.onload = () => resolve(image.naturalWidth > 0 && image.naturalHeight > 0 ? image.naturalWidth / image.naturalHeight : 32 / 44);
+  image.onerror = () => resolve(32 / 44);
+  image.src = src;
+});
 const toLocalDateTimeInput = (value: string) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
@@ -323,7 +339,7 @@ const slideName = (s: SlideT) => s.title;
 
 /* ---------- Slide rendering (used by the canvas, thumbnails, templates and preview) ---------- */
 
-function TextBoxView({ box }: { box: TextBox }) {
+function TextBoxView({ box, defaultLayerOrder = 3000 }: { box: TextBox; defaultLayerOrder?: number }) {
   const wrap = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
@@ -357,6 +373,7 @@ function TextBoxView({ box }: { box: TextBox }) {
         top: `${box.y}%`,
         width: `${box.w}%`,
         height: `${box.h}%`,
+        zIndex: typeof box.layerOrder === 'number' ? box.layerOrder : box.layerOrder === 'front' ? 5000 : box.layerOrder === 'back' ? 0 : defaultLayerOrder,
         background: box.boxBgOn ? box.boxBg : undefined,
         borderRadius: '1cqw',
       }}
@@ -392,14 +409,22 @@ function TextBoxView({ box }: { box: TextBox }) {
 }
 
 /** Fills its (relative, 16:9) parent. Everything inside scales with the slide's width. */
-function SlideRender({ slide, onVideoSelect }: { slide: SlideT; onVideoSelect?: (id: number) => void }) {
+function SlideRender({ slide, onVideoSelect, editingTextBoxId }: { slide: SlideT; onVideoSelect?: (id: number) => void; editingTextBoxId?: number | null }) {
+  const renderPicture = (picture: PictureT, index: number) => {
+    const zIndex = typeof picture.layerOrder === 'number' ? picture.layerOrder : picture.layerOrder === 'front' ? 5000 : picture.layerOrder === 'back' ? 0 : 1000 + index;
+    const style = { left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, zIndex };
+    return picture.mediaType === 'video'
+      ? <video key={picture.id} data-slide-video-id={picture.id} src={picture.src} controls playsInline muted={picture.muted ?? false} onPointerDown={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} onClick={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} className="pointer-events-auto absolute object-contain" style={style} />
+      : <img key={picture.id} src={picture.src} alt="" draggable={false} className="absolute object-contain" style={style} />;
+  };
+
   return (
     <div
-      className={`absolute inset-0 overflow-hidden bg-linear-to-br ${slide.bg}`}
+      className={`absolute isolate inset-0 overflow-hidden bg-linear-to-br ${slide.bg}`}
       style={{ containerType: 'inline-size' }}
     >
       {slide.bgImage && (
-        <img src={slide.bgImage} alt="" className="absolute inset-0 h-full w-full object-cover" />
+        <img src={slide.bgImage} alt="" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />
       )}
       {slide.bgVideo && (
         <video
@@ -409,15 +434,14 @@ function SlideRender({ slide, onVideoSelect }: { slide: SlideT; onVideoSelect?: 
           muted={slide.bgVideoMuted ?? true}
           playsInline
           className="absolute inset-0 h-full w-full object-cover"
+          style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }}
         />
       )}
       <div className="absolute inset-0 bg-black" style={{ opacity: slide.dim / 100 }} />
-      {slide.pictures?.map((picture) => picture.mediaType === 'video'
-        ? <video key={picture.id} data-slide-video-id={picture.id} src={picture.src} controls playsInline muted={picture.muted ?? false} onPointerDown={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} onClick={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} className="pointer-events-auto absolute object-contain" style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%` }} />
-        : <img key={picture.id} src={picture.src} alt="" draggable={false} className="absolute object-contain" style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%` }} />)}
-      {slide.shapes?.map((shape) => <div key={shape.id} className="absolute" style={{ left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
-      {slide.box && <TextBoxView box={slide.box} />}
-      {slide.extraBoxes?.map(({ id, box }) => <TextBoxView key={id} box={box} />)}
+      {slide.pictures?.map(renderPicture)}
+      {slide.shapes?.map((shape, index) => <div key={shape.id} className="absolute" style={{ left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
+      {slide.box && editingTextBoxId !== null && <TextBoxView box={slide.box} />}
+      {slide.extraBoxes?.filter(({ id }) => editingTextBoxId !== id).map(({ id, box }, index) => <TextBoxView key={id} box={box} defaultLayerOrder={3001 + index} />)}
       {slide.countdown && <CountdownDisplay countdown={slide.countdown} />}
     </div>
   );
@@ -608,6 +632,9 @@ function PreviewOverlay({
 
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Slide preview"
       className="group fixed inset-0 z-50 flex items-center justify-center bg-black"
     >
       <div
@@ -699,19 +726,45 @@ export default function Presentation() {
   const [selectedBoxId, setSelectedBoxId] = useState<number | null>(null);
   const [isBoxSelected, setIsBoxSelected] = useState(false);
   const [selectedPictureId, setSelectedPictureId] = useState<number | null>(null);
+  const [pictureMenu, setPictureMenu] = useState<{ kind: 'picture' | 'text' | 'background'; id: number | null; x: number; y: number } | null>(null);
   const [selectedShapeId, setSelectedShapeId] = useState<number | null>(null);
   const [selectedCountdown, setSelectedCountdown] = useState(false);
+  const [backgroundEditing, setBackgroundEditing] = useState(false);
   const [alignmentGuides, setAlignmentGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
   const [fontPickerOpen, setFontPickerOpen] = useState(false);
   const [fontSearch, setFontSearch] = useState('');
   const [accountSyncStatus, setAccountSyncStatus] = useState('Connecting to your account…');
   const fontPickerRef = useRef<HTMLDivElement>(null);
+  const undoHistoryRef = useRef<SlideT[][]>([]);
+  const previousSlidesRef = useRef(slides);
+  const skipUndoRecordingRef = useRef(false);
+  const undoHistoryProjectRef = useRef(activeProjectId);
   const originalProjectRef = useRef<PresentationProject | null>(null);
   const newDraftProjectIdRef = useRef<string | null>(null);
   const accountTokenRef = useRef<string | null>(null);
   const accountSyncReadyRef = useRef(false);
   const projectsRef = useRef(projects);
   projectsRef.current = projects;
+
+  useLayoutEffect(() => {
+    if (undoHistoryProjectRef.current !== activeProjectId) {
+      undoHistoryProjectRef.current = activeProjectId;
+      undoHistoryRef.current = [];
+      previousSlidesRef.current = slides;
+      skipUndoRecordingRef.current = false;
+      return;
+    }
+    if (skipUndoRecordingRef.current) {
+      skipUndoRecordingRef.current = false;
+      previousSlidesRef.current = slides;
+      return;
+    }
+    if (previousSlidesRef.current !== slides) {
+      undoHistoryRef.current.push(previousSlidesRef.current);
+      if (undoHistoryRef.current.length > 100) undoHistoryRef.current.shift();
+      previousSlidesRef.current = slides;
+    }
+  }, [slides, activeProjectId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -804,13 +857,16 @@ export default function Presentation() {
       urls = assets.map((asset) => asset.url);
       if (cancelled) { urls.forEach(URL.revokeObjectURL); return; }
       setMediaAssets(assets);
+      skipUndoRecordingRef.current = true;
       setSlides((current) => current.map((slide) => {
         const asset = assets.find((item) => item.id === slide.bgAssetId);
         const pictures = slide.pictures?.map((picture) => {
           const pictureAsset = picture.assetId ? assets.find((item) => item.id === picture.assetId) : undefined;
           return pictureAsset ? { ...picture, src: pictureAsset.url } : picture;
         });
-        return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), pictures };
+        const restoreAsset = slide.bgPictureRestore?.assetId ? assets.find((item) => item.id === slide.bgPictureRestore?.assetId) : undefined;
+        const bgPictureRestore = restoreAsset && slide.bgPictureRestore ? { ...slide.bgPictureRestore, src: restoreAsset.url } : slide.bgPictureRestore;
+        return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), bgPictureRestore, pictures };
       }));
       setProjects((current) => current.map((project) => ({
         ...project,
@@ -820,7 +876,9 @@ export default function Presentation() {
             const pictureAsset = picture.assetId ? assets.find((item) => item.id === picture.assetId) : undefined;
             return pictureAsset ? { ...picture, src: pictureAsset.url } : picture;
           });
-          return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), pictures };
+          const restoreAsset = slide.bgPictureRestore?.assetId ? assets.find((item) => item.id === slide.bgPictureRestore?.assetId) : undefined;
+          const bgPictureRestore = restoreAsset && slide.bgPictureRestore ? { ...slide.bgPictureRestore, src: restoreAsset.url } : slide.bgPictureRestore;
+          return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), bgPictureRestore, pictures };
         }),
       })));
     }).catch(() => { if (!cancelled) setStatus('Could not load the media library'); });
@@ -837,7 +895,7 @@ export default function Presentation() {
 
   useEffect(() => {
     if (!activeProjectId) return;
-    const savedSlides = slides.map((slide) => ({ ...slide, bgImage: slide.bgAssetId ? undefined : slide.bgImage, bgVideo: undefined, pictures: slide.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) }));
+    const savedSlides = slides.map((slide) => ({ ...slide, bgImage: slide.bgAssetId ? undefined : slide.bgImage, bgVideo: undefined, bgPictureRestore: slide.bgPictureRestore?.assetId ? { ...slide.bgPictureRestore, src: '' } : slide.bgPictureRestore, pictures: slide.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) }));
     setProjects((current) => {
       const next = current.map((project) => project.id === activeProjectId
         ? { ...project, name: projectName.trim() || 'Untitled presentation', slides: savedSlides, updatedAt: Date.now() }
@@ -866,6 +924,9 @@ export default function Presentation() {
 
   const stageRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  const canvasTextRef = useRef<HTMLTextAreaElement>(null);
+  const canvasTextMeasureRef = useRef<HTMLDivElement>(null);
+  const [canvasTextScale, setCanvasTextScale] = useState(1);
   const slideImportInput = useRef<HTMLInputElement>(null);
   const contentInput = useRef<HTMLInputElement>(null);
 
@@ -873,6 +934,23 @@ export default function Presentation() {
   const box = selectedBoxId === null
     ? cur.box
     : cur.extraBoxes?.find((item) => item.id === selectedBoxId)?.box ?? null;
+
+  useLayoutEffect(() => {
+    const textarea = canvasTextRef.current;
+    const measure = canvasTextMeasureRef.current;
+    if (!textarea || !measure || !isBoxSelected) return;
+    measure.textContent = box?.text || ' ';
+    const contentHeight = measure.getBoundingClientRect().height;
+    const scale = box?.autoSize && contentHeight > 0 ? Math.min(1, textarea.clientHeight / contentHeight) : 1;
+    setCanvasTextScale((current) => Math.abs(current - scale) > 0.001 ? scale : current);
+    textarea.style.paddingTop = `${Math.max(4, (textarea.clientHeight - contentHeight * scale) / 2)}px`;
+  }, [box?.text, box?.size, box?.lineHeight, box?.letterSpacing, box?.font, box?.w, box?.h, box?.autoSize, canvasTextScale, isBoxSelected, selectedBoxId, zoom]);
+
+  useLayoutEffect(() => {
+    if (!isBoxSelected) return;
+    canvasTextRef.current?.focus();
+  }, [isBoxSelected, selectedBoxId]);
+
   const selectedShape = (cur.shapes ?? []).find((shape) => shape.id === selectedShapeId);
   const selectedPicture = (cur.pictures ?? []).find((picture) => picture.id === selectedPictureId);
   const activeProject = projects.find((project) => project.id === activeProjectId);
@@ -893,7 +971,7 @@ export default function Presentation() {
     .filter((family) => family.toLocaleLowerCase().includes(fontSearch.trim().toLocaleLowerCase()))
     .slice(0, 60);
 
-  useEffect(() => { setSelectedBoxId(null); setIsBoxSelected(false); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); setMenuFor(null); }, [index, activeProjectId]);
+  useEffect(() => { setSelectedBoxId(null); setIsBoxSelected(false); setSelectedPictureId(null); setPictureMenu(null); setSelectedShapeId(null); setSelectedCountdown(false); setBackgroundEditing(false); setMenuFor(null); }, [index, activeProjectId]);
 
   /* ----- editing helpers ----- */
 
@@ -916,12 +994,113 @@ export default function Presentation() {
   }));
 
   const updatePicture = (id: number, patch: Partial<PictureT>) => !cur.locked && setSlides((l) => l.map((s, i) => i === index ? { ...s, pictures: (s.pictures ?? []).map((picture) => picture.id === id ? { ...picture, ...patch } : picture) } : s));
+  const setPictureAsBackground = (id: number) => {
+    const picture = cur.pictures?.find((item) => item.id === id);
+    if (!picture || cur.locked) return;
+    updateSlide({
+      bgAssetId: picture.assetId,
+      bgImage: picture.mediaType === 'video' ? undefined : picture.src,
+      bgVideo: picture.mediaType === 'video' ? picture.src : undefined,
+      bgVideoMuted: picture.mediaType === 'video' ? true : undefined,
+      bgPosition: { x: 50, y: 50 },
+      bgPictureRestore: picture.mediaType === 'video' ? undefined : picture,
+      pictures: (cur.pictures ?? []).filter((item) => item.id !== id),
+    });
+    setSelectedPictureId(null);
+    setBackgroundEditing(false);
+    setPictureMenu(null);
+  };
+  const removeBackgroundMedia = (restorePicture: boolean) => {
+    const picture = restorePicture ? cur.bgPictureRestore : undefined;
+    updateSlide({
+      bgAssetId: undefined,
+      bgImage: undefined,
+      bgVideo: undefined,
+      bgVideoMuted: undefined,
+      bgPosition: undefined,
+      bgPictureRestore: undefined,
+      pictures: picture ? [...(cur.pictures ?? []), picture] : cur.pictures,
+    });
+    if (picture) {
+      setSelectedPictureId(picture.id);
+      setSelectedBoxId(null);
+      setIsBoxSelected(false);
+    }
+    setBackgroundEditing(false);
+    setPictureMenu(null);
+  };
+  const moveLayer = (kind: 'picture' | 'shape' | 'text', id: number | null, action: 'front' | 'forward' | 'backward' | 'back') => {
+    if (cur.locked) return;
+    const objects: { key: string; kind: 'picture' | 'shape' | 'text'; id: number | null; order: number }[] = [
+      ...(cur.pictures ?? []).map((item, position) => ({ key: `picture:${item.id}`, kind: 'picture' as const, id: item.id, order: typeof item.layerOrder === 'number' ? item.layerOrder : item.layerOrder === 'front' ? 5000 : item.layerOrder === 'back' ? 0 : 1000 + position })),
+      ...(cur.shapes ?? []).map((item, position) => ({ key: `shape:${item.id}`, kind: 'shape' as const, id: item.id, order: item.layerOrder ?? 2000 + position })),
+      ...(cur.box ? [{ key: 'text:main', kind: 'text' as const, id: null, order: typeof cur.box.layerOrder === 'number' ? cur.box.layerOrder : cur.box.layerOrder === 'front' ? 5000 : cur.box.layerOrder === 'back' ? 0 : 3000 }] : []),
+      ...(cur.extraBoxes ?? []).map(({ id, box }, position) => ({ key: `text:${id}`, kind: 'text' as const, id, order: typeof box.layerOrder === 'number' ? box.layerOrder : box.layerOrder === 'front' ? 5000 : box.layerOrder === 'back' ? 0 : 3001 + position })),
+    ].sort((a, b) => a.order - b.order);
+    const key = `${kind}:${id ?? 'main'}`;
+    const currentIndex = objects.findIndex((item) => item.key === key);
+    if (currentIndex < 0) return;
+    const [moving] = objects.splice(currentIndex, 1);
+    const targetIndex = action === 'front' ? objects.length : action === 'back' ? 0 : action === 'forward' ? Math.min(currentIndex + 1, objects.length) : Math.max(0, currentIndex - 1);
+    objects.splice(targetIndex, 0, moving);
+    setSlides((items) => items.map((slide, slideIndex) => {
+      if (slideIndex !== index) return slide;
+      return {
+        ...slide,
+        pictures: slide.pictures?.map((item) => ({ ...item, layerOrder: objects.findIndex((entry) => entry.key === `picture:${item.id}`) * 10 })),
+        shapes: slide.shapes?.map((item) => ({ ...item, layerOrder: objects.findIndex((entry) => entry.key === `shape:${item.id}`) * 10 })),
+        box: slide.box ? { ...slide.box, layerOrder: objects.findIndex((entry) => entry.key === 'text:main') * 10 } : slide.box,
+        extraBoxes: slide.extraBoxes?.map((item) => ({ ...item, box: { ...item.box, layerOrder: objects.findIndex((entry) => entry.key === `text:${item.id}`) * 10 } })),
+      };
+    }));
+    setPictureMenu(null);
+  };
+  const duplicatePicture = (id: number) => {
+    const picture = cur.pictures?.find((item) => item.id === id);
+    if (!picture || cur.locked) return;
+    const duplicate = { ...picture, id: nextId++, x: clamp(picture.x + 4, 0, 100 - picture.w), y: clamp(picture.y + 4, 0, 100 - picture.h) };
+    updateSlide({ pictures: [...(cur.pictures ?? []), duplicate] });
+    setSelectedPictureId(duplicate.id);
+    setPictureMenu(null);
+  };
+  const duplicateTextBox = (id: number | null) => {
+    const source = id === null ? cur.box : cur.extraBoxes?.find((item) => item.id === id)?.box;
+    if (!source || cur.locked) return;
+    const duplicateId = nextId++;
+    const duplicate = { ...source, x: clamp(source.x + 4, 0, 100 - source.w), y: clamp(source.y + 4, 0, 100 - source.h) };
+    updateSlide({ extraBoxes: [...(cur.extraBoxes ?? []), { id: duplicateId, box: duplicate }] });
+    setSelectedBoxId(duplicateId);
+    setIsBoxSelected(true);
+    setSelectedPictureId(null);
+    setPictureMenu(null);
+  };
   const selectPicture = (id: number) => {
     setSelectedPictureId(id);
     setSelectedShapeId(null);
     setSelectedCountdown(false);
     setSelectedBoxId(null);
     setIsBoxSelected(false);
+  };
+  const startBackgroundDrag = (event: RPointerEvent<HTMLDivElement>) => {
+    if (!backgroundEditing || cur.locked || !stageRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = stageRef.current.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const position = cur.bgPosition ?? { x: 50, y: 50 };
+    const moveBackground = (pointer: PointerEvent) => {
+      updateSlide({ bgPosition: {
+        x: clamp(position.x - (pointer.clientX - startX) / rect.width * 100, 0, 100),
+        y: clamp(position.y - (pointer.clientY - startY) / rect.height * 100, 0, 100),
+      } });
+    };
+    const stop = () => {
+      window.removeEventListener('pointermove', moveBackground);
+      window.removeEventListener('pointerup', stop);
+    };
+    window.addEventListener('pointermove', moveBackground);
+    window.addEventListener('pointerup', stop);
   };
   const toggleSelectedVideoPlayback = () => {
     if (!selectedPicture || selectedPicture.mediaType !== 'video') return;
@@ -1088,8 +1267,11 @@ export default function Presentation() {
       const stored = await saveMediaAsset(file);
       const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
       setMediaAssets((items) => [asset, ...items.filter((item) => item.id !== asset.id)]);
+      const aspectRatio = await getImageAspectRatio(asset.url);
+      const width = Math.min(48, 65 * aspectRatio);
+      const height = width / aspectRatio;
       const id = nextId++;
-      updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'image', x: 34, y: 28, w: 32, h: 44 }] });
+      updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'image', aspectRatio, x: (100 - width) / 2, y: (100 - height) / 2, w: width, h: height }] });
       setSelectedPictureId(id);
       setSelectedBoxId(null);
       setIsBoxSelected(false);
@@ -1163,16 +1345,20 @@ export default function Presentation() {
       })();
       return;
     }
-    const id = nextId++;
-    updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'image', x: 34, y: 28, w: 32, h: 44 }] });
-    setSelectedPictureId(id);
-    setSelectedBoxId(null);
-    setIsBoxSelected(false);
-    setSelectedShapeId(null);
+    void getImageAspectRatio(asset.url).then((aspectRatio) => {
+      const width = Math.min(48, 65 * aspectRatio);
+      const height = width / aspectRatio;
+      const id = nextId++;
+      updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'image', aspectRatio, x: (100 - width) / 2, y: (100 - height) / 2, w: width, h: height }] });
+      setSelectedPictureId(id);
+      setSelectedBoxId(null);
+      setIsBoxSelected(false);
+      setSelectedShapeId(null);
+    });
   };
 
   const startPictureDrag = (picture: PictureT) => (event: RPointerEvent) => {
-    if (cur.locked || !stageRef.current) return;
+    if (cur.locked || event.button !== 0 || !stageRef.current) return;
     event.preventDefault();
     event.stopPropagation();
     stageRef.current.focus({ preventScroll: true });
@@ -1255,6 +1441,21 @@ export default function Presentation() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !event.shiftKey) {
+        const target = event.target as HTMLElement;
+        const isSlideTextField = target.id === 'slide-text' || target.getAttribute('aria-label') === 'Edit text on slide';
+        const isEditableField = target.isContentEditable
+          || target.tagName === 'TEXTAREA'
+          || (target instanceof HTMLInputElement && !['range', 'color', 'checkbox', 'radio', 'file', 'button'].includes(target.type));
+        if (isEditableField && !isSlideTextField) return;
+        const previousSlides = undoHistoryRef.current.pop();
+        if (!previousSlides) return;
+        event.preventDefault();
+        skipUndoRecordingRef.current = true;
+        previousSlidesRef.current = previousSlides;
+        setSlides(previousSlides);
+        return;
+      }
       if (event.key !== 'Backspace' && event.key !== 'Delete') return;
       if (cur.locked || projectLocked) return;
       const target = event.target as HTMLElement;
@@ -1398,13 +1599,16 @@ export default function Presentation() {
       bgImage: asset.type === 'image' ? asset.url : undefined,
       bgVideo: asset.type === 'video' ? asset.url : undefined,
       bgVideoMuted: asset.type === 'video' ? (cur.bgVideoMuted ?? true) : undefined,
+      bgPosition: { x: 50, y: 50 },
+      bgPictureRestore: undefined,
     });
+    setBackgroundEditing(false);
   };
 
   /* ----- drag to move / resize the text box on the canvas ----- */
 
   const startDrag = (mode: Mode, boxId: number | null, target: TextBox) => (e: RPointerEvent) => {
-    if (cur.locked || !stageRef.current) return;
+    if (cur.locked || e.button !== 0 || !stageRef.current) return;
     e.preventDefault();
     e.stopPropagation();
     stageRef.current.focus({ preventScroll: true });
@@ -1482,7 +1686,7 @@ export default function Presentation() {
   /* ----- save / export ----- */
 
   // Media files are stored in IndexedDB; a slide only keeps the library asset ID.
-  const serializable = (deck: SlideT[] = slides) => deck.map((s) => ({ ...s, bgImage: s.bgAssetId ? undefined : s.bgImage, bgVideo: undefined, pictures: s.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) }));
+  const serializable = (deck: SlideT[] = slides) => deck.map((s) => ({ ...s, bgImage: s.bgAssetId ? undefined : s.bgImage, bgVideo: undefined, bgPictureRestore: s.bgPictureRestore?.assetId ? { ...s.bgPictureRestore, src: '' } : s.bgPictureRestore, pictures: s.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) }));
   const presentationSnapshot = (name: string, deck: SlideT[]) => JSON.stringify({
     name: name.trim() || 'Untitled presentation',
     slides: serializable(deck),
@@ -1676,6 +1880,7 @@ export default function Presentation() {
       setSlides((current) => {
         const next = current.map((slide) => ({
           ...(slide.bgAssetId === asset.id ? { ...slide, bgAssetId: undefined, bgImage: undefined, bgVideo: undefined } : slide),
+          bgPictureRestore: slide.bgPictureRestore?.assetId === asset.id ? undefined : slide.bgPictureRestore,
           pictures: slide.pictures?.filter((picture) => picture.assetId !== asset.id),
         }));
         try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* Keep the editor usable if storage is full. */ }
@@ -1686,6 +1891,7 @@ export default function Presentation() {
           ...project,
           slides: project.slides.map((slide) => ({
             ...(slide.bgAssetId === asset.id ? { ...slide, bgAssetId: undefined, bgImage: undefined, bgVideo: undefined } : slide),
+            bgPictureRestore: slide.bgPictureRestore?.assetId === asset.id ? undefined : slide.bgPictureRestore,
             pictures: slide.pictures?.filter((picture) => picture.assetId !== asset.id),
           })),
         }));
@@ -1932,7 +2138,7 @@ export default function Presentation() {
                   aria-label={`Title for slide ${i + 1}`}
                   value={slideName(s)}
                   onChange={(e) => updateSlideTitle(s.id, e.target.value)}
-                  disabled={!!s.locked || projectLocked}
+                  disabled={projectLocked}
                   placeholder="Name this slide"
                   className="mt-1 w-full rounded border border-transparent bg-transparent px-1 py-1 text-xs text-warm-white/80 outline-none placeholder:text-warm-white/40 focus:border-white/15 focus:bg-navy disabled:cursor-not-allowed disabled:opacity-50"
                 />
@@ -1998,27 +2204,71 @@ export default function Presentation() {
               ref={stageRef}
               tabIndex={0}
               onClick={() => { setIsBoxSelected(false); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); }}
+              onDoubleClick={(event) => {
+                if (cur.locked || !cur.bgImage || (event.target as HTMLElement).closest('[data-slide-object]')) return;
+                event.preventDefault();
+                setBackgroundEditing(true);
+              }}
+              onContextMenu={(event) => {
+                if (cur.locked || (!cur.bgImage && !cur.bgVideo) || (event.target as HTMLElement).closest('[data-slide-object]')) return;
+                event.preventDefault();
+                setPictureMenu({ kind: 'background', id: null, x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 100) });
+              }}
               aria-label="Slide canvas. Select a text box and press Backspace or Delete to remove it."
-              className="relative"
+              className="relative isolate"
               style={{
                 width: `calc(min(100cqw, 100cqh * 16 / 9) * ${ZOOMS[zoom]})`,
                 aspectRatio: '16 / 9',
+                containerType: 'inline-size',
               }}
             >
               <div className="absolute inset-0 overflow-hidden rounded-lg border border-white/10">
-                <SlideRender slide={cur} onVideoSelect={selectPicture} />
+                <SlideRender slide={cur} onVideoSelect={selectPicture} editingTextBoxId={isBoxSelected ? selectedBoxId : undefined} />
               </div>
 
               {alignmentGuides.x !== null && <div aria-hidden className="pointer-events-none absolute inset-y-0 z-30 border-l border-dashed border-cyan-300 shadow-[0_0_5px_rgba(103,232,249,.8)]" style={{ left: `${alignmentGuides.x}%` }} />}
               {alignmentGuides.y !== null && <div aria-hidden className="pointer-events-none absolute inset-x-0 z-30 border-t border-dashed border-cyan-300 shadow-[0_0_5px_rgba(103,232,249,.8)]" style={{ top: `${alignmentGuides.y}%` }} />}
 
-              {(cur.pictures ?? []).map((picture) => <div key={picture.id} onPointerDown={picture.mediaType === 'video' ? undefined : startPictureDrag(picture)} onClick={(e) => { if (picture.mediaType === 'video') return; e.stopPropagation(); setSelectedPictureId(picture.id); setSelectedCountdown(false); }} className={`absolute z-10 ${picture.mediaType === 'video' ? 'pointer-events-none' : 'cursor-move'} ${selectedPictureId === picture.id ? 'border-2 border-cyan-300' : 'border border-transparent'}`} style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, touchAction: 'none' }}>
+              {backgroundEditing && cur.bgImage && <>
+                <div onPointerDown={startBackgroundDrag} aria-label="Drag to reposition the background image" className="absolute inset-0 z-[60] cursor-move border-2 border-dashed border-brand/80" />
+                <div className="absolute left-1/2 top-3 z-[70] flex -translate-x-1/2 items-center gap-3 rounded-lg border border-white/15 bg-navy/95 px-3 py-2 text-xs text-white shadow-xl">
+                  <span>Drag to reposition background</span>
+                  <button type="button" onClick={() => setBackgroundEditing(false)} className="rounded bg-brand px-2.5 py-1 font-semibold text-navy">Done</button>
+                </div>
+              </>}
+
+              {(cur.pictures ?? []).map((picture, pictureIndex) => <div data-slide-object key={picture.id} onPointerDown={picture.mediaType === 'video' ? undefined : startPictureDrag(picture)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); if (cur.locked) return; selectPicture(picture.id); setPictureMenu({ kind: 'picture', id: picture.id, x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 220) }); }} onClick={(e) => { if (picture.mediaType === 'video') return; e.stopPropagation(); selectPicture(picture.id); }} className={`absolute z-10 ${picture.mediaType === 'video' ? 'pointer-events-none' : 'cursor-move'} ${selectedPictureId === picture.id ? 'border-2 border-cyan-300' : 'border border-transparent'}`} style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, zIndex: typeof picture.layerOrder === 'number' ? picture.layerOrder : picture.layerOrder === 'front' ? 5000 : picture.layerOrder === 'back' ? 0 : 1000 + pictureIndex, touchAction: 'none' }}>
                 {picture.mediaType === 'video' && <div onPointerDown={startPictureDrag(picture)} onClick={(event) => { event.stopPropagation(); setSelectedPictureId(picture.id); setSelectedCountdown(false); }} aria-label="Drag to move video" className="pointer-events-auto absolute inset-x-0 -top-3 h-3 cursor-move" />}
-                {picture.mediaType === 'video' && selectedPictureId === picture.id && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((handle) => <span key={handle} onPointerDown={startPictureResize(picture, handle)} className={`pointer-events-auto absolute z-20 h-3.5 w-3.5 rounded-sm border-2 border-cyan-700 bg-white shadow ${HANDLES[handle]}`} />)}
+                {selectedPictureId === picture.id && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((handle) => <span key={handle} onPointerDown={startPictureResize(picture, handle)} className={`pointer-events-auto absolute z-20 h-3.5 w-3.5 rounded-sm border-2 border-cyan-700 bg-white shadow ${HANDLES[handle]}`} />)}
                 {selectedPictureId === picture.id && <button onPointerDown={(e) => e.stopPropagation()} onClick={() => { updateSlide({ pictures: (cur.pictures ?? []).filter((item) => item.id !== picture.id) }); setSelectedPictureId(null); }} aria-label={picture.mediaType === 'video' ? 'Delete video' : 'Delete image'} className="pointer-events-auto absolute -right-2 -top-2 z-30 rounded-full bg-red-600 p-1 text-white shadow"><Trash2 size={12} /></button>}
               </div>)}
+              {pictureMenu && createPortal(<>
+                <div className="fixed inset-0 z-[9998]" onPointerDown={() => setPictureMenu(null)} />
+                <div role="menu" aria-label={`${pictureMenu.kind === 'picture' ? 'Image' : pictureMenu.kind === 'text' ? 'Text' : 'Background'} options`} className="fixed z-[9999] w-48 rounded-lg border border-white/10 bg-navy p-1 text-xs text-warm-white shadow-xl" style={{ left: pictureMenu.x, top: pictureMenu.y }}>
+                  {pictureMenu.kind === 'background' ? (
+                    <button role="menuitem" onClick={() => removeBackgroundMedia(true)} className="block w-full rounded px-3 py-2 text-left text-red-200 hover:bg-red-500/10">Remove background {cur.bgVideo ? 'video' : 'image'}</button>
+                  ) : <>
+                    <button role="menuitem" onClick={() => moveLayer(pictureMenu.kind === 'text' ? 'text' : 'picture', pictureMenu.id, 'front')} className="block w-full rounded px-3 py-2 text-left hover:bg-white/10">Bring to front</button>
+                    <button role="menuitem" onClick={() => moveLayer(pictureMenu.kind === 'text' ? 'text' : 'picture', pictureMenu.id, 'forward')} className="block w-full rounded px-3 py-2 text-left hover:bg-white/10">Bring forward</button>
+                    <button role="menuitem" onClick={() => moveLayer(pictureMenu.kind === 'text' ? 'text' : 'picture', pictureMenu.id, 'backward')} className="block w-full rounded px-3 py-2 text-left hover:bg-white/10">Send backward</button>
+                    <button role="menuitem" onClick={() => moveLayer(pictureMenu.kind === 'text' ? 'text' : 'picture', pictureMenu.id, 'back')} className="block w-full rounded px-3 py-2 text-left hover:bg-white/10">Send to back</button>
+                    {pictureMenu.kind === 'picture' && pictureMenu.id !== null && <button role="menuitem" onClick={() => setPictureAsBackground(pictureMenu.id!)} className="block w-full rounded px-3 py-2 text-left hover:bg-white/10">Set as background</button>}
+                    <button role="menuitem" onClick={() => pictureMenu.kind === 'picture' && pictureMenu.id !== null ? duplicatePicture(pictureMenu.id) : duplicateTextBox(pictureMenu.id)} className="block w-full rounded px-3 py-2 text-left hover:bg-white/10">Duplicate</button>
+                    <button role="menuitem" onClick={() => {
+                      if (pictureMenu.kind === 'picture' && pictureMenu.id !== null) {
+                        updateSlide({ pictures: (cur.pictures ?? []).filter((item) => item.id !== pictureMenu.id) });
+                        setSelectedPictureId(null);
+                      } else {
+                        deleteTextBox(pictureMenu.id);
+                        setIsBoxSelected(false);
+                      }
+                      setPictureMenu(null);
+                    }} className="block w-full rounded px-3 py-2 text-left text-red-200 hover:bg-red-500/10">Delete {pictureMenu.kind === 'picture' ? 'image' : 'text box'}</button>
+                  </>}
+                </div>
+              </>, document.body)}
 
-              {(cur.shapes ?? []).map((shape) => <div key={shape.id} onPointerDown={startShapeDrag(shape)} onClick={(event) => { event.stopPropagation(); setSelectedShapeId(shape.id); setSelectedPictureId(null); setSelectedCountdown(false); setSelectedBoxId(null); setIsBoxSelected(false); }} className={`absolute z-10 cursor-move ${selectedShapeId === shape.id ? 'border border-cyan-300' : 'border border-transparent'}`} style={{ left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, touchAction: 'none' }}>
+              {(cur.shapes ?? []).map((shape, shapeIndex) => <div data-slide-object key={shape.id} onPointerDown={startShapeDrag(shape)} onClick={(event) => { event.stopPropagation(); setSelectedShapeId(shape.id); setSelectedPictureId(null); setSelectedCountdown(false); setSelectedBoxId(null); setIsBoxSelected(false); }} className={`absolute z-10 cursor-move ${selectedShapeId === shape.id ? 'border border-cyan-300' : 'border border-transparent'}`} style={{ left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + shapeIndex, touchAction: 'none' }}>
                 {selectedShapeId === shape.id && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((handle) => <span key={handle} onPointerDown={startShapeResize(shape, handle)} className={`absolute z-20 h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[handle]}`} />)}
                 {selectedShapeId === shape.id && <button onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); updateSlide({ shapes: (cur.shapes ?? []).filter((item) => item.id !== shape.id) }); setSelectedShapeId(null); }} aria-label="Delete shape" className="absolute -right-2 -top-2 z-30 rounded-full bg-red-600 p-1 text-white shadow"><Trash2 size={12} /></button>}
               </div>)}
@@ -2026,6 +2276,7 @@ export default function Presentation() {
               {cur.countdown && <div
                 onPointerDown={startCountdownInteraction('move')}
                 onClick={(event) => { event.stopPropagation(); setSelectedCountdown(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedBoxId(null); setIsBoxSelected(false); }}
+                data-slide-object
                 className={`absolute z-20 cursor-move ${selectedCountdown ? 'border border-white' : 'border border-transparent'}`}
                 style={{ left: `${cur.countdown.x ?? 10}%`, top: `${cur.countdown.y ?? 30}%`, width: `${cur.countdown.w ?? 80}%`, height: `${cur.countdown.h ?? 40}%`, touchAction: 'none' }}
                 aria-label="Countdown text box. Drag to move, drag a corner to resize, or press Backspace to remove."
@@ -2043,8 +2294,37 @@ export default function Presentation() {
               {allBoxes.map(({ id, box: textBox }) => {
                 const selected = isBoxSelected && id === selectedBoxId;
                 const align = (value: Align) => updateBoxById(id, { align: value });
-                return <div key={id ?? 'main'} onPointerDown={startDrag('move', id, textBox)} className={`absolute z-10 cursor-move ${selected ? 'border border-white' : 'border border-transparent'}`} onClick={(e) => { e.stopPropagation(); setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); }} style={{ left: `${textBox.x}%`, top: `${textBox.y}%`, width: `${textBox.w}%`, height: `${textBox.h}%`, touchAction: 'none' }}>
-                  {selected && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((h) => <span key={h} onPointerDown={startDrag(h, id, textBox)} className={`absolute h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[h]}`} />)}
+                return <div data-slide-object key={id ?? 'main'} onPointerDown={startDrag('move', id, textBox)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); if (cur.locked) return; setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); setPictureMenu({ kind: 'text', id, x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 220) }); }} className={`absolute z-10 cursor-move ${selected ? 'border border-white' : 'border border-transparent'}`} onClick={(e) => { e.stopPropagation(); setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); }} style={{ left: `${textBox.x}%`, top: `${textBox.y}%`, width: `${textBox.w}%`, height: `${textBox.h}%`, zIndex: typeof textBox.layerOrder === 'number' ? textBox.layerOrder : textBox.layerOrder === 'front' ? 5000 : textBox.layerOrder === 'back' ? 0 : id === null ? 3000 : 3001 + (cur.extraBoxes ?? []).findIndex((item) => item.id === id), touchAction: 'none' }}>
+                  {selected && <div className="absolute inset-0 z-0 overflow-hidden px-1" style={{ background: textBox.boxBgOn ? textBox.boxBg : undefined }}>
+                    <div ref={canvasTextMeasureRef} aria-hidden className="pointer-events-none invisible absolute left-0 top-0 w-full whitespace-pre-wrap px-1" style={{ overflowWrap: 'anywhere', fontFamily: FONTS[textBox.font] ?? `"${textBox.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(textBox.size / 1280) * 100}cqw`, fontWeight: textBox.bold ? 800 : 500, fontStyle: textBox.italic ? 'italic' : 'normal', lineHeight: textBox.lineHeight, letterSpacing: `${(textBox.letterSpacing / 1280) * 100}cqw` }}>{textBox.text || ' '}</div>
+                    <textarea
+                      ref={canvasTextRef}
+                      aria-label="Edit text on slide"
+                      rows={1}
+                      value={textBox.text}
+                      onChange={(event) => updateBoxById(id, { text: event.target.value })}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => event.stopPropagation()}
+                      className="absolute inset-0 h-full w-full resize-none overflow-hidden border-0 bg-transparent px-1 py-1 outline-none"
+                      style={{
+                        textAlign: textBox.align,
+                        whiteSpace: 'pre-wrap',
+                        overflowWrap: 'anywhere',
+                        fontFamily: FONTS[textBox.font] ?? `"${textBox.font.replaceAll('"', '')}", sans-serif`,
+                        fontSize: `${(textBox.size * canvasTextScale / 1280) * 100}cqw`,
+                        fontWeight: textBox.bold ? 800 : 500,
+                        fontStyle: textBox.italic ? 'italic' : 'normal',
+                        textDecoration: textBox.underline ? 'underline' : 'none',
+                        lineHeight: textBox.lineHeight,
+                        letterSpacing: `${(textBox.letterSpacing / 1280) * 100}cqw`,
+                        color: textBox.color,
+                        textShadow: textBox.shadow ? '0 0 1.2cqw rgba(0,0,0,0.65)' : undefined,
+                        paddingTop: 4,
+                        background: textBox.boxBgOn ? textBox.boxBg : undefined,
+                      }}
+                    />
+                  </div>}
+                  {selected && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((h) => <span key={h} onPointerDown={startDrag(h, id, textBox)} className={`absolute z-20 h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[h]}`} />)}
                   {selected && <div onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} className={`absolute left-1/2 z-20 flex -translate-x-1/2 cursor-default items-center gap-0.5 rounded-lg border border-white/10 bg-navy/95 p-1 shadow-xl ${toolbarBelow ? 'top-full mt-3' : 'bottom-full mb-3'}`}>
                     <IconBtn label="Add text box" onClick={addText}><Plus size={15} /></IconBtn>
                     <IconBtn label="Align left" active={textBox.align === 'left'} onClick={() => align('left')}><AlignLeft size={15} /></IconBtn>
@@ -2293,7 +2573,7 @@ export default function Presentation() {
                     <select
                       aria-label="Font size"
                       value={box.size}
-                      onChange={(e) => updateBox({ size: Number(e.target.value) })}
+                      onChange={(e) => updateBox({ size: Number(e.target.value), autoSize: false })}
                       className={fieldClass}
                     >
                       {[...new Set([32, 48, 64, 72, 96, 120, 144, box.size])]
@@ -2410,7 +2690,7 @@ export default function Presentation() {
                       <button
                         key={b}
                         aria-label="Use this background"
-                        onClick={() => updateSlide({ bg: b, bgImage: undefined, bgVideo: undefined, bgAssetId: undefined })}
+                        onClick={() => updateSlide({ bg: b, bgImage: undefined, bgVideo: undefined, bgVideoMuted: undefined, bgAssetId: undefined, bgPosition: undefined, bgPictureRestore: undefined })}
                         className={`aspect-video rounded-md border-2 bg-linear-to-br ${b} ${
                           cur.bg === b && !cur.bgImage && !cur.bgVideo ? 'border-brand' : 'border-white/10'
                         }`}
@@ -2418,6 +2698,8 @@ export default function Presentation() {
                     ))}
                   </div>
                 </div>
+                {(cur.bgImage || cur.bgVideo) && <button type="button" onClick={() => removeBackgroundMedia(false)} className="rounded-lg border border-white/10 px-3 py-2 text-left text-xs text-red-200 hover:bg-red-500/10">Remove background {cur.bgVideo ? 'video' : 'image'}</button>}
+                {cur.bgImage && <p className="text-[11px] text-warm-white/50">Double-click the background on the slide, then drag it to reposition.</p>}
                 <p className="text-[10px] leading-relaxed text-warm-white/45">Choose from uploads added in Content. Smaller high quality copies are used when they save space; original uploads are kept.</p>
                 <div>
                   <div className="mb-2 flex items-center justify-between">

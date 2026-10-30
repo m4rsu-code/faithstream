@@ -2,9 +2,13 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 contextBridge.exposeInMainWorld('faithstreamWindow', {
   getAuthToken: () => ipcRenderer.invoke('auth:token:get') as Promise<string | null>,
+  getStreamSettings: () => ipcRenderer.invoke('stream-settings:get') as Promise<{ serverUrl: string; streamKey: string } | null>,
+  saveStreamSettings: (settings: { serverUrl: string; streamKey: string }) => ipcRenderer.invoke('stream-settings:save', settings) as Promise<boolean>,
   saveAuthToken: (token: string) => ipcRenderer.invoke('auth:token:set', token) as Promise<boolean>,
   clearAuthToken: () => ipcRenderer.invoke('auth:token:clear') as Promise<boolean>,
   getStudioDisplays: () => ipcRenderer.invoke('studio:get-displays'),
+  startMobileCamPairing: () => ipcRenderer.invoke('mobile-cam:start-pairing') as Promise<{ ok: boolean; port?: number; code?: string; addresses?: string[]; message?: string }>,
+  stopMobileCamPairing: () => ipcRenderer.invoke('mobile-cam:stop-pairing') as Promise<boolean>,
   openStudioDisplay: (displayId: number) => ipcRenderer.invoke('studio:open-display', displayId),
   closeStudioDisplay: () => ipcRenderer.invoke('studio:close-display'),
   setPresentationFullscreen: (enabled: boolean) =>
@@ -35,9 +39,9 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
     height: number;
     frameRate: number;
     bitrate: number;
-    capture: { x: number; y: number; width: number; height: number };
   }) => ipcRenderer.invoke('stream:start', options),
-  sendStreamAudio: (chunk: ArrayBuffer) => ipcRenderer.send('stream:audio', chunk),
+  sendStreamVideoFrame: (frame: ArrayBuffer) => ipcRenderer.send('stream:video-frame', new Uint8Array(frame)),
+  sendStreamAudio: (chunk: ArrayBuffer) => ipcRenderer.send('stream:audio', new Uint8Array(chunk)),
   stopStream: () => ipcRenderer.invoke('stream:stop'),
   startRecording: (options: { capture: { x: number; y: number; width: number; height: number } }) => ipcRenderer.invoke('recording:start', options),
   sendRecordingAudio: (chunk: ArrayBuffer) => ipcRenderer.send('recording:audio', chunk),

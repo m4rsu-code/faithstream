@@ -2,9 +2,13 @@
 interface Window {
   faithstreamWindow?: {
     getAuthToken: () => Promise<string | null>;
+    getStreamSettings: () => Promise<{ serverUrl: string; streamKey: string } | null>;
+    saveStreamSettings: (settings: { serverUrl: string; streamKey: string }) => Promise<boolean>;
     saveAuthToken: (token: string) => Promise<boolean>;
     clearAuthToken: () => Promise<boolean>;
     getStudioDisplays: () => Promise<{ id: number; name: string; primary: boolean; bounds: { x: number; y: number; width: number; height: number } }[]>;
+    startMobileCamPairing: () => Promise<{ ok: boolean; port?: number; code?: string; addresses?: string[]; message?: string }>;
+    stopMobileCamPairing: () => Promise<boolean>;
     openStudioDisplay: (displayId: number) => Promise<{ ok: boolean; message?: string }>;
     closeStudioDisplay: () => Promise<boolean>;
     setPresentationFullscreen: (enabled: boolean) => Promise<boolean>;
@@ -32,8 +36,8 @@ interface Window {
       height: number;
       frameRate: number;
       bitrate: number;
-      capture: { x: number; y: number; width: number; height: number };
     }) => Promise<{ ok: boolean; message?: string }>;
+    sendStreamVideoFrame: (frame: ArrayBuffer) => void;
     sendStreamAudio: (chunk: ArrayBuffer) => void;
     stopStream: () => Promise<boolean>;
     startRecording: (options: { capture: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; canceled?: boolean; message?: string; filePath?: string }>;

@@ -4,7 +4,6 @@ import {
   Check,
   ChevronDown,
   CircleAlert,
-  Radio,
   Minus,
   Pencil,
   Square,
@@ -20,12 +19,12 @@ import { signOutLocalAccount } from './AuthGate';
 const SERVICE_HEADER_KEY = 'faithstream.service-header';
 const USER_PROFILE_KEY = 'faithstream.user-profile';
 const DEFAULT_SERVICE_NAME = 'Sunday Worship Service';
-type UserProfile = { name: string; role: string; email: string };
+type UserProfile = { name: string; role: string; email: string; photoUrl?: string | null; photoPosition?: { x: number; y: number } };
 const readUserProfile = (): UserProfile => {
   try {
     const saved = JSON.parse(localStorage.getItem(USER_PROFILE_KEY) ?? 'null') as Partial<UserProfile> | null;
-    return { name: saved?.name || 'John Doe', role: saved?.role || 'Media Team', email: saved?.email || '' };
-  } catch { return { name: 'John Doe', role: 'Media Team', email: '' }; }
+    return { name: saved?.name || 'John Doe', role: saved?.role || 'Media Team', email: saved?.email || '', photoUrl: saved?.photoUrl || null, photoPosition: saved?.photoPosition ?? { x: 50, y: 50 } };
+  } catch { return { name: 'John Doe', role: 'Media Team', email: '', photoUrl: null, photoPosition: { x: 50, y: 50 } }; }
 };
 
 function readServiceHeader() {
@@ -42,7 +41,6 @@ function readServiceHeader() {
 type HeaderProps = {
   userName?: string;
   userRole?: string;
-  onGoLive?: () => void;
 };
 
 type StudioSession = { live: boolean; recording: boolean; streamStatus: string; startedAt: number | null };
@@ -66,7 +64,6 @@ const readStudioSession = (): StudioSession => {
 const Header: React.FC<HeaderProps> = ({
   userName: providedUserName,
   userRole: providedUserRole,
-  onGoLive,
 }) => {
   const [profile, setProfile] = useState<UserProfile>(readUserProfile);
   const userName = providedUserName || profile.name;
@@ -103,9 +100,7 @@ const Header: React.FC<HeaderProps> = ({
     };
     const updateSession = (next: StudioSession) => {
       const previous = previousSession.current;
-      if (next.streamStatus === 'error' && previous.streamStatus !== 'error') {
-        addNotification('Stream connection problem', next.streamStatus === 'error' ? 'Check your stream URL, stream key, and internet connection.' : 'The stream could not connect.', 'error');
-      } else if (next.live && next.streamStatus === 'live' && previous.streamStatus !== 'live') {
+      if (next.live && next.streamStatus === 'live' && previous.streamStatus !== 'live') {
         addNotification('You are live', 'Your stream is connected and on air.');
       }
       if (next.recording && !previous.recording) addNotification('Recording started', 'FaithStream is recording your program.');
@@ -120,15 +115,27 @@ const Header: React.FC<HeaderProps> = ({
     const onStorageChange = (event: StorageEvent) => {
       if (event.key === STUDIO_SESSION_KEY) updateSession(readStudioSession());
     };
+    const onStreamError = (event: Event) => {
+      const detail = event instanceof CustomEvent ? event.detail as { message?: string } : null;
+      addNotification('Stream connection problem', detail?.message || 'Could not render the On-air output.', 'error');
+    };
     const unsubscribeRecording = window.faithstreamWindow?.onRecordingStatus((event) => {
       if (event.status === 'error') addNotification('Recording problem', event.message || 'The recording could not be completed.', 'error');
     });
+    const unsubscribeStream = window.faithstreamWindow?.onStreamStatus((event) => {
+      if (event.status === 'error') {
+        addNotification('Stream connection problem', event.message || 'The stream could not connect. Check the server URL, stream key, and internet connection.', 'error');
+      }
+    });
     window.addEventListener('faithstream:studio-session', onSessionChange);
     window.addEventListener('storage', onStorageChange);
+    window.addEventListener('faithstream:stream-error', onStreamError);
     return () => {
       unsubscribeRecording?.();
+      unsubscribeStream?.();
       window.removeEventListener('faithstream:studio-session', onSessionChange);
       window.removeEventListener('storage', onStorageChange);
+      window.removeEventListener('faithstream:stream-error', onStreamError);
     };
   }, []);
 
@@ -156,14 +163,7 @@ const Header: React.FC<HeaderProps> = ({
   }, [profileMenuOpen]);
 
   useEffect(() => {
-    const updateProfile = (event?: Event) => {
-      const detail = event instanceof CustomEvent ? event.detail as Partial<UserProfile> : null;
-      setProfile(detail?.name ? {
-        name: detail.name,
-        role: detail.role || 'Media Team',
-        email: detail.email || '',
-      } : readUserProfile());
-    };
+    const updateProfile = () => setProfile(readUserProfile());
     const onStorage = (event: StorageEvent) => { if (event.key === USER_PROFILE_KEY) updateProfile(); };
     window.addEventListener('faithstream:profile-updated', updateProfile);
     window.addEventListener('storage', onStorage);
@@ -233,7 +233,7 @@ const Header: React.FC<HeaderProps> = ({
       </div>
 
       {/* Main application header */}
-      <header className="relative z-20 flex h-16 shrink-0 items-center justify-between border-t border-b border-white/10 bg-navy px-5">
+      <header className="relative z-40 flex h-16 shrink-0 items-center justify-between border-t border-b border-white/10 bg-navy px-5">
         {/* Service title and its scheduled date remain in a fixed header position. */}
         <div className="relative flex min-w-0 items-center gap-2">
           <div className="min-w-0">
@@ -253,7 +253,7 @@ const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* RIGHT: status, Go Live, timer, actions, user */}
+        {/* RIGHT: status, timer, actions, user */}
         <div className="flex shrink-0 items-center gap-4">
           <div className="flex items-center gap-2">
             <span className={`h-2 w-2 rounded-full ${connected ? 'bg-emerald-400' : connecting ? 'animate-pulse bg-amber-300' : recordingOnly || studioSession.live ? 'bg-red-400' : 'bg-white/25'}`} />
@@ -262,14 +262,6 @@ const Header: React.FC<HeaderProps> = ({
               <div className="text-[11px] text-white/50">{recordingOnly ? 'Local recording' : 'Facebook Live'}</div>
             </div>
           </div>
-
-          <button
-            onClick={() => onGoLive ? onGoLive() : window.dispatchEvent(new Event('faithstream:header-toggle-live'))}
-            className={`flex shrink-0 items-center gap-2 rounded-md px-4 py-2 text-sm font-semibold text-white transition hover:brightness-110 ${studioSession.live ? 'bg-red-600' : 'bg-brand'}`}
-          >
-            {studioSession.live ? <Square size={14} /> : <Radio size={16} />}
-            {studioSession.live ? 'End Stream' : 'Go Live'}
-          </button>
 
           <div className="flex shrink-0 items-center gap-2 text-sm text-white/80">
             <Timer size={16} />
@@ -316,7 +308,7 @@ const Header: React.FC<HeaderProps> = ({
                         <h3 className="text-xs font-semibold text-white">{notification.title}</h3>
                         <time className="shrink-0 text-[10px] text-white/35">{new Date(notification.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>
                       </div>
-                      <p className="mt-1 text-xs leading-relaxed text-white/55">{notification.message}</p>
+                      <p className="mt-1 max-h-36 overflow-y-auto break-words whitespace-pre-wrap text-xs leading-relaxed text-white/55">{notification.message}</p>
                     </div>
                   </article>)}
                 </div>
@@ -326,8 +318,9 @@ const Header: React.FC<HeaderProps> = ({
 
           <div className="relative" ref={profileMenuRef}>
             <button type="button" aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => setProfileMenuOpen((open) => !open)} className="flex min-w-0 items-center gap-3 rounded-lg px-1.5 py-1 transition hover:bg-white/5">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-600 text-xs font-semibold text-white">
+              <div className="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-slate-600 text-xs font-semibold text-white">
                 {initials}
+                {profile.photoUrl && <img key={`${profile.photoUrl}:${profile.photoPosition?.x ?? 50}:${profile.photoPosition?.y ?? 50}`} src={profile.photoUrl} alt="" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${profile.photoPosition?.x ?? 50}% ${profile.photoPosition?.y ?? 50}%` }} onError={(event) => event.currentTarget.remove()} />}
               </div>
               <div className="min-w-0 text-left leading-tight">
                 <div className="truncate text-sm text-white">{userName}</div>
