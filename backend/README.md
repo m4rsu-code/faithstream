@@ -9,11 +9,11 @@ The Laravel API lives in `backend/api`. It supports Gmail-only account registrat
 1. Install PHP 8.3 or newer, Composer, and PostgreSQL.
 2. In `backend/api/.env`, set `DB_DATABASE=faithstream`, `DB_USERNAME=postgres`, and `DB_PASSWORD` to the PostgreSQL password you chose. The file is local and must not be committed.
 3. Create the `faithstream` database in pgAdmin if it does not exist.
-4. From `backend/api`, run:
+4. From the FaithStream project root, run:
 
    ```powershell
    php artisan migrate
-   php artisan serve --host=127.0.0.1 --port=8000
+   php artisan serve
    ```
 
 5. Keep that terminal running, then start the desktop app. The desktop sign-in form calls `http://127.0.0.1:8000/api`.

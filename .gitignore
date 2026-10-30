@@ -1,1 +1,6 @@
-desktop/src/data/bibles-source.zip
+desktop/src/data/bibles-source.zipmobile/node_modules/
+mobile/.expo/
+mobile/android/
+mobile/ios/
+mobile/dist/
+mobile/.eas/

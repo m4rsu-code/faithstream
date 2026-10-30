@@ -1,0 +1,11 @@
+#!/usr/bin/env php
+<?php
+
+$applicationPath = __DIR__ . DIRECTORY_SEPARATOR . 'backend' . DIRECTORY_SEPARATOR . 'api';
+
+if (!chdir($applicationPath)) {
+    fwrite(STDERR, "Could not find the Laravel application at {$applicationPath}.\n");
+    exit(1);
+}
+
+require $applicationPath . DIRECTORY_SEPARATOR . 'artisan';
