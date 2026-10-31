@@ -11,6 +11,17 @@ FaithStream Cam turns an Android or iPhone camera into a live camera source in t
 
 This app uses native WebRTC code, so it needs a development build and cannot run inside Expo Go.
 
+## Project structure
+
+- `App.tsx` — app entry point.
+- `src/routes/` — screen routing and app-level navigation.
+- `src/screens/` — full app pages, such as the camera screen.
+- `src/components/` — reusable screen sections and controls.
+- `src/hooks/` — camera and Studio connection behavior.
+- `src/theme/` — shared colors and visual tokens.
+- `src/types/` — shared TypeScript types.
+- `src/modals/` — place for modal components when the app adds them.
+
 ## Install and run
 
 ```sh

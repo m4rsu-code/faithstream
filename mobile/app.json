@@ -3,8 +3,14 @@
     "name": "FaithStream Cam",
     "slug": "faithstream-cam",
     "version": "1.0.0",
-    "orientation": "portrait",
-    "newArchEnabled": false,
+    "orientation": "default",
+    "icon": "./assets/faithstream-app-icon.png",
+    "splash": {
+      "image": "./assets/faithstream-adaptive-foreground.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0b1b28"
+    },
+    "newArchEnabled": true,
     "plugins": [
       "expo-dev-client",
       [
@@ -23,8 +29,13 @@
     },
     "android": {
       "package": "com.anonymous.faithstreamcam",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/faithstream-adaptive-foreground.png",
+        "backgroundColor": "#0b1b28"
+      },
       "permissions": ["CAMERA", "INTERNET"],
-      "usesCleartextTraffic": true
+      "usesCleartextTraffic": true,
+      "softwareKeyboardLayoutMode": "resize"
     }
   }
 }
