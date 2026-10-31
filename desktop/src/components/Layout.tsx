@@ -55,10 +55,10 @@ export default function Layout() {
         <div className="flex min-h-0 flex-1">
           <SidebarNav />
           <main className="relative min-h-0 min-w-0 flex-1 overflow-visible">
-            <div ref={studioLayerRef} aria-hidden={!studioActive} style={{ zIndex: studioActive ? studioModalOpen ? 50 : 30 : 0 }} className={`absolute inset-0 p-4 ${studioActive ? '' : 'pointer-events-none opacity-0'}`}>
+            <div ref={studioLayerRef} aria-hidden={!studioActive} style={{ zIndex: studioActive ? studioModalOpen ? 1000 : 30 : 0 }} className={`absolute inset-0 p-4 ${studioActive ? '' : 'pointer-events-none opacity-0'}`}>
               <Studio />
             </div>
-            <div ref={pageLayerRef} style={{ zIndex: studioActive ? 0 : studioModalOpen ? 50 : 10 }} className={`absolute inset-0 p-4 ${studioActive ? 'hidden' : ''}`}>
+            <div ref={pageLayerRef} style={{ zIndex: studioActive ? 0 : studioModalOpen ? 1000 : 10 }} className={`absolute inset-0 p-4 ${studioActive ? 'hidden' : ''}`}>
               <Outlet />
             </div>
           </main>

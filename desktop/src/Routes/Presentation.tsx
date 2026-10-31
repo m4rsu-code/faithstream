@@ -49,6 +49,7 @@ import ScripturePickerModal from '../components/modal/ScripturePickerModal';
 import ConfirmationModal from '../components/modal/ConfirmationModal';
 import CountdownDisplay, { type CountdownSettings } from '../components/CountdownDisplay';
 import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimization';
+import { getAccountDatabaseName, getAccountStorageKey } from '../utils/accountStorage';
 import GOOGLE_FONT_FAMILIES from '../data/google-font-families.json';
 
 /* ---------- Types & data ---------- */
@@ -239,21 +240,13 @@ const prepareProjectForAccountSync = (project: PresentationProject): SyncedPrese
 
 const loadProjects = (): PresentationProject[] => {
   try {
-    const rawProjects = localStorage.getItem(PROJECTS_STORAGE_KEY);
+    const rawProjects = localStorage.getItem(getAccountStorageKey(PROJECTS_STORAGE_KEY));
     if (rawProjects) {
       const parsed = JSON.parse(rawProjects) as PresentationProject[];
       if (Array.isArray(parsed)) {
         const ids = parsed.flatMap((project) => project.slides.map((slide) => slide.id));
         if (ids.length) nextId = Math.max(nextId, ...ids) + 1;
         return parsed;
-      }
-    }
-    const legacyRaw = localStorage.getItem(STORAGE_KEY);
-    if (legacyRaw) {
-      const slides = JSON.parse(legacyRaw) as SlideT[];
-      if (Array.isArray(slides) && slides.length) {
-        nextId = Math.max(nextId, ...slides.map((slide) => slide.id)) + 1;
-        return [{ id: 'legacy-presentation', name: 'My presentation', slides, updatedAt: Date.now() }];
       }
     }
   } catch {
@@ -263,7 +256,7 @@ const loadProjects = (): PresentationProject[] => {
 };
 
 const openMediaDb = () => new Promise<IDBDatabase>((resolve, reject) => {
-  const request = indexedDB.open(MEDIA_DB, 1);
+  const request = indexedDB.open(getAccountDatabaseName(MEDIA_DB), 1);
   request.onupgradeneeded = () => request.result.createObjectStore(MEDIA_STORE, { keyPath: 'id' });
   request.onsuccess = () => resolve(request.result);
   request.onerror = () => reject(request.error);
@@ -309,7 +302,7 @@ const deleteMediaAssetFromDb = async (id: string) => {
 
 const loadSlides = (): SlideT[] => {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(getAccountStorageKey(STORAGE_KEY));
     if (raw) {
       const parsed = JSON.parse(raw) as SlideT[];
       if (Array.isArray(parsed) && parsed.length > 0) {
@@ -721,6 +714,7 @@ export default function Presentation() {
   const [previewing, setPreviewing] = useState(false);
   const [scripturePickerOpen, setScripturePickerOpen] = useState(false);
   const [status, setStatus] = useState('');
+  const [saving, setSaving] = useState(false);
   const [mediaImporting, setMediaImporting] = useState<string | null>(null);
   const [slideImportProgress, setSlideImportProgress] = useState<{ message: string; current: number; total: number } | null>(null);
   const [selectedBoxId, setSelectedBoxId] = useState<number | null>(null);
@@ -797,7 +791,7 @@ export default function Presentation() {
           if (!remote || project.updatedAt >= remote.updatedAt) merged.set(project.id, project);
         }
         const next = [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt);
-        localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+        localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
         accountSyncReadyRef.current = true;
         setProjects(next);
         setAccountSyncStatus('Connected — syncing presentations');
@@ -900,7 +894,7 @@ export default function Presentation() {
       const next = current.map((project) => project.id === activeProjectId
         ? { ...project, name: projectName.trim() || 'Untitled presentation', slides: savedSlides, updatedAt: Date.now() }
         : project);
-      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+      localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
       window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
       return next;
     });
@@ -1726,7 +1720,7 @@ export default function Presentation() {
     const project: PresentationProject = { id, name, slides: [firstSlide], updatedAt: Date.now() };
     const next = [project, ...projects];
     setProjects(next);
-    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+    localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
     setSlides([firstSlide]);
     setIndex(0);
     setProjectName(name);
@@ -1806,7 +1800,7 @@ export default function Presentation() {
         deviceOnly: true,
       };
       const next = [project, ...projects];
-      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+      localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
       setProjects(next);
       setSlideImportProgress(null);
       const totalKb = importedAssets.reduce((sum, asset) => sum + asset.blob.size, 0);
@@ -1822,7 +1816,7 @@ export default function Presentation() {
       ? { ...project, locked: !project.locked, updatedAt: Date.now() }
       : project);
     setProjects(next);
-    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+    localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
     setProjectMenuFor(null);
   };
 
@@ -1835,7 +1829,7 @@ export default function Presentation() {
       onConfirm: () => {
         const next = projects.filter((item) => item.id !== id);
         setProjects(next);
-        localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+        localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
         if (!project.deviceOnly && accountTokenRef.current) {
           void fetch(`${PRESENTATION_API_URL}/presentations/${encodeURIComponent(project.id)}`, {
             method: 'DELETE',
@@ -1883,7 +1877,7 @@ export default function Presentation() {
           bgPictureRestore: slide.bgPictureRestore?.assetId === asset.id ? undefined : slide.bgPictureRestore,
           pictures: slide.pictures?.filter((picture) => picture.assetId !== asset.id),
         }));
-        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* Keep the editor usable if storage is full. */ }
+        try { localStorage.setItem(getAccountStorageKey(STORAGE_KEY), JSON.stringify(next)); } catch { /* Keep the editor usable if storage is full. */ }
         return next;
       });
       setProjects((current) => {
@@ -1895,7 +1889,7 @@ export default function Presentation() {
             pictures: slide.pictures?.filter((picture) => picture.assetId !== asset.id),
           })),
         }));
-        try { localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next)); } catch { /* Keep the editor usable if storage is full. */ }
+        try { localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next)); } catch { /* Keep the editor usable if storage is full. */ }
         return next;
       });
       setDeleteConfirmation(null);
@@ -1906,7 +1900,12 @@ export default function Presentation() {
     }
   };
 
-  const save = () => {
+  const save = async () => {
+    if (saving) return false;
+    const savingStartedAt = Date.now();
+    setSaving(true);
+    setStatus('Saving your presentation…');
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     try {
       const id = activeProjectId ?? crypto.randomUUID();
       const project: PresentationProject = {
@@ -1916,7 +1915,7 @@ export default function Presentation() {
         updatedAt: Date.now(),
       };
       const next = [project, ...projects.filter((item) => item.id !== id)];
-      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+      localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
       setProjects(next);
       window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
       originalProjectRef.current = null;
@@ -1928,6 +1927,10 @@ export default function Presentation() {
     } catch {
       flash('Could not save: images are too large');
       return false;
+    } finally {
+      const remainingLoadingTime = 3000 - (Date.now() - savingStartedAt);
+      if (remainingLoadingTime > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, remainingLoadingTime));
+      setSaving(false);
     }
   };
 
@@ -1948,7 +1951,7 @@ export default function Presentation() {
         ? projects.filter((project) => project.id !== draftId)
         : projects.map((project) => project.id === original!.id ? original! : project);
       try {
-        localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(next));
+        localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
         setProjects(next);
         window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
       } catch {
@@ -1965,9 +1968,9 @@ export default function Presentation() {
     if (target) navigate(target);
   };
 
-  const keepChangesAndContinue = () => {
+  const keepChangesAndContinue = async () => {
     const target = pendingNavigation;
-    if (!save()) return;
+    if (!await save()) return;
     setPendingNavigation(null);
     if (target) navigate(target);
   };
@@ -2230,8 +2233,8 @@ export default function Presentation() {
               {alignmentGuides.y !== null && <div aria-hidden className="pointer-events-none absolute inset-x-0 z-30 border-t border-dashed border-cyan-300 shadow-[0_0_5px_rgba(103,232,249,.8)]" style={{ top: `${alignmentGuides.y}%` }} />}
 
               {backgroundEditing && cur.bgImage && <>
-                <div onPointerDown={startBackgroundDrag} aria-label="Drag to reposition the background image" className="absolute inset-0 z-[60] cursor-move border-2 border-dashed border-brand/80" />
-                <div className="absolute left-1/2 top-3 z-[70] flex -translate-x-1/2 items-center gap-3 rounded-lg border border-white/15 bg-navy/95 px-3 py-2 text-xs text-white shadow-xl">
+                <div onPointerDown={startBackgroundDrag} aria-label="Drag to reposition the background image" className="absolute inset-0 z-60 cursor-move border-2 border-dashed border-brand/80" />
+                <div className="absolute left-1/2 top-3 z-70 flex -translate-x-1/2 items-center gap-3 rounded-lg border border-white/15 bg-navy/95 px-3 py-2 text-xs text-white shadow-xl">
                   <span>Drag to reposition background</span>
                   <button type="button" onClick={() => setBackgroundEditing(false)} className="rounded bg-brand px-2.5 py-1 font-semibold text-navy">Done</button>
                 </div>
@@ -2243,8 +2246,8 @@ export default function Presentation() {
                 {selectedPictureId === picture.id && <button onPointerDown={(e) => e.stopPropagation()} onClick={() => { updateSlide({ pictures: (cur.pictures ?? []).filter((item) => item.id !== picture.id) }); setSelectedPictureId(null); }} aria-label={picture.mediaType === 'video' ? 'Delete video' : 'Delete image'} className="pointer-events-auto absolute -right-2 -top-2 z-30 rounded-full bg-red-600 p-1 text-white shadow"><Trash2 size={12} /></button>}
               </div>)}
               {pictureMenu && createPortal(<>
-                <div className="fixed inset-0 z-[9998]" onPointerDown={() => setPictureMenu(null)} />
-                <div role="menu" aria-label={`${pictureMenu.kind === 'picture' ? 'Image' : pictureMenu.kind === 'text' ? 'Text' : 'Background'} options`} className="fixed z-[9999] w-48 rounded-lg border border-white/10 bg-navy p-1 text-xs text-warm-white shadow-xl" style={{ left: pictureMenu.x, top: pictureMenu.y }}>
+                <div className="fixed inset-0 z-9998" onPointerDown={() => setPictureMenu(null)} />
+                <div role="menu" aria-label={`${pictureMenu.kind === 'picture' ? 'Image' : pictureMenu.kind === 'text' ? 'Text' : 'Background'} options`} className="fixed z-9999 w-48 rounded-lg border border-white/10 bg-navy p-1 text-xs text-warm-white shadow-xl" style={{ left: pictureMenu.x, top: pictureMenu.y }}>
                   {pictureMenu.kind === 'background' ? (
                     <button role="menuitem" onClick={() => removeBackgroundMedia(true)} className="block w-full rounded px-3 py-2 text-left text-red-200 hover:bg-red-500/10">Remove background {cur.bgVideo ? 'video' : 'image'}</button>
                   ) : <>
@@ -2865,10 +2868,13 @@ export default function Presentation() {
       {/* Bottom: save and preview */}
       <div className="flex shrink-0 items-center gap-3">
         <button
-          onClick={save}
-          className="flex items-center gap-2 rounded-xl border border-white/10 bg-panel px-5 py-3 text-sm font-medium text-warm-white hover:bg-white/5"
+          onClick={() => { void save(); }}
+          disabled={saving}
+          aria-busy={saving}
+          className="flex items-center gap-2 rounded-xl border border-white/10 bg-panel px-5 py-3 text-sm font-medium text-warm-white hover:bg-white/5 disabled:cursor-wait disabled:opacity-70"
         >
-          <Save size={18} /> Save & Close
+          {saving ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
+          {saving ? 'Saving…' : 'Save & Close'}
         </button>
         <span role="status" className="text-xs text-warm-white/70">
           {status}
@@ -2886,7 +2892,7 @@ export default function Presentation() {
 
       <input ref={contentInput} type="file" accept="image/*,video/*" hidden onChange={(event) => { addContentMedia(event.target.files?.[0]); event.target.value = ''; }} />
 
-      {videoPreviewAsset && <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/85 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoPreviewAsset(null); }}>
+      {videoPreviewAsset && <div className="fixed inset-0 z-130 flex items-center justify-center bg-black/85 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoPreviewAsset(null); }}>
         <section role="dialog" aria-modal="true" aria-label={`Preview ${videoPreviewAsset.name}`} className="w-full max-w-4xl rounded-2xl border border-white/10 bg-[#101d2a] p-4 shadow-2xl">
           <div className="mb-3 flex items-center justify-between gap-3"><h2 className="truncate text-sm font-semibold text-warm-white">{videoPreviewAsset.name}</h2><button type="button" onClick={() => setVideoPreviewAsset(null)} aria-label="Close video preview" className="rounded-lg p-2 text-warm-white/60 hover:bg-white/10 hover:text-white"><X size={17} /></button></div>
           <video src={videoPreviewAsset.url} controls autoPlay playsInline className="max-h-[70vh] w-full rounded-lg bg-black" />
@@ -2933,14 +2939,14 @@ export default function Presentation() {
         onCancel={() => setDeleteConfirmation(null)}
         onConfirm={() => deleteConfirmation?.onConfirm()}
       />
-      {leaveConfirmationOpen && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) { setLeaveConfirmationOpen(false); setPendingNavigation(null); } }}>
+      {leaveConfirmationOpen && <div className="fixed inset-0 z-90 flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) { setLeaveConfirmationOpen(false); setPendingNavigation(null); } }}>
         <section role="alertdialog" aria-modal="true" aria-labelledby="leave-presentation-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
           <h2 id="leave-presentation-title" className="text-base font-bold text-warm-white">You have unsaved changes</h2>
           <p className="mt-2 text-sm leading-relaxed text-warm-white/60">Save your slide changes before leaving this presentation, or discard them?</p>
           <div className="mt-6 flex flex-wrap justify-end gap-2">
-            <button type="button" onClick={() => { setLeaveConfirmationOpen(false); setPendingNavigation(null); }} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-warm-white/75 hover:bg-white/5">Keep editing</button>
-            <button type="button" onClick={discardEditorChanges} className="rounded-lg border border-red-400/30 px-4 py-2 text-sm font-semibold text-red-200 hover:bg-red-500/10">Discard changes</button>
-            <button type="button" onClick={keepChangesAndContinue} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy hover:brightness-110">Keep changes</button>
+            <button type="button" disabled={saving} onClick={() => { setLeaveConfirmationOpen(false); setPendingNavigation(null); }} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-warm-white/75 hover:bg-white/5 disabled:cursor-wait disabled:opacity-50">Keep editing</button>
+            <button type="button" disabled={saving} onClick={discardEditorChanges} className="rounded-lg border border-red-400/30 px-4 py-2 text-sm font-semibold text-red-200 hover:bg-red-500/10 disabled:cursor-wait disabled:opacity-50">Discard changes</button>
+            <button type="button" disabled={saving} onClick={() => { void keepChangesAndContinue(); }} className="flex items-center gap-2 rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy hover:brightness-110 disabled:cursor-wait disabled:opacity-70">{saving && <Loader2 size={15} className="animate-spin" />}{saving ? 'Saving…' : 'Keep changes'}</button>
           </div>
         </section>
       </div>}

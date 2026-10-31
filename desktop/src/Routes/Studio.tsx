@@ -31,6 +31,7 @@ import type { LucideIcon } from 'lucide-react';
 import ConfirmationModal from '../components/modal/ConfirmationModal';
 import CountdownDisplay, { type CountdownSettings } from '../components/CountdownDisplay';
 import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimization';
+import { getAccountDatabaseName, getAccountStorageKey } from '../utils/accountStorage';
 
 /* ---------- Data ---------- */
 
@@ -150,9 +151,9 @@ const hydrateSceneMedia = (scene: Scene, mediaUrls: StudioMediaUrlMap): Scene =>
 
 const loadStudioScenes = (): Scene[] => {
   try {
-    const saved = JSON.parse(localStorage.getItem(STUDIO_SCENES_KEY) ?? '[]') as Scene[];
+    const saved = JSON.parse(localStorage.getItem(getAccountStorageKey(STUDIO_SCENES_KEY)) ?? '[]') as Scene[];
     if (!Array.isArray(saved)) return [];
-    const presentations = JSON.parse(localStorage.getItem('faithstream.presentations') ?? '[]') as SavedPresentation[];
+    const presentations = JSON.parse(localStorage.getItem(getAccountStorageKey('faithstream.presentations')) ?? '[]') as SavedPresentation[];
     return saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides))
       .filter((scene) => !scene.presentationId || presentations.some((item) => item.id === scene.presentationId))
       .map((scene) => {
@@ -165,7 +166,7 @@ const loadStudioScenes = (): Scene[] => {
 
 const loadSlideshowScenes = (): Scene[] => {
   try {
-    const saved = JSON.parse(localStorage.getItem(STUDIO_SLIDESHOW_SCENES_KEY) ?? 'null') as Scene[] | null;
+    const saved = JSON.parse(localStorage.getItem(getAccountStorageKey(STUDIO_SLIDESHOW_SCENES_KEY)) ?? 'null') as Scene[] | null;
     if (Array.isArray(saved)) {
       const presentations = readSavedPresentations();
       return saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides))
@@ -182,13 +183,13 @@ const loadSlideshowScenes = (): Scene[] => {
 
 const readSavedPresentations = (): SavedPresentation[] => {
   try {
-    const saved = JSON.parse(localStorage.getItem('faithstream.presentations') ?? '[]') as SavedPresentation[];
+    const saved = JSON.parse(localStorage.getItem(getAccountStorageKey('faithstream.presentations')) ?? '[]') as SavedPresentation[];
     return Array.isArray(saved) ? saved.filter((presentation) => presentation?.id && Array.isArray(presentation.slides)) : [];
   } catch { return []; }
 };
 
 const readStudioMedia = async (): Promise<StudioMedia[]> => {
-  const request = indexedDB.open('faithstream.media', 1);
+  const request = indexedDB.open(getAccountDatabaseName('faithstream.media'), 1);
   const db = await new Promise<IDBDatabase>((resolve, reject) => {
     request.onupgradeneeded = () => request.result.createObjectStore('assets', { keyPath: 'id' });
     request.onsuccess = () => resolve(request.result);
@@ -203,7 +204,7 @@ const readStudioMedia = async (): Promise<StudioMedia[]> => {
 };
 
 const saveStudioMedia = async (asset: StudioMedia) => {
-  const request = indexedDB.open('faithstream.media', 1);
+  const request = indexedDB.open(getAccountDatabaseName('faithstream.media'), 1);
   const db = await new Promise<IDBDatabase>((resolve, reject) => {
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains('assets')) request.result.createObjectStore('assets', { keyPath: 'id' });
@@ -221,7 +222,7 @@ const saveStudioMedia = async (asset: StudioMedia) => {
 };
 
 const openStudioMusicDb = () => new Promise<IDBDatabase>((resolve, reject) => {
-  const request = indexedDB.open(STUDIO_MUSIC_DB, 1);
+  const request = indexedDB.open(getAccountDatabaseName(STUDIO_MUSIC_DB), 1);
   request.onupgradeneeded = () => request.result.createObjectStore(STUDIO_MUSIC_STORE, { keyPath: 'id' });
   request.onsuccess = () => resolve(request.result);
   request.onerror = () => reject(request.error);
@@ -266,6 +267,9 @@ type Ref = { sceneId: number; slideIdx: number };
 const same = (a: Ref, b: Ref) => a.sceneId === b.sceneId && a.slideIdx === b.slideIdx;
 
 type SourceKind = 'camera' | 'mobile-camera' | 'screen' | 'media' | 'presentation' | 'text' | 'microphone' | 'desktop-audio' | 'music';
+type CameraOrientationMode = 'auto' | 'portrait-up' | 'landscape-left' | 'portrait-down' | 'landscape-right' | 'portrait' | 'upside-down';
+type CameraRotation = 'auto' | '0' | '90' | '180' | '270';
+type MobileCamPairing = { port: number; code: string; addresses: string[]; expiresAt: number; connected: boolean; reconnecting?: boolean; remainingSeconds?: number; refreshError?: string };
 type Source = {
   id: number;
   sceneId: number;
@@ -274,12 +278,46 @@ type Source = {
   kind: SourceKind;
   visible: boolean;
   stream?: MediaStream;
+  phoneOrientation?: 'portrait' | 'landscape';
+  cameraOrientation?: CameraOrientationMode;
+  cameraRotation?: Exclude<CameraRotation, 'auto'>;
+  connectionStatus?: 'connected' | 'disconnected';
   deviceId?: string;
   mediaAssetId?: string;
   loop?: boolean;
   text?: string;
   noiseSuppression?: boolean;
   layout?: { x: number; y: number; width: number; height: number };
+};
+const cameraRotationFor = (source: Source, videoWidth: number, videoHeight: number) => {
+  if (source.cameraRotation !== undefined) return Number(source.cameraRotation);
+  const legacyRotation: Partial<Record<CameraOrientationMode, number>> = {
+    'portrait-up': 0,
+    'landscape-left': 270,
+    'portrait-down': 180,
+    'landscape-right': 90,
+    portrait: 0,
+    'upside-down': 180,
+  };
+  if (source.cameraOrientation && source.cameraOrientation !== 'auto') return legacyRotation[source.cameraOrientation] ?? 0;
+  return source.kind === 'mobile-camera' && source.phoneOrientation === 'landscape' && videoHeight > videoWidth ? 90 : 0;
+};
+const drawVideoCover = (context: CanvasRenderingContext2D, video: HTMLVideoElement, x: number, y: number, width: number, height: number, rotation: number) => {
+  if (!video.videoWidth || !video.videoHeight || width <= 0 || height <= 0) return;
+  context.save();
+  context.beginPath();
+  context.rect(x, y, width, height);
+  context.clip();
+  context.translate(x + width / 2, y + height / 2);
+  context.rotate((rotation === 270 ? -90 : rotation) * Math.PI / 180);
+  const quarterTurn = rotation === 90 || rotation === 270;
+  const targetWidth = quarterTurn ? height : width;
+  const targetHeight = quarterTurn ? width : height;
+  const scale = Math.max(targetWidth / video.videoWidth, targetHeight / video.videoHeight);
+  const drawWidth = video.videoWidth * scale;
+  const drawHeight = video.videoHeight * scale;
+  context.drawImage(video, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+  context.restore();
 };
 const STUDIO_SOURCES_KEY = 'faithstream.studio-sources';
 const SOURCE_OPTIONS: { kind: SourceKind; name: string; icon: LucideIcon; group: string }[] = [
@@ -296,10 +334,11 @@ const SOURCE_OPTIONS: { kind: SourceKind; name: string; icon: LucideIcon; group:
 
 const loadStudioSources = (): Source[] => {
   try {
-    const saved = JSON.parse(localStorage.getItem(STUDIO_SOURCES_KEY) ?? '[]') as Source[];
+    const saved = JSON.parse(localStorage.getItem(getAccountStorageKey(STUDIO_SOURCES_KEY)) ?? '[]') as Source[];
     if (!Array.isArray(saved)) return [];
     const validSources = saved.filter((source) => Number.isFinite(source?.id) && Number.isFinite(source?.sceneId) && !!source.name && SOURCE_OPTIONS.some((option) => option.kind === source.kind));
     return validSources.map((source) => {
+      if (source.kind === 'mobile-camera') return { ...source, shared: true, stream: undefined, connectionStatus: 'disconnected' as const };
       if (source.kind !== 'camera' || (source.layout && source.layout.width <= 25)) return { ...source, shared: true, stream: undefined };
       const cameraIndex = validSources.filter((item) => item.sceneId === source.sceneId && item.kind === 'camera').findIndex((item) => item.id === source.id);
       return { ...source, shared: true, stream: undefined, layout: { x: 100 - (cameraIndex + 1) * 24, y: 72, width: 22, height: 22 } };
@@ -461,14 +500,33 @@ function SourcePreview({
   rounded?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [videoSize, setVideoSize] = useState({ width: 0, height: 0 });
   useEffect(() => {
     if (videoRef.current && source.stream) videoRef.current.srcObject = source.stream;
   }, [source.stream]);
+  const cameraRotation = cameraRotationFor(source, videoSize.width, videoSize.height);
+  const rotateCameraFrame = cameraRotation === 90 || cameraRotation === 270;
 
   return (
-    <div className={`relative h-full w-full overflow-hidden ${rounded ? 'rounded-lg' : ''} bg-slate-950 ${className}`}>
+    <div className={`relative h-full w-full overflow-hidden ${rounded ? 'rounded-lg' : ''} bg-slate-950 ${className}`} style={{ containerType: 'size' }}>
       {(source.kind === 'camera' || source.kind === 'mobile-camera' || source.kind === 'screen') && source.stream?.getVideoTracks().length ? (
-        <video ref={videoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
+        <video
+          ref={videoRef}
+          autoPlay
+          muted
+          playsInline
+          onLoadedMetadata={(event) => setVideoSize({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight })}
+          onResize={(event) => setVideoSize({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight })}
+          className="h-full w-full object-cover"
+          style={cameraRotation === 180 ? { transform: 'rotate(180deg)' } : rotateCameraFrame ? {
+            position: 'absolute',
+            left: '50%',
+            top: '50%',
+            width: '100cqh',
+            height: '100cqw',
+            transform: `translate(-50%, -50%) rotate(${cameraRotation === 270 ? -90 : 90}deg)`,
+          } : undefined}
+        />
       ) : source.kind === 'media' && media?.type === 'video' ? (
         <video src={media.url} autoPlay muted loop playsInline className="h-full w-full object-cover" />
       ) : source.kind === 'media' && media?.type === 'image' ? (
@@ -814,7 +872,7 @@ const renderProgramFrame = async (canvas: HTMLCanvasElement, stage: HTMLElement,
     } else if (source.kind === 'camera' || source.kind === 'mobile-camera' || source.kind === 'screen') {
       const video = node?.querySelector('video');
       if (video?.srcObject instanceof MediaStream && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth) {
-        try { ctx.drawImage(video, x, y, lw, lh); } catch { /* Skip an unavailable camera frame. */ }
+        try { drawVideoCover(ctx, video, x, y, lw, lh, cameraRotationFor(source, video.videoWidth, video.videoHeight)); } catch { /* Skip an unavailable camera frame. */ }
       }
     } else if (source.kind === 'media') {
       const asset = source.mediaAssetId ? composition.mediaUrls[source.mediaAssetId] : undefined;
@@ -889,7 +947,8 @@ export default function Studio() {
   const [previewingMusicId, setPreviewingMusicId] = useState<string | null>(null);
   const [addSourceOpen, setAddSourceOpen] = useState(false);
   const [sourceError, setSourceError] = useState('');
-  const [mobileCamPairing, setMobileCamPairing] = useState<{ port: number; code: string; addresses: string[]; connected: boolean } | null>(null);
+  const [mobileCamPairing, setMobileCamPairing] = useState<MobileCamPairing | null>(null);
+  const [reconnectingSourceId, setReconnectingSourceId] = useState<number | null>(null);
   const [mediaPreparing, setMediaPreparing] = useState('');
   const [audioError, setAudioError] = useState('');
   const [sourceEditor, setSourceEditor] = useState<Source | null>(null);
@@ -910,6 +969,10 @@ export default function Studio() {
   const musicPreviewElement = useRef<HTMLAudioElement | null>(null);
   const sourceStreams = useRef(new Map<number, MediaStream>());
   const sourceCleanups = useRef(new Map<number, () => void>());
+  const mobileCamPairingDetails = useRef<{ port: number; code: string; addresses: string[]; expiresAt: number } | null>(null);
+  const mobileCamCodeRenewalInFlight = useRef(false);
+  const lastMobileCamCodeRenewalAttempt = useRef(0);
+  const mobileCamConnectedState = useRef<boolean | null>(null);
   const sourceObjectUrls = useRef<string[]>([]);
   const sourceMenuRef = useRef<HTMLDivElement>(null);
   const sourceTriggerRef = useRef<HTMLButtonElement>(null);
@@ -958,6 +1021,38 @@ export default function Studio() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirmEndStream, setConfirmEndStream] = useState(() => localStorage.getItem('faithstream.studio-confirm-end') !== 'false');
   const [endStreamConfirmOpen, setEndStreamConfirmOpen] = useState(false);
+
+  useEffect(() => {
+    if (!mobileCamPairing || mobileCamPairing.connected) return;
+    let active = true;
+    const refreshCode = async () => {
+      if (mobileCamCodeRenewalInFlight.current || Date.now() - lastMobileCamCodeRenewalAttempt.current < 5000) return;
+      mobileCamCodeRenewalInFlight.current = true;
+      lastMobileCamCodeRenewalAttempt.current = Date.now();
+      try {
+        const result = await window.faithstreamWindow?.renewMobileCamPairingCode();
+        if (!active || !result?.ok || !result.code || !result.expiresAt) {
+          if (active) setMobileCamPairing((current) => current ? { ...current, refreshError: result?.message || 'Could not refresh the pairing code. Retrying…' } : null);
+          return;
+        }
+        const details = mobileCamPairingDetails.current;
+        if (details) mobileCamPairingDetails.current = { ...details, code: result.code, expiresAt: result.expiresAt };
+        setMobileCamPairing((current) => current ? { ...current, code: result.code!, expiresAt: result.expiresAt!, remainingSeconds: 180, refreshError: undefined } : null);
+      } catch {
+        if (active) setMobileCamPairing((current) => current ? { ...current, refreshError: 'Could not refresh the pairing code. Retrying…' } : null);
+      } finally {
+        mobileCamCodeRenewalInFlight.current = false;
+      }
+    };
+    const tick = () => {
+      const remainingSeconds = Math.max(0, Math.ceil((mobileCamPairing.expiresAt - Date.now()) / 1000));
+      setMobileCamPairing((current) => current ? { ...current, remainingSeconds } : null);
+      if (!remainingSeconds) void refreshCode();
+    };
+    tick();
+    const interval = window.setInterval(tick, 1000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [mobileCamPairing?.expiresAt, mobileCamPairing?.connected]);
 
   useEffect(() => {
     let active = true;
@@ -1046,7 +1141,7 @@ export default function Studio() {
       ...scene,
       slides: scene.slides.map((slide) => ({ ...(slide.bgAssetId ? { ...slide, bgImage: undefined, bgVideo: undefined } : slide), design: slide.design ? { ...slide.design, pictures: slide.design.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) } : undefined })),
     }));
-    try { localStorage.setItem(STUDIO_SCENES_KEY, JSON.stringify(storedScenes)); } catch { /* Keep the active Studio session usable if storage is unavailable. */ }
+    try { localStorage.setItem(getAccountStorageKey(STUDIO_SCENES_KEY), JSON.stringify(storedScenes)); } catch { /* Keep the active Studio session usable if storage is unavailable. */ }
   }, [scenes]);
 
   useEffect(() => {
@@ -1054,7 +1149,7 @@ export default function Studio() {
       ...scene,
       slides: scene.slides.map((slide) => ({ ...(slide.bgAssetId ? { ...slide, bgImage: undefined, bgVideo: undefined } : slide), design: slide.design ? { ...slide.design, pictures: slide.design.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) } : undefined })),
     }));
-    try { localStorage.setItem(STUDIO_SLIDESHOW_SCENES_KEY, JSON.stringify(storedScenes)); } catch { /* Keep the slideshow session usable if storage is unavailable. */ }
+    try { localStorage.setItem(getAccountStorageKey(STUDIO_SLIDESHOW_SCENES_KEY), JSON.stringify(storedScenes)); } catch { /* Keep the slideshow session usable if storage is unavailable. */ }
   }, [slideshowScenes]);
 
   useEffect(() => {
@@ -1077,7 +1172,7 @@ export default function Studio() {
       }).catch(() => setSourceError('Could not refresh presentation images.'));
     };
     const onPresentationsStorage = (event: StorageEvent) => {
-      if (event.key === 'faithstream.presentations') refreshLinkedPresentationTitles();
+      if (event.key === getAccountStorageKey('faithstream.presentations')) refreshLinkedPresentationTitles();
     };
     window.addEventListener('faithstream:presentations-updated', refreshLinkedPresentationTitles);
     window.addEventListener('faithstream:media-updated', onMediaUpdated);
@@ -1216,7 +1311,7 @@ export default function Studio() {
   }, [channels, sources, onAir.sceneId]);
 
   useEffect(() => {
-    try { localStorage.setItem(STUDIO_SOURCES_KEY, JSON.stringify(sources.map(({ stream: _stream, ...source }) => source))); } catch { /* Keep the current source list usable if storage is unavailable. */ }
+    try { localStorage.setItem(getAccountStorageKey(STUDIO_SOURCES_KEY), JSON.stringify(sources.map(({ stream: _stream, ...source }) => source))); } catch { /* Keep the current source list usable if storage is unavailable. */ }
   }, [sources]);
 
   useEffect(() => () => {
@@ -1247,6 +1342,7 @@ export default function Studio() {
       if (!(target instanceof Node)) return;
       if (programCanvasRef.current?.contains(target)) return;
       if (target instanceof Element && target.closest('[data-program-layout-controls]')) return;
+      if (target instanceof Element && target.closest('[data-program-control]')) return;
       setSelectedProgramSource(null);
     };
     document.addEventListener('pointerdown', clearSelectionOutsideOutput);
@@ -1583,8 +1679,9 @@ export default function Studio() {
   const sceneSources = sourcesForScene(sceneId);
   const onAirSceneSources = sourcesForScene(onAir.sceneId);
   const previewSceneSources = sourcesForScene(previewSetupRef.sceneId);
-  const programOverlaySources = onAirSceneSources.filter((source) => source.visible && ['camera', 'mobile-camera', 'screen', 'media', 'presentation', 'text'].includes(source.kind));
   const isPreviewSourceVisible = (source: Source) => previewSetupVisibility[source.id] ?? source.visible;
+  const orientationControlCamera = previewSceneSources.find((source) => source.id === selectedProgramSource && (source.kind === 'camera' || source.kind === 'mobile-camera'));
+  const programOverlaySources = onAirSceneSources.filter((source) => source.visible && ['camera', 'mobile-camera', 'screen', 'media', 'presentation', 'text'].includes(source.kind));
   const previewSetupOverlays = previewSceneSources.filter((source) => isPreviewSourceVisible(source) && ['camera', 'mobile-camera', 'screen', 'media', 'presentation', 'text'].includes(source.kind));
   const visibleProgramOverlays = studioOutputTab === 'stream' ? programOverlaySources : [];
   const getProgramLayout = (source: Source) => {
@@ -1853,9 +1950,8 @@ export default function Studio() {
 
   const showCameraOnly = (cameraId?: number) => {
     const availableCameras = previewSceneSources.filter((source) => source.kind === 'camera' || source.kind === 'mobile-camera');
-    const camera = availableCameras.find((source) => source.id === cameraId)
-      ?? availableCameras.find((source) => source.id === selectedProgramSource)
-      ?? availableCameras[0];
+    const targetCameraId = cameraId ?? selectedProgramSource;
+    const camera = availableCameras.find((source) => source.id === targetCameraId);
     if (!camera) return;
     setCameraOnlySnapshot((current) => current?.sceneId === previewSetupRef.sceneId ? current : {
       sceneId: previewSetupRef.sceneId,
@@ -1879,31 +1975,68 @@ export default function Studio() {
   };
 
   const showCameraWithCurrentLayers = (cameraId: number) => {
+    if (cameraOnlySnapshot?.sceneId === previewSetupRef.sceneId) {
+      const visualSources = previewSceneSources.filter((source) => ['camera', 'mobile-camera', 'screen', 'media', 'presentation', 'text'].includes(source.kind));
+      setPreviewSetupVisibility((current) => Object.fromEntries(visualSources.map((source) => [source.id, source.id === cameraId])));
+      setPreviewSetupLayouts((current) => ({ ...current, [cameraId]: { x: 0, y: 0, width: 100, height: 100 } }));
+      setSelectedProgramSource(cameraId);
+      return;
+    }
     setPreviewSetupVisibility((current) => ({ ...current, [cameraId]: true }));
     setSelectedProgramSource(cameraId);
+  };
+
+  const publishStudioNotification = (title: string, message: string, kind: 'info' | 'error' = 'info') => {
+    const notification = { id: crypto.randomUUID(), title, message, createdAt: Date.now(), read: false, kind };
+    try {
+      const saved = JSON.parse(localStorage.getItem('faithstream.notifications') ?? '[]') as Array<typeof notification>;
+      localStorage.setItem('faithstream.notifications', JSON.stringify([notification, ...saved].slice(0, 30)));
+    } catch { /* The in-app event below still delivers the notification. */ }
+    window.dispatchEvent(new CustomEvent('faithstream:notification', { detail: notification }));
+  };
+
+  const notifyMobileCamStatus = (connected: boolean, sourceId?: number) => {
+    if (sourceId !== undefined) {
+      setSources((list) => list.map((source) => source.id === sourceId ? { ...source, connectionStatus: connected ? 'connected' : 'disconnected' } : source));
+    }
+    const previous = mobileCamConnectedState.current;
+    if (previous === connected) return;
+    mobileCamConnectedState.current = connected;
+    if (!connected && previous !== true) return;
+    publishStudioNotification(
+      connected ? 'FaithStream Cam connected' : 'FaithStream Cam disconnected',
+      connected ? 'The phone camera is connected and ready in Studio.' : 'The phone camera lost its connection. Use Reconnect in Sources to pair it again.',
+      connected ? 'info' : 'error',
+    );
   };
 
   const captureStream = async (
     kind: SourceKind,
     sourceId?: number,
     preferredDeviceId?: string,
-  ): Promise<{ stream: MediaStream; deviceId?: string; deviceName?: string; cleanup?: () => void } | undefined> => {
+    onPhoneOrientation?: (orientation: 'portrait' | 'landscape') => void,
+  ): Promise<{ stream: MediaStream; deviceId?: string; deviceName?: string; cleanup?: () => void; phoneOrientation?: 'portrait' | 'landscape' } | undefined> => {
     if (!navigator.mediaDevices) throw new Error('Media capture is unavailable in this window.');
     if (kind === 'mobile-camera') {
       const pairing = await window.faithstreamWindow?.startMobileCamPairing();
-      if (!pairing?.ok || !pairing.port || !pairing.code) throw new Error(pairing?.message || 'Could not start local camera pairing.');
+      if (!pairing?.ok || !pairing.port || !pairing.code || !pairing.expiresAt) throw new Error(pairing?.message || 'Could not start local camera pairing.');
       if (!pairing.addresses?.length) {
         void window.faithstreamWindow?.stopMobileCamPairing();
         throw new Error('No local Wi-Fi address was found. Connect this computer to the same Wi-Fi as your phone and try again.');
       }
-      setMobileCamPairing({ port: pairing.port, code: pairing.code, addresses: pairing.addresses, connected: false });
-      return await new Promise<{ stream: MediaStream; deviceName: string; cleanup: () => void }>((resolve, reject) => {
+      mobileCamPairingDetails.current = { port: pairing.port, code: pairing.code, addresses: pairing.addresses, expiresAt: pairing.expiresAt };
+      setMobileCamPairing({ ...mobileCamPairingDetails.current, connected: false, remainingSeconds: 180 });
+      return await new Promise<{ stream: MediaStream; deviceName: string; cleanup: () => void; phoneOrientation?: 'portrait' | 'landscape' }>((resolve, reject) => {
         const socket = new WebSocket(`ws://127.0.0.1:${pairing.port}/?code=${pairing.code}&role=studio`);
         const peer = new RTCPeerConnection({ iceServers: [] });
         const queuedIce: RTCIceCandidateInit[] = [];
         let hasRemoteDescription = false;
         let finished = false;
+        let intentionallyClosed = false;
+        let remoteStream: MediaStream | null = null;
+        let phoneOrientation: 'portrait' | 'landscape' = 'portrait';
         const cleanup = () => {
+          intentionallyClosed = true;
           window.clearTimeout(timeout); peer.close(); socket.close();
           void window.faithstreamWindow?.stopMobileCamPairing();
         };
@@ -1914,11 +2047,49 @@ export default function Studio() {
         }, 120_000);
         peer.addTransceiver('video', { direction: 'recvonly' });
         peer.onicecandidate = (event) => { if (event.candidate && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ice', candidate: event.candidate.toJSON() })); };
+        peer.onconnectionstatechange = () => {
+          if (intentionallyClosed) return;
+          if (peer.connectionState === 'connected') notifyMobileCamStatus(true, sourceId);
+          else if (remoteStream && ['disconnected', 'failed'].includes(peer.connectionState)) notifyMobileCamStatus(false, sourceId);
+        };
         peer.ontrack = (event) => {
-          if (finished) return;
-          finished = true; window.clearTimeout(timeout);
-          setMobileCamPairing((value) => value ? { ...value, connected: true } : value);
-          resolve({ stream: event.streams[0] ?? new MediaStream([event.track]), deviceName: 'FaithStream Cam', cleanup });
+          const incoming = event.streams[0] ?? new MediaStream([event.track]);
+          const refreshSourceHealth = () => {
+            if (intentionallyClosed || !remoteStream || !remoteStream.getTracks().includes(event.track)) return;
+            const connected = remoteStream.getTracks().some((track) => track.readyState === 'live' && !track.muted);
+            notifyMobileCamStatus(connected, sourceId);
+            if (sourceId === undefined) return;
+            setSources((list) => list.map((item) => item.id === sourceId && remoteStream ? { ...item, stream: remoteStream } : item));
+          };
+          event.track.addEventListener('mute', refreshSourceHealth);
+          event.track.addEventListener('unmute', refreshSourceHealth);
+          event.track.addEventListener('ended', refreshSourceHealth);
+          if (!remoteStream) {
+            remoteStream = incoming;
+            finished = true; window.clearTimeout(timeout);
+            notifyMobileCamStatus(true, sourceId);
+            setMobileCamPairing(null);
+            resolve({ stream: remoteStream, deviceName: 'FaithStream Cam', cleanup, phoneOrientation });
+            return;
+          }
+          if (incoming === remoteStream) {
+            if (sourceId !== undefined) {
+              sourceStreams.current.set(sourceId, remoteStream);
+              setSources((list) => list.map((item) => item.id === sourceId ? { ...item, stream: remoteStream! } : item));
+            }
+            notifyMobileCamStatus(true, sourceId);
+            setMobileCamPairing(null);
+            return;
+          }
+          // Keep the same MediaStream object attached to the source while a phone reconnects.
+          remoteStream.getTracks().forEach((track) => remoteStream?.removeTrack(track));
+          incoming.getTracks().forEach((track) => remoteStream?.addTrack(track));
+          notifyMobileCamStatus(true, sourceId);
+          if (sourceId !== undefined) {
+            sourceStreams.current.set(sourceId, remoteStream);
+            setSources((list) => list.map((item) => item.id === sourceId ? { ...item, stream: remoteStream! } : item));
+          }
+          setMobileCamPairing(null);
         };
         socket.onerror = () => {
           if (finished) return;
@@ -1931,13 +2102,24 @@ export default function Studio() {
             reject(new Error('Phone camera pairing was canceled or disconnected.'));
           } else {
             setMobileCamPairing((value) => value ? { ...value, connected: false } : value);
+            if (remoteStream && !intentionallyClosed) notifyMobileCamStatus(false, sourceId);
           }
         };
         socket.onmessage = async (event) => {
-          let message: { type?: string; sdp?: string; candidate?: RTCIceCandidateInit };
+          let message: { type?: string; sdp?: string; candidate?: RTCIceCandidateInit; orientation?: 'portrait' | 'landscape' };
           try { message = JSON.parse(String(event.data)); } catch { return; }
-          if (message.type === 'peer-ready') {
-            const offer = await peer.createOffer(); await peer.setLocalDescription(offer);
+          if (message.type === 'phone-disconnected') {
+            notifyMobileCamStatus(false, sourceId);
+          } else if (message.type === 'orientation' && (message.orientation === 'portrait' || message.orientation === 'landscape')) {
+            phoneOrientation = message.orientation;
+            onPhoneOrientation?.(phoneOrientation);
+            if (sourceId !== undefined) {
+              setSources((list) => list.map((item) => item.id === sourceId ? { ...item, phoneOrientation } : item));
+            }
+          } else if (message.type === 'peer-ready') {
+            queuedIce.length = 0;
+            hasRemoteDescription = false;
+            const offer = await peer.createOffer({ iceRestart: remoteStream !== null }); await peer.setLocalDescription(offer);
             socket.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
           } else if (message.type === 'answer' && message.sdp) {
             await peer.setRemoteDescription({ type: 'answer', sdp: message.sdp });
@@ -2002,12 +2184,18 @@ export default function Studio() {
       return;
     }
     try {
-      const captured = await captureStream(kind);
+      const sourceId = Math.max(0, ...sources.map((source) => source.id)) + 1;
+      const captured = await captureStream(kind, sourceId, undefined, (orientation) => {
+        setSources((list) => list.map((item) => item.id === sourceId ? { ...item, phoneOrientation: orientation } : item));
+      });
       const stream = captured?.stream;
       const source = createSource(kind, {
+        id: sourceId,
         ...(stream ? { stream } : {}),
         ...(captured?.deviceId ? { deviceId: captured.deviceId } : {}),
         ...(captured?.deviceName ? { name: captured.deviceName } : {}),
+        ...(captured && 'phoneOrientation' in captured && captured.phoneOrientation ? { phoneOrientation: captured.phoneOrientation } : {}),
+        ...(kind === 'mobile-camera' && stream ? { connectionStatus: 'connected' as const } : {}),
         ...(kind === 'text' ? { text: 'Text overlay' } : {}),
         ...(kind === 'microphone' ? { noiseSuppression: true } : {}),
       });
@@ -2015,7 +2203,11 @@ export default function Studio() {
         sourceStreams.current.set(source.id, stream);
         if (captured?.cleanup) sourceCleanups.current.set(source.id, captured.cleanup);
         stream.getTracks().forEach((track) => {
+          const refreshSourceHealth = () => setSources((list) => list.map((item) => item.id === source.id ? { ...item, stream } : item));
+          track.addEventListener('mute', refreshSourceHealth);
+          track.addEventListener('unmute', refreshSourceHealth);
           track.addEventListener('ended', () => {
+            if (stream.getTracks().some((item) => item.readyState === 'live')) return;
             sourceStreams.current.delete(source.id);
             setSources((list) => list.map((item) => item.id === source.id ? { ...item, stream: undefined } : item));
           }, { once: true });
@@ -2028,7 +2220,8 @@ export default function Studio() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not add this source.';
       if (error instanceof DOMException && error.name === 'NotAllowedError') return;
-      setSourceError(message);
+      if (kind === 'mobile-camera') publishStudioNotification('FaithStream Cam pairing failed', message, 'error');
+      else setSourceError(message);
     }
   };
 
@@ -2112,6 +2305,12 @@ export default function Studio() {
   };
 
   const reconnectSource = async (source: Source) => {
+    setSourceError('');
+    if (source.kind === 'mobile-camera' && mobileCamPairingDetails.current) {
+      setMobileCamPairing({ ...mobileCamPairingDetails.current, connected: false, reconnecting: true, remainingSeconds: Math.max(0, Math.ceil((mobileCamPairingDetails.current.expiresAt - Date.now()) / 1000)) });
+      return;
+    }
+    setReconnectingSourceId(source.id);
     try {
       const captured = await captureStream(source.kind, source.id, source.deviceId);
       const stream = captured?.stream;
@@ -2119,7 +2318,11 @@ export default function Studio() {
       sourceStreams.current.set(source.id, stream);
       if (captured.cleanup) sourceCleanups.current.set(source.id, captured.cleanup);
       stream.getTracks().forEach((track) => {
+        const refreshSourceHealth = () => setSources((list) => list.map((item) => item.id === source.id ? { ...item, stream } : item));
+        track.addEventListener('mute', refreshSourceHealth);
+        track.addEventListener('unmute', refreshSourceHealth);
         track.addEventListener('ended', () => {
+          if (stream.getTracks().some((item) => item.readyState === 'live')) return;
           sourceStreams.current.delete(source.id);
           setSources((list) => list.map((item) => item.id === source.id ? { ...item, stream: undefined } : item));
         }, { once: true });
@@ -2128,7 +2331,10 @@ export default function Studio() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not reconnect this source.';
       if (error instanceof DOMException && error.name === 'NotAllowedError') return;
-      setSourceError(message);
+      if (source.kind === 'mobile-camera') publishStudioNotification('FaithStream Cam pairing failed', message, 'error');
+      else setSourceError(message);
+    } finally {
+      setReconnectingSourceId(null);
     }
   };
 
@@ -2141,6 +2347,7 @@ export default function Studio() {
   };
 
   const removeSource = (id: number) => {
+    const source = sources.find((item) => item.id === id);
     musicElements.current.get(id)?.pause();
     musicElements.current.delete(id);
     musicStreams.current.delete(id);
@@ -2149,6 +2356,11 @@ export default function Studio() {
     sourceStreams.current.delete(id);
     sourceCleanups.current.get(id)?.();
     sourceCleanups.current.delete(id);
+    if (source?.kind === 'mobile-camera') {
+      mobileCamPairingDetails.current = null;
+      setMobileCamPairing(null);
+      mobileCamConnectedState.current = null;
+    }
     setChannels((list) => list.filter((channel) => channel.id !== id));
     setSources((list) => list.filter((source) => source.id !== id));
   };
@@ -2524,11 +2736,30 @@ export default function Studio() {
             </select>
             <button type="button" aria-label="Show slide on monitor" title="Show the on-air slide on this monitor" onClick={() => { void openStreamDisplay(); }} disabled={!studioDisplays.length} className="flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-brand px-2.5 text-[11px] font-bold text-white shadow-lg shadow-brand/15 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"><Monitor size={13} /> Show slides</button>
           </div>
-          <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
+          <div data-program-control className="mb-2 flex shrink-0 items-center justify-between gap-2">
             <p className="min-w-0 text-[10px] text-warm-white/50">Choose and arrange sources for the on-air output.</p>
             <div className="flex shrink-0 items-center gap-1">
-              {cameraOnlySnapshot ? <button type="button" onClick={undoCameraOnly} className="rounded border border-sky-400/30 px-2 py-1 text-[10px] text-sky-200 hover:bg-sky-400/10">Undo camera only</button>
-                : previewSceneSources.some((source) => source.kind === 'camera') ? <button type="button" onClick={() => showCameraOnly()} className="rounded border border-white/10 px-2 py-1 text-[10px] text-warm-white/70 hover:border-brand">Camera only</button> : null}
+              {orientationControlCamera && <select
+                aria-label={`${orientationControlCamera.name} rotation`}
+                title={`Rotate only ${orientationControlCamera.name} in the desktop output`}
+                value={orientationControlCamera.cameraRotation ?? (orientationControlCamera.cameraOrientation === 'portrait' || orientationControlCamera.cameraOrientation === 'portrait-up' ? '0' : orientationControlCamera.cameraOrientation === 'upside-down' || orientationControlCamera.cameraOrientation === 'portrait-down' ? '180' : orientationControlCamera.cameraOrientation === 'landscape-left' ? '270' : orientationControlCamera.cameraOrientation === 'landscape-right' ? '90' : 'auto')}
+                onChange={(event) => {
+                  const value = event.currentTarget.value as CameraRotation;
+                  setSources((list) => list.map((source) => source.id === orientationControlCamera.id
+                    ? { ...source, cameraRotation: value === 'auto' ? undefined : value, cameraOrientation: undefined }
+                    : source));
+                }}
+                className="max-w-[130px] rounded border border-white/10 bg-slate-950 px-1.5 py-1 text-[10px] text-warm-white/75 outline-none focus:border-brand"
+              >
+                <option value="auto">Rotation: Auto</option>
+                <option value="0">Upright · 0°</option>
+                <option value="90">Clockwise · 90°</option>
+                <option value="180">Upside down · 180°</option>
+                <option value="270">Counterclockwise · 90°</option>
+              </select>}
+              {previewSceneSources.some((source) => source.kind === 'camera' || source.kind === 'mobile-camera') && (cameraOnlySnapshot
+                ? <button type="button" aria-pressed="true" onClick={undoCameraOnly} className="rounded border border-white/10 px-2 py-1 text-[10px] text-warm-white/70 hover:border-brand">Exit camera only</button>
+                : <button type="button" aria-pressed="false" disabled={!orientationControlCamera} title={orientationControlCamera ? `Show only ${orientationControlCamera.name}` : 'Select a camera first'} onClick={() => showCameraOnly(orientationControlCamera?.id)} className="rounded border border-white/10 px-2 py-1 text-[10px] text-warm-white/70 hover:border-brand disabled:cursor-not-allowed disabled:opacity-40">Camera only</button>)}
               <button type="button" onClick={takePreviewSetupOnAir} className="flex items-center gap-1 rounded bg-brand px-2 py-1 text-[10px] font-bold text-white hover:brightness-110"><ArrowRight size={11} />Take to air</button>
             </div>
           </div>
@@ -2562,7 +2793,7 @@ export default function Studio() {
             <div className="mr-auto min-w-0 pb-1"><p className="truncate text-[9px] font-semibold text-warm-white">{selectedProgramOverlay.name}</p><p className="text-[8px] text-warm-white/45">Position and size</p></div>
             {([['X', 'x', 100 - selectedProgramLayout.width], ['Y', 'y', 100 - selectedProgramLayout.height], ['W', 'width', 100 - selectedProgramLayout.x], ['H', 'height', 100 - selectedProgramLayout.y]] as const).map(([label, key, max]) => <label key={key} className="flex w-10 shrink-0 flex-col gap-1 text-[8px] text-warm-white/55">{label}<input type="number" min={key === 'width' || key === 'height' ? 8 : 0} max={max} value={selectedProgramLayout[key]} onChange={(event) => updateProgramLayout(selectedProgramOverlay.id, { [key]: Number(event.currentTarget.value) })} className="w-full rounded border border-white/10 bg-slate-950 px-0.5 py-1 text-center text-[9px] text-white outline-none focus:border-sky-400" /></label>)}
           </div>}
-          <section className="mt-2 shrink-0">
+          <section data-program-control className="mt-2 shrink-0">
             <div className="mb-1 flex items-center justify-between"><h3 className="text-[11px] font-semibold text-warm-white/75">Choose camera</h3><span className="text-[10px] text-warm-white/45">{previewSceneSources.filter((source) => source.kind === 'camera' || source.kind === 'mobile-camera').length}</span></div>
             {previewSceneSources.some((source) => source.kind === 'camera' || source.kind === 'mobile-camera') ? <div className="grid grid-cols-3 gap-2">
               {previewSceneSources.filter((source) => source.kind === 'camera' || source.kind === 'mobile-camera').map((source) => <button key={source.id} type="button" aria-pressed={isPreviewSourceVisible(source)} onClick={() => showCameraWithCurrentLayers(source.id)} title={`Add ${source.name} to the staged output`} className={`overflow-hidden rounded-lg border text-left ${selectedProgramSource === source.id ? 'border-sky-400 ring-1 ring-sky-400' : 'border-white/10 hover:border-white/30'}`}>
@@ -2719,6 +2950,10 @@ export default function Studio() {
                 {sceneSources.map((source) => {
                   const { id, name, kind } = source;
                   const visible = isPreviewSourceVisible(source);
+                  const reconnectable = ['camera', 'mobile-camera', 'screen', 'microphone', 'desktop-audio'].includes(kind);
+                  const hasLiveTrack = !!source.stream?.getTracks().some((track) => track.readyState === 'live' && !track.muted);
+                  const sourceConnected = kind === 'mobile-camera' ? source.connectionStatus ? source.connectionStatus === 'connected' : hasLiveTrack : hasLiveTrack;
+                  const disconnected = reconnectable && !sourceConnected;
                   const Icon = SOURCE_OPTIONS.find((option) => option.kind === kind)?.icon ?? Type;
                   const musicAsset = kind === 'music' ? musicAssets.find((asset) => asset.id === source.mediaAssetId) : undefined;
                   const mediaAsset = kind === 'media' && source.mediaAssetId ? mediaUrls[source.mediaAssetId] : undefined;
@@ -2742,7 +2977,7 @@ export default function Studio() {
                       />}
                       <span title="Drag to reorder layers; items higher in the list appear in front"><GripVertical size={14} className="shrink-0 cursor-grab text-warm-white/35" /></span>
                       <Icon size={15} className="shrink-0 text-warm-white/70" />
-                      <button type="button" disabled={!['camera', 'mobile-camera', 'screen', 'media', 'presentation', 'text'].includes(kind)} aria-pressed={selectedProgramSource === id} onClick={() => setSelectedProgramSource(id)} title="Select this layer in Program setup" className="flex min-w-0 flex-1 flex-col truncate text-left disabled:cursor-default"><span className="truncate">{name}</span>{mediaAsset?.sizeBytes !== undefined && <span className="truncate text-[9px] text-warm-white/40">{mediaAsset.optimized && mediaAsset.originalBytes ? `${formatMediaSizeInKb(mediaAsset.originalBytes)} → ` : ''}{formatMediaSizeInKb(mediaAsset.sizeBytes)}{mediaAsset.optimized ? ' · optimized' : ''}</span>}</button>
+                      <button type="button" disabled={!['camera', 'mobile-camera', 'screen', 'media', 'presentation', 'text'].includes(kind)} aria-pressed={selectedProgramSource === id} onClick={() => setSelectedProgramSource(id)} title="Select this layer in Program setup" className="flex min-w-0 flex-1 flex-col truncate text-left disabled:cursor-default"><span className="truncate">{name}</span>{kind !== 'mobile-camera' && disconnected && <span className="truncate text-[9px] font-semibold text-red-300">Disconnected</span>}{mediaAsset?.sizeBytes !== undefined && <span className="truncate text-[9px] text-warm-white/40">{mediaAsset.optimized && mediaAsset.originalBytes ? `${formatMediaSizeInKb(mediaAsset.originalBytes)} → ` : ''}{formatMediaSizeInKb(mediaAsset.sizeBytes)}{mediaAsset.optimized ? ' · optimized' : ''}</span>}</button>
                       {kind === 'music' && <>
                         <button type="button" aria-label={musicPlaying[id] ? `Pause ${name}` : `Play ${name}`} title={musicPlaying[id] ? 'Pause track' : 'Play track'} onClick={() => toggleMusicPlayback(id)} className="text-warm-white/70 hover:text-brand">{musicPlaying[id] ? <Pause size={14} /> : <Play size={14} />}</button>
                         <button type="button" aria-pressed={source.loop ?? false} title={source.loop ? 'Loop enabled' : 'Play once'} onClick={() => {
@@ -2760,9 +2995,9 @@ export default function Studio() {
                           <Pencil size={14} />
                         </button>
                       )}
-                      {['camera', 'mobile-camera', 'screen', 'microphone', 'desktop-audio'].includes(kind) && !source.stream && (
-                        <button aria-label={`Reconnect ${name}`} title="Connect source" onClick={() => reconnectSource(source)} className="text-warm-white/55 hover:text-brand">
-                          <Radio size={14} />
+                      {disconnected && (
+                        <button type="button" aria-label={`Reconnect ${name}`} title={`Reconnect ${name}`} disabled={reconnectingSourceId === id} onClick={() => void reconnectSource(source)} className="flex shrink-0 items-center gap-1 rounded-md border border-red-300/25 bg-red-400/10 px-1.5 py-1 text-[9px] font-semibold text-red-100 hover:bg-red-400/20 disabled:cursor-wait disabled:opacity-50">
+                          {reconnectingSourceId === id ? <Loader2 size={11} className="animate-spin" /> : <Radio size={11} />} Reconnect
                         </button>
                       )}
                       <button aria-label={`Remove ${name}`} title="Remove source" onClick={() => removeSource(id)} className="text-warm-white/45 opacity-0 transition hover:text-red-300 focus:opacity-100 group-hover:opacity-100">
@@ -3003,7 +3238,7 @@ export default function Studio() {
         </section>
       )}
       {addSceneOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setAddSceneOpen(false); }}>
+        createPortal(<div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setAddSceneOpen(false); }}>
           <section role="dialog" aria-modal="true" aria-labelledby="add-scene-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -3032,7 +3267,7 @@ export default function Studio() {
               <div className="mt-5 rounded-xl border border-dashed border-white/15 bg-white/[0.03] p-4 text-sm text-warm-white/60">No saved presentations with slides yet. Create and save a presentation first, then return here to add it as a scene.</div>
             )}
           </section>
-        </div>
+        </div>, document.body)
       )}
       {goLiveSetupOpen && createPortal(
         <div className="fixed inset-0 z-[200] flex items-center justify-center overflow-y-auto bg-black/80 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (!startingStream && event.target === event.currentTarget) setGoLiveSetupOpen(false); }}>
@@ -3148,7 +3383,7 @@ export default function Studio() {
         document.body,
       )}
       {settingsOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
+        createPortal(<div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
           <section role="dialog" aria-modal="true" aria-labelledby="studio-settings-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -3175,10 +3410,10 @@ export default function Studio() {
               />
             </div>
           </section>
-        </div>
+        </div>, document.body)
       )}
       {sourceEditor && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setSourceEditor(null); }}>
+        createPortal(<div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setSourceEditor(null); }}>
           <section role="dialog" aria-modal="true" aria-labelledby="source-editor-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -3193,25 +3428,27 @@ export default function Studio() {
               <button onClick={saveSourceText} disabled={!sourceDraft.trim()} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy hover:brightness-110 disabled:opacity-40">Save text</button>
             </div>
           </section>
-        </div>
+        </div>, document.body)
       )}
       {mobileCamPairing && (
-        <div className="fixed inset-0 z-[260] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+        createPortal(<div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
           <section role="dialog" aria-modal="true" aria-labelledby="mobile-cam-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
-              <div><h2 id="mobile-cam-title" className="text-lg font-bold text-warm-white">Connect FaithStream Cam</h2><p className="mt-1 text-sm text-warm-white/55">Install and open FaithStream Cam on your phone. Both devices must use the same Wi-Fi.</p></div>
-              <button aria-label="Close pairing details" onClick={() => { if (!mobileCamPairing.connected) void window.faithstreamWindow?.stopMobileCamPairing(); setMobileCamPairing(null); }} className="rounded-lg p-1.5 text-warm-white/55 hover:bg-white/10 hover:text-white"><X size={17} /></button>
+              <div><h2 id="mobile-cam-title" className="text-lg font-bold text-warm-white">{mobileCamPairing.reconnecting ? 'Reconnect FaithStream Cam' : 'Connect FaithStream Cam'}</h2><p className="mt-1 text-sm text-warm-white/55">{mobileCamPairing.reconnecting ? 'Tap Reconnect camera on your phone and use the current code below.' : 'Install and open FaithStream Cam on your phone. Both devices must use the same Wi-Fi.'}</p></div>
+              <button aria-label="Close pairing details" onClick={() => { if (!mobileCamPairing.connected && !mobileCamPairing.reconnecting) { void window.faithstreamWindow?.stopMobileCamPairing(); mobileCamPairingDetails.current = null; } setMobileCamPairing(null); }} className="rounded-lg p-1.5 text-warm-white/55 hover:bg-white/10 hover:text-white"><X size={17} /></button>
             </div>
             <div className="mt-5 rounded-xl border border-white/10 bg-black/20 p-4">
               <p className="text-xs font-semibold uppercase tracking-wide text-warm-white/50">Studio address</p>
               <div className="mt-2 space-y-1 font-mono text-sm text-white">{mobileCamPairing.addresses.map((address) => <p key={address}>{address}:{mobileCamPairing.port}</p>)}</div>
               <p className="mt-4 text-xs font-semibold uppercase tracking-wide text-warm-white/50">Pairing code</p>
               <p className="mt-1 font-mono text-3xl font-bold tracking-[0.3em] text-brand">{mobileCamPairing.code}</p>
+              {!mobileCamPairing.connected && <p className="mt-2 text-xs text-warm-white/55">Code refreshes in {Math.floor((mobileCamPairing.remainingSeconds ?? 180) / 60)}:{String((mobileCamPairing.remainingSeconds ?? 180) % 60).padStart(2, '0')}. A new code appears automatically; update it on your phone if needed.</p>}
             </div>
-            <p role="status" className="mt-4 text-sm text-warm-white/70">{mobileCamPairing.connected ? 'Phone camera connected. You can position it in Preview setup.' : 'Waiting for your phone to connect…'}</p>
-            <div className="mt-5 flex justify-end"><button onClick={() => { if (!mobileCamPairing.connected) void window.faithstreamWindow?.stopMobileCamPairing(); setMobileCamPairing(null); }} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy">{mobileCamPairing.connected ? 'Done' : 'Cancel pairing'}</button></div>
+            <p role="status" className={`mt-4 text-sm ${mobileCamPairing.connected ? 'text-emerald-300' : mobileCamPairing.reconnecting ? 'text-amber-200' : 'text-warm-white/70'}`}>{mobileCamPairing.connected ? 'Phone camera connected. You can position it in Preview setup.' : mobileCamPairing.reconnecting ? 'Disconnected · waiting for the phone to reconnect…' : 'Waiting for your phone to connect…'}</p>
+            {mobileCamPairing.refreshError && <p role="alert" className="mt-2 text-xs text-amber-200">{mobileCamPairing.refreshError}</p>}
+            <div className="mt-5 flex justify-end"><button onClick={() => { if (!mobileCamPairing.connected && !mobileCamPairing.reconnecting) { void window.faithstreamWindow?.stopMobileCamPairing(); mobileCamPairingDetails.current = null; } setMobileCamPairing(null); }} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy">{mobileCamPairing.connected || mobileCamPairing.reconnecting ? 'Close' : 'Cancel pairing'}</button></div>
           </section>
-        </div>
+        </div>, document.body)
       )}
       <ConfirmationModal
         open={endStreamConfirmOpen}
@@ -3282,8 +3519,8 @@ export function StudioDisplayOutput() {
           if (next && Number.isFinite(next.sceneId) && Number.isFinite(next.slideIdx)) setCurrentRef(next);
         } catch { /* Keep the current output while a new mode initializes. */ }
       }
-      if (event.key === STUDIO_SLIDESHOW_SCENES_KEY && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) !== 'stream') setScenes(loadSlideshowScenes());
-      if (event.key === STUDIO_SCENES_KEY && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream') setScenes(loadStudioScenes());
+      if (event.key === getAccountStorageKey(STUDIO_SLIDESHOW_SCENES_KEY) && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) !== 'stream') setScenes(loadSlideshowScenes());
+      if (event.key === getAccountStorageKey(STUDIO_SCENES_KEY) && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream') setScenes(loadStudioScenes());
       const activeRefKey = localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? STUDIO_STREAM_OUTPUT_REF_KEY : STUDIO_OUTPUT_REF_KEY;
       if (event.key === activeRefKey && event.newValue) {
         try {

@@ -50,7 +50,8 @@ let recordingSession: RecordingSession | null = null;
 const studioDisplayWindows = new Map<number, BrowserWindow>();
 let authWindow: BrowserWindow | null = null;
 let mobileCamServer: any = null;
-let mobileCamRoom: { code: string; studio: any | null; phone: any | null } | null = null;
+const MOBILE_CAM_PAIRING_LIFETIME_MS = 3 * 60 * 1000;
+let mobileCamRoom: { code: string; expiresAt: number; studio: any | null; phone: any | null } | null = null;
 const authTokenPath = () => path.join(app.getPath('userData'), 'auth-token.bin');
 const streamSettingsPath = () => path.join(app.getPath('userData'), 'stream-settings.bin');
 
@@ -74,13 +75,13 @@ const startMobileCamPairing = async (sender: Electron.WebContents) => {
   const address = server.address();
   if (!address || typeof address === 'string') return { ok: false, message: 'Could not start local camera pairing.' };
   const code = String(randomInt(100000, 1000000));
-  const room = { code, studio: null as any, phone: null as any };
+  const room = { code, expiresAt: Date.now() + MOBILE_CAM_PAIRING_LIFETIME_MS, studio: null as any, phone: null as any };
   let invalidAttempts = 0;
   mobileCamRoom = room;
   server.on('connection', (socket: any, request: { url?: string }) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const role = url.searchParams.get('role');
-    if (url.searchParams.get('code') !== room.code || (role !== 'studio' && role !== 'phone')) {
+    if (Date.now() >= room.expiresAt || url.searchParams.get('code') !== room.code || (role !== 'studio' && role !== 'phone')) {
       invalidAttempts += 1;
       socket.close(1008, 'Invalid pairing code');
       if (invalidAttempts >= 12) {
@@ -104,10 +105,28 @@ const startMobileCamPairing = async (sender: Electron.WebContents) => {
       const peer = room[peerKey];
       if (peer?.readyState === 1) peer.send(data.toString('utf8'));
     });
-    socket.on('close', () => { if (room[key] === socket) room[key] = null; });
+    socket.on('close', () => {
+      if (room[key] !== socket) return;
+      room[key] = null;
+      // The studio's signaling socket stays open when the phone disconnects,
+      // so explicitly report the phone leaving instead of waiting for WebRTC
+      // timeouts to infer it.
+      if (key === 'phone' && room.studio?.readyState === 1) {
+        room.studio.send(JSON.stringify({ type: 'phone-disconnected' }));
+      }
+    });
   });
   const addresses = Object.values(os.networkInterfaces()).flat().filter((item): item is NonNullable<typeof item> => !!item && item.family === 'IPv4' && !item.internal).map((item) => item.address);
-  return { ok: true, port: address.port, code, addresses };
+  return { ok: true, port: address.port, code: room.code, expiresAt: room.expiresAt, addresses };
+};
+
+const renewMobileCamPairingCode = (sender: Electron.WebContents) => {
+  if (!isAuthWindow(sender) || !mobileCamServer || !mobileCamRoom) {
+    return { ok: false, message: 'The FaithStream Cam pairing session has ended.' };
+  }
+  mobileCamRoom.code = String(randomInt(100000, 1000000));
+  mobileCamRoom.expiresAt = Date.now() + MOBILE_CAM_PAIRING_LIFETIME_MS;
+  return { ok: true, code: mobileCamRoom.code, expiresAt: mobileCamRoom.expiresAt };
 };
 
 const protectWindowNavigation = (window: BrowserWindow) => {
@@ -607,6 +626,7 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle('mobile-cam:start-pairing', (event) => startMobileCamPairing(event.sender));
+  ipcMain.handle('mobile-cam:renew-code', (event) => renewMobileCamPairingCode(event.sender));
   ipcMain.handle('mobile-cam:stop-pairing', (event) => {
     if (!isAuthWindow(event.sender) || !mobileCamServer) return false;
     mobileCamRoom?.studio?.close();

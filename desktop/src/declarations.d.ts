@@ -7,7 +7,8 @@ interface Window {
     saveAuthToken: (token: string) => Promise<boolean>;
     clearAuthToken: () => Promise<boolean>;
     getStudioDisplays: () => Promise<{ id: number; name: string; primary: boolean; bounds: { x: number; y: number; width: number; height: number } }[]>;
-    startMobileCamPairing: () => Promise<{ ok: boolean; port?: number; code?: string; addresses?: string[]; message?: string }>;
+    startMobileCamPairing: () => Promise<{ ok: boolean; port?: number; code?: string; expiresAt?: number; addresses?: string[]; message?: string }>;
+    renewMobileCamPairingCode: () => Promise<{ ok: boolean; code?: string; expiresAt?: number; message?: string }>;
     stopMobileCamPairing: () => Promise<boolean>;
     openStudioDisplay: (displayId: number) => Promise<{ ok: boolean; message?: string }>;
     closeStudioDisplay: () => Promise<boolean>;

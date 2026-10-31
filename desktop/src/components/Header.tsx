@@ -98,6 +98,14 @@ const Header: React.FC<HeaderProps> = ({
     const addNotification = (title: string, message: string, kind: AppNotification['kind'] = 'info') => {
       setNotifications((current) => [{ id: crypto.randomUUID(), title, message, createdAt: Date.now(), read: false, kind }, ...current].slice(0, 30));
     };
+    const mergeNotifications = (incoming: AppNotification[]) => {
+      if (!incoming.length) return;
+      setNotifications((current) => {
+        const byId = new Map<string, AppNotification>();
+        [...incoming, ...current].forEach((item) => { if (item?.id && item.title && item.message) byId.set(item.id, item); });
+        return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 30);
+      });
+    };
     const updateSession = (next: StudioSession) => {
       const previous = previousSession.current;
       if (next.live && next.streamStatus === 'live' && previous.streamStatus !== 'live') {
@@ -114,10 +122,16 @@ const Header: React.FC<HeaderProps> = ({
     };
     const onStorageChange = (event: StorageEvent) => {
       if (event.key === STUDIO_SESSION_KEY) updateSession(readStudioSession());
+      if (event.key === NOTIFICATIONS_KEY) mergeNotifications(readNotifications());
     };
     const onStreamError = (event: Event) => {
       const detail = event instanceof CustomEvent ? event.detail as { message?: string } : null;
       addNotification('Stream connection problem', detail?.message || 'Could not render the On-air output.', 'error');
+    };
+    const onAppNotification = (event: Event) => {
+      const detail = (event as CustomEvent<Partial<AppNotification>>).detail;
+      if (!detail?.id || !detail.title || !detail.message) return;
+      mergeNotifications([{ ...detail, createdAt: detail.createdAt ?? Date.now(), read: false, kind: detail.kind ?? 'info' } as AppNotification]);
     };
     const unsubscribeRecording = window.faithstreamWindow?.onRecordingStatus((event) => {
       if (event.status === 'error') addNotification('Recording problem', event.message || 'The recording could not be completed.', 'error');
@@ -130,12 +144,14 @@ const Header: React.FC<HeaderProps> = ({
     window.addEventListener('faithstream:studio-session', onSessionChange);
     window.addEventListener('storage', onStorageChange);
     window.addEventListener('faithstream:stream-error', onStreamError);
+    window.addEventListener('faithstream:notification', onAppNotification);
     return () => {
       unsubscribeRecording?.();
       unsubscribeStream?.();
       window.removeEventListener('faithstream:studio-session', onSessionChange);
       window.removeEventListener('storage', onStorageChange);
       window.removeEventListener('faithstream:stream-error', onStreamError);
+      window.removeEventListener('faithstream:notification', onAppNotification);
     };
   }, []);
 
@@ -290,7 +306,7 @@ const Header: React.FC<HeaderProps> = ({
                 <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
                   <div>
                     <h2 className="text-sm font-semibold text-white">Notifications</h2>
-                    <p className="mt-0.5 text-[11px] text-white/45">Stream and recording updates</p>
+                    <p className="mt-0.5 text-[11px] text-white/45">FaithStream and studio updates</p>
                   </div>
                   {notifications.length > 0 && <button type="button" onClick={() => setNotifications([])} className="flex items-center gap-1 rounded-md px-2 py-1.5 text-[11px] text-white/55 hover:bg-white/5 hover:text-white"><Trash2 size={12} /> Clear all</button>}
                 </div>
@@ -298,7 +314,7 @@ const Header: React.FC<HeaderProps> = ({
                   {notifications.length === 0 ? <div className="px-4 py-8 text-center">
                     <Bell size={20} className="mx-auto text-white/30" />
                     <p className="mt-2 text-sm text-white/65">You’re all caught up</p>
-                    <p className="mt-1 text-xs text-white/40">Stream and recording updates will show here.</p>
+                    <p className="mt-1 text-xs text-white/40">Camera, stream, and recording updates will show here.</p>
                   </div> : notifications.map((notification) => <article key={notification.id} className="flex gap-3 border-b border-white/5 px-4 py-3 last:border-0">
                     <span className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${notification.kind === 'error' ? 'bg-red-500/15 text-red-300' : 'bg-brand/10 text-brand'}`}>
                       {notification.kind === 'error' ? <CircleAlert size={15} /> : <Check size={15} />}
