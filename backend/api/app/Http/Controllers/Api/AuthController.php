@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\User;
+use Illuminate\Contracts\Auth\Factory as AuthFactory;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -11,10 +12,27 @@ use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Validation\ValidationException;
+use Laravel\Sanctum\Guard as SanctumGuard;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class AuthController extends Controller
 {
+    public function sessionStatus(Request $request): JsonResponse
+    {
+        $user = (new SanctumGuard(
+            app(AuthFactory::class),
+            config('sanctum.expiration'),
+            config('auth.guards.sanctum.provider'),
+            false,
+        ))($request);
+
+        if (! $user instanceof User) {
+            return response()->json(['message' => 'Your FaithStream session is no longer active.'], 401);
+        }
+
+        return response()->json(['authenticated' => true])->header('Cache-Control', 'no-store');
+    }
+
     public function register(Request $request): JsonResponse
     {
         $request->merge(['email_address' => strtolower(trim((string) $request->input('email_address', '')))]);
@@ -206,7 +224,7 @@ class AuthController extends Controller
         return response()->json(['message' => 'Signed out.']);
     }
 
-    /** @return array{id: int, name: string, email_address: string, role: string, profile_photo_url: string|null, profile_photo_position: array{x: int, y: int}} */
+    /** @return array{id: int, name: string, email_address: string, role: string, profile_photo_url: string|null, profile_photo_position: array{x: int, y: int}, deletion_request_status: 'pending'|'rejected'|null} */
     private function userData(User $user): array
     {
         return [
@@ -221,6 +239,55 @@ class AuthController extends Controller
                 'x' => (int) $user->profile_photo_x,
                 'y' => (int) $user->profile_photo_y,
             ],
+            'deletion_request_status' => $user->deletion_requested_at
+                ? 'pending'
+                : ($user->deletion_rejected_at ? 'rejected' : null),
         ];
+    }
+
+    public function requestAccountDeletion(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'password' => ['required', 'string', 'max:128'],
+        ]);
+        /** @var User $user */
+        $user = $request->user();
+
+        if (in_array(strtolower($user->email), config('admin.emails', []), true)) {
+            return response()->json(['message' => 'Administrator accounts cannot request deletion here.'], 403);
+        }
+
+        if (! Hash::check($validated['password'], $user->password)) {
+            throw ValidationException::withMessages(['password' => ['The password is incorrect.']]);
+        }
+
+        if ($user->deletion_requested_at) {
+            return response()->json([
+                'message' => 'Your account deletion request is already waiting for administrator review.',
+                'deletion_request_status' => 'pending',
+            ], 409);
+        }
+
+        $user->forceFill([
+            'deletion_requested_at' => now(),
+            'deletion_rejected_at' => null,
+        ])->save();
+
+        return response()->json([
+            'message' => 'Your request was sent to an administrator for review. Your account remains active until it is approved.',
+            'deletion_request_status' => 'pending',
+        ])->header('Cache-Control', 'no-store');
+    }
+
+    public function cancelAccountDeletionRequest(Request $request): JsonResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        $user->forceFill(['deletion_requested_at' => null])->save();
+
+        return response()->json([
+            'message' => 'Your account deletion request was cancelled.',
+            'deletion_request_status' => $user->deletion_rejected_at ? 'rejected' : null,
+        ])->header('Cache-Control', 'no-store');
     }
 }

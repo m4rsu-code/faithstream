@@ -30,6 +30,9 @@ class User extends Authenticatable implements MustVerifyEmailContract
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'deletion_requested_at' => 'datetime',
+            'deletion_rejected_at' => 'datetime',
         ];
     }
+
 }
