@@ -57,7 +57,8 @@ const clearStoredAuthToken = async () => {
 };
 
 type ProfilePhotoPosition = { x: number; y: number };
-type ApiUser = { id: number; name: string; email_address: string; role: string; profile_photo_url: string | null; profile_photo_position: ProfilePhotoPosition };
+type AccountDeletionStatus = 'pending' | 'rejected' | null;
+type ApiUser = { id: number; name: string; email_address: string; role: string; profile_photo_url: string | null; profile_photo_position: ProfilePhotoPosition; deletion_request_status?: AccountDeletionStatus };
 const MIN_PROFILE_SAVE_LOADING_MS = 3000;
 
 const waitForMinimumProfileSaveLoading = async (startedAt: number) => {
@@ -159,6 +160,45 @@ export const updateLocalAccountProfilePhotoPosition = async (position: ProfilePh
   return data.user;
 };
 
+export const getLocalAccountDeletionStatus = async (): Promise<AccountDeletionStatus> => {
+  const token = await getStoredAuthToken();
+  if (!token) throw new Error('You must be signed in to manage your account.');
+  const response = await fetch(`${API_BASE_URL}/user`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+  });
+  const data = await response.json() as { user?: ApiUser; message?: string };
+  if (!response.ok || !data.user) throw new Error(data.message ?? 'Could not check your account status.');
+  return data.user.deletion_request_status ?? null;
+};
+
+export const requestLocalAccountDeletion = async (password: string): Promise<{ message: string; status: AccountDeletionStatus }> => {
+  const token = await getStoredAuthToken();
+  if (!token) throw new Error('You must be signed in to request account deletion.');
+  const response = await fetch(`${API_BASE_URL}/user/deletion-request`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  const data = await response.json() as { message?: string; deletion_request_status?: AccountDeletionStatus; errors?: Record<string, string[]> };
+  if (!response.ok) {
+    const firstError = data.errors ? Object.values(data.errors).flat()[0] : undefined;
+    throw new Error(firstError ?? data.message ?? 'Could not submit the account deletion request.');
+  }
+  return { message: data.message ?? 'Deletion request sent for review.', status: data.deletion_request_status ?? 'pending' };
+};
+
+export const cancelLocalAccountDeletionRequest = async (): Promise<{ message: string; status: AccountDeletionStatus }> => {
+  const token = await getStoredAuthToken();
+  if (!token) throw new Error('You must be signed in to manage your account.');
+  const response = await fetch(`${API_BASE_URL}/user/deletion-request`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+  });
+  const data = await response.json() as { message?: string; deletion_request_status?: AccountDeletionStatus };
+  if (!response.ok) throw new Error(data.message ?? 'Could not cancel your deletion request.');
+  return { message: data.message ?? 'Deletion request cancelled.', status: data.deletion_request_status ?? null };
+};
+
 export default function AuthGate({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const [signedIn, setSignedIn] = useState(false);
@@ -168,7 +208,8 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [showRegistrationPassword, setShowRegistrationPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -184,7 +225,8 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     setEmail('');
     setPassword('');
     setConfirmPassword('');
-    setShowPassword(false);
+    setShowLoginPassword(false);
+    setShowRegistrationPassword(false);
     setShowConfirmPassword(false);
     setMode(nextMode);
   };
@@ -199,7 +241,8 @@ export default function AuthGate({ children }: { children: ReactNode }) {
         setEmail('');
         setPassword('');
         setConfirmPassword('');
-        setShowPassword(false);
+        setShowLoginPassword(false);
+        setShowRegistrationPassword(false);
         setShowConfirmPassword(false);
         setError('');
         setNotice('');
@@ -239,6 +282,44 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     void restoreSession();
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (!signedIn || checkingSession || startingUp) return;
+
+    let cancelled = false;
+    let checkingServerSession = false;
+    const checkServerSession = async () => {
+      if (checkingServerSession || cancelled) return;
+      checkingServerSession = true;
+
+      try {
+        const token = await getStoredAuthToken();
+        if (!token) {
+          signOutLocalAccount();
+          return;
+        }
+
+        const response = await fetch(`${API_BASE_URL}/session/status`, {
+          headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+          cache: 'no-store',
+        });
+
+        if (!cancelled && (response.status === 401 || response.status === 403)) {
+          signOutLocalAccount();
+        }
+      } catch {
+        // Keep the local session during temporary network interruptions.
+      } finally {
+        checkingServerSession = false;
+      }
+    };
+
+    const timer = window.setInterval(() => void checkServerSession(), 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [checkingSession, signedIn, startingUp]);
 
   useEffect(() => {
     if (!startingUp) return;
@@ -397,6 +478,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
 
   const isRegister = mode === 'register';
   const isForgot = mode === 'forgot';
+  const passwordVisible = isRegister ? showRegistrationPassword : showLoginPassword;
   return (
     <div style={AUTH_THEME_STYLE} className="flex h-screen min-h-[620px] items-center justify-center overflow-hidden bg-panel p-0 text-warm-white">
       <div className="relative grid h-full w-full overflow-hidden bg-panel md:grid-cols-[1fr_0.92fr]">
@@ -440,7 +522,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
               <span className="relative mt-1.5 block"><Mail size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-warm-white/35" /><input name="email_address" required type="email" autoComplete="email" value={email} onChange={(event) => { setEmail(event.target.value); setCanResendVerification(false); }} className="w-full rounded-xl border border-[rgba(255,255,255,0.1)] bg-navy py-3 pl-10 pr-3.5 text-sm text-warm-white outline-none transition placeholder:text-warm-white/30 focus:border-brand" placeholder="you@gmail.com" /></span>
             </label>
             {!isForgot && <label className="block text-xs font-medium text-warm-white/70">Password
-              <span className="relative mt-1.5 block"><LockKeyhole size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-warm-white/35" /><input name="password" required type={showPassword ? 'text' : 'password'} autoComplete={isRegister ? 'new-password' : 'current-password'} minLength={isRegister ? 12 : undefined} maxLength={128} value={password} onChange={(event) => setPassword(event.target.value)} className="w-full rounded-xl border border-[rgba(255,255,255,0.1)] bg-navy py-3 pl-10 pr-11 text-sm text-warm-white outline-none transition placeholder:text-warm-white/30 focus:border-brand" placeholder={isRegister ? 'At least 12 characters' : 'Your password'} /><button type="button" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? 'Hide password' : 'Show password'} className="absolute right-3 top-1/2 -translate-y-1/2 text-warm-white/45 hover:text-warm-white">{showPassword ? <EyeOff size={17} /> : <Eye size={17} />}</button></span>
+              <span className="relative mt-1.5 block"><LockKeyhole size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-warm-white/35" /><input name="password" required type={passwordVisible ? 'text' : 'password'} autoComplete={isRegister ? 'new-password' : 'current-password'} minLength={isRegister ? 12 : undefined} maxLength={128} value={password} onChange={(event) => setPassword(event.target.value)} className="w-full rounded-xl border border-[rgba(255,255,255,0.1)] bg-navy py-3 pl-10 pr-11 text-sm text-warm-white outline-none transition placeholder:text-warm-white/30 focus:border-brand" placeholder={isRegister ? 'At least 12 characters' : 'Your password'} /><button type="button" onClick={() => isRegister ? setShowRegistrationPassword((visible) => !visible) : setShowLoginPassword((visible) => !visible)} aria-label={passwordVisible ? 'Hide password' : 'Show password'} aria-pressed={passwordVisible} className="absolute right-3 top-1/2 -translate-y-1/2 text-warm-white/45 hover:text-warm-white">{passwordVisible ? <EyeOff size={17} /> : <Eye size={17} />}</button></span>
             </label>}
             {!isRegister && !isForgot && <div className="-mt-2 text-right"><button type="button" onClick={() => { setError(''); setNotice(''); setMode('forgot'); }} className="text-xs font-semibold text-brand hover:underline">Forgot password?</button></div>}
             {isRegister && <label className="block text-xs font-medium text-warm-white/70">Confirm password

@@ -42,7 +42,7 @@ const HELP_SECTIONS = [
     id: 'settings', label: 'Settings',
     intro: 'Set account details and defaults for how FaithStream looks and behaves on this computer.',
     topics: [
-      { title: 'Profile and sign-in', text: 'Change your display name and role, then choose Save profile. Your sign-in email cannot be edited here. Use Sign out to return to the login screen.' },
+      { title: 'Profile and sign-in', text: 'Change your display name and role, then choose Save profile. Your sign-in email cannot be edited here. In Your profile, you can request account deletion by confirming your password; an administrator must approve it. Use Sign out to return to the login screen.' },
       { title: 'Colors and slide preview', text: 'Choose a color theme for the app. Preview slides before showing them controls how Studio advances slides: when enabled, select a slide for Preview and choose Take to air; when disabled, slide changes go straight to the output. The arrow keys move to the previous or next slide.' },
       { title: 'Stream safety and quality', text: 'Turn on Ask before ending a live stream to show a confirmation before stopping. Set the default picture size, frame rate, and bitrate used when Go Live setup opens. Higher resolution, frame rate, and bitrate need more computer capacity and upload bandwidth; choose 720p and a lower bitrate if the stream struggles.' },
       { title: 'Where preferences are saved', text: 'The Settings page explains which preferences stay on this device. Stream URL and key are entered in Go Live setup; the stream key is not saved in Settings.' },

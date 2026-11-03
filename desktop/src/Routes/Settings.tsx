@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { Camera, Check, CircleUserRound, Loader2, LogOut, MonitorPlay, Palette, Radio, Settings as SettingsIcon, ShieldCheck, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { AlertTriangle, Camera, Check, CircleUserRound, Loader2, LogOut, MonitorPlay, Palette, Radio, Settings as SettingsIcon, ShieldCheck, SlidersHorizontal, Trash2 } from 'lucide-react';
 import type { FormEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
-import { removeLocalAccountProfilePhoto, signOutLocalAccount, updateLocalAccountProfile, updateLocalAccountProfilePhoto, updateLocalAccountProfilePhotoPosition } from '../components/AuthGate';
+import { cancelLocalAccountDeletionRequest, getLocalAccountDeletionStatus, removeLocalAccountProfilePhoto, requestLocalAccountDeletion, signOutLocalAccount, updateLocalAccountProfile, updateLocalAccountProfilePhoto, updateLocalAccountProfilePhotoPosition } from '../components/AuthGate';
 
 const KEYS = {
   previewMode: 'faithstream.studio-preview-mode',
@@ -98,6 +98,13 @@ export default function Settings() {
   const [cropOpen, setCropOpen] = useState(false);
   const [cropSaving, setCropSaving] = useState(false);
   const [cropPosition, setCropPosition] = useState<PhotoPosition>(profile.photoPosition);
+  const [deletionStatus, setDeletionStatus] = useState<'pending' | 'rejected' | null>(null);
+  const [deletionStatusLoaded, setDeletionStatusLoaded] = useState(false);
+  const deletionStatusLoadedRef = useRef(false);
+  const [deletionDialogOpen, setDeletionDialogOpen] = useState(false);
+  const [deletionPassword, setDeletionPassword] = useState('');
+  const [deletionBusy, setDeletionBusy] = useState(false);
+  const [deletionMessage, setDeletionMessage] = useState('');
   const profilePhotoInput = useRef<HTMLInputElement>(null);
   const cropPreviewRef = useRef<HTMLDivElement>(null);
   const cropDragRef = useRef<{ pointerId: number; x: number; y: number; clientX: number; clientY: number } | null>(null);
@@ -111,6 +118,63 @@ export default function Settings() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem(KEYS.theme, theme);
   }, [theme]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshDeletionStatus = async () => {
+      try {
+        const status = await getLocalAccountDeletionStatus();
+        if (!cancelled) setDeletionStatus(status);
+      } catch (cause) {
+        if (!cancelled && !deletionStatusLoadedRef.current) {
+          setDeletionMessage(cause instanceof Error ? cause.message : 'Could not load account status.');
+        }
+      } finally {
+        if (!cancelled) {
+          deletionStatusLoadedRef.current = true;
+          setDeletionStatusLoaded(true);
+        }
+      }
+    };
+    void refreshDeletionStatus();
+    const timer = window.setInterval(() => void refreshDeletionStatus(), 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+
+  const submitDeletionRequest = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setDeletionBusy(true);
+    setDeletionMessage('Sending your request…');
+    try {
+      const result = await requestLocalAccountDeletion(deletionPassword);
+      setDeletionStatus(result.status);
+      setDeletionMessage(result.message);
+      setDeletionPassword('');
+      setDeletionDialogOpen(false);
+    } catch (cause) {
+      setDeletionMessage(cause instanceof Error ? cause.message : 'Could not submit your request.');
+    } finally {
+      setDeletionBusy(false);
+    }
+  };
+
+  const cancelDeletionRequest = async () => {
+    setDeletionBusy(true);
+    setDeletionMessage('Cancelling your request…');
+    try {
+      const result = await cancelLocalAccountDeletionRequest();
+      setDeletionStatus(result.status);
+      setDeletionMessage(result.message);
+    } catch (cause) {
+      setDeletionMessage(cause instanceof Error ? cause.message : 'Could not cancel your request.');
+    } finally {
+      setDeletionBusy(false);
+    }
+  };
 
   const saveProfile = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -275,6 +339,20 @@ export default function Settings() {
             </div>
           </SettingsCard>
 
+          <SettingsCard icon={Trash2} title="Delete your account" description="You can request account deletion here. An administrator must review and approve it before anything is deleted.">
+            <div className="flex flex-col gap-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 gap-3">
+                <span className="mt-0.5 text-amber-300"><AlertTriangle size={17} /></span>
+                <div className="min-w-0">
+                  {deletionStatus === 'pending' ? <p className="text-sm font-semibold text-warm-white">Request waiting for admin review</p> : deletionStatus === 'rejected' ? <p className="text-sm font-semibold text-warm-white">Your last request was not approved</p> : <p className="text-sm font-semibold text-warm-white">Account deletion requires admin approval</p>}
+                  <p className="mt-1 text-xs leading-relaxed text-warm-white/50">If approved, your FaithStream account, profile photo, and cloud-synced presentations will be permanently deleted. Local files on this computer are not removed.</p>
+                  {deletionMessage && <p role="status" className="mt-2 text-xs text-warm-white/65">{deletionMessage}</p>}
+                </div>
+              </div>
+              {deletionStatus === 'pending' ? <button type="button" disabled={deletionBusy} onClick={() => void cancelDeletionRequest()} className="shrink-0 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-warm-white/75 transition hover:bg-white/5 disabled:opacity-50">{deletionBusy ? 'Please wait…' : 'Cancel request'}</button> : <button type="button" disabled={!deletionStatusLoaded || deletionBusy} onClick={() => { setDeletionMessage(''); setDeletionDialogOpen(true); }} className="shrink-0 rounded-lg border border-red-300/20 px-3 py-2 text-xs font-semibold text-red-200 transition hover:bg-red-500/10 disabled:opacity-50">{deletionStatusLoaded ? 'Request account deletion' : 'Checking account…'}</button>}
+            </div>
+          </SettingsCard>
+
           <SettingsCard icon={Palette} title="App colors" description="Pick a look for FaithStream. Your choice applies throughout the app and is remembered on this device.">
             <div className="grid gap-3 pt-4 sm:grid-cols-2 lg:grid-cols-3">
               {themes.map((option) => {
@@ -354,6 +432,27 @@ export default function Settings() {
         </div>
       </div>
     </main>
+    {deletionDialogOpen && <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !deletionBusy) setDeletionDialogOpen(false); }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="account-deletion-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 text-white shadow-2xl">
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 rounded-lg bg-red-400/10 p-2 text-red-200"><AlertTriangle size={18} /></span>
+          <div><h2 id="account-deletion-title" className="text-base font-semibold">Request account deletion</h2><p className="mt-1 text-xs leading-relaxed text-white/55">This request will be sent to an administrator. Your account stays active until an administrator approves it.</p></div>
+        </div>
+        <div className="mt-4 rounded-xl border border-red-300/15 bg-red-400/5 p-3 text-xs leading-relaxed text-white/70">
+          If approved, your FaithStream account and profile photo will be deleted, along with your cloud-synced presentations. This cannot be undone. Files stored locally on this computer will remain here.
+        </div>
+        <form onSubmit={(event) => void submitDeletionRequest(event)} className="mt-4">
+          <label className="text-xs font-medium text-white/70">Enter your password to confirm
+            <input type="password" required minLength={1} autoComplete="current-password" value={deletionPassword} onChange={(event) => setDeletionPassword(event.target.value)} className="mt-1.5 w-full rounded-lg border border-white/10 bg-navy px-3 py-2.5 text-sm text-warm-white outline-none focus:border-brand" />
+          </label>
+          {deletionMessage && <p role="alert" className="mt-2 text-xs text-red-200">{deletionMessage}</p>}
+          <div className="mt-5 flex justify-end gap-2 border-t border-white/10 pt-4">
+            <button type="button" disabled={deletionBusy} onClick={() => { setDeletionDialogOpen(false); setDeletionPassword(''); }} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-white/75 hover:bg-white/5 disabled:opacity-40">Cancel</button>
+            <button type="submit" disabled={deletionBusy || !deletionPassword} className="flex items-center gap-2 rounded-lg bg-red-700 px-4 py-2 text-sm font-semibold text-white hover:bg-red-600 disabled:cursor-wait disabled:opacity-50">{deletionBusy && <Loader2 size={14} className="animate-spin" />}{deletionBusy ? 'Sending request…' : 'Send deletion request'}</button>
+          </div>
+        </form>
+      </section>
+    </div>}
     {cropOpen && profile.photoUrl && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !cropSaving) setCropOpen(false); }}>
       <section role="dialog" aria-modal="true" aria-labelledby="profile-photo-crop-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 text-white shadow-2xl">
         <div className="flex items-start justify-between gap-4">
