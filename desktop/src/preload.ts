@@ -12,6 +12,13 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
   stopMobileCamPairing: () => ipcRenderer.invoke('mobile-cam:stop-pairing') as Promise<boolean>,
   openStudioDisplay: (displayId: number) => ipcRenderer.invoke('studio:open-display', displayId),
   closeStudioDisplay: () => ipcRenderer.invoke('studio:close-display'),
+  getOpenStudioDisplays: () => ipcRenderer.invoke('studio:get-open-displays') as Promise<number[]>,
+  closeStudioDisplays: (displayIds?: number[]) => ipcRenderer.invoke('studio:close-displays', displayIds) as Promise<boolean>,
+  onStudioDisplaysChanged: (callback: (openDisplayIds: number[]) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, ids: number[]) => callback(ids);
+    ipcRenderer.on('studio:displays-changed', listener);
+    return () => ipcRenderer.removeListener('studio:displays-changed', listener);
+  },
   setPresentationFullscreen: (enabled: boolean) =>
     ipcRenderer.invoke('presentation:set-fullscreen', enabled),
   renderPowerPointSlides: (file: File) =>
@@ -29,6 +36,8 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
       data?: Uint8Array;
       message?: string;
     }>,
+  saveTextFile: (suggestedName: string, content: string, kind: 'backup' | 'songbook') =>
+    ipcRenderer.invoke('files:save-text', suggestedName, content, kind) as Promise<{ ok: boolean; canceled?: boolean; filePath?: string; message?: string }>,
   minimize: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   close: () => ipcRenderer.invoke('window:close'),

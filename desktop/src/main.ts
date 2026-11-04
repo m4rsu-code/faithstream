@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, screen } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, safeStorage, screen, session } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -7,7 +7,10 @@ import { Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { randomInt } from 'node:crypto';
 import started from 'electron-squirrel-startup';
-import ffmpegPath from 'ffmpeg-static';
+import ffmpegStaticPath from 'ffmpeg-static';
+// In a packaged app the binary is unpacked next to app.asar (see forge.config.mts).
+// The OS cannot execute a file from inside the archive, so point spawn() at the unpacked copy.
+const ffmpegPath = ffmpegStaticPath ? ffmpegStaticPath.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1') : null;
 const { WebSocketServer } = require('ws') as { WebSocketServer: new (options: { host: string; port: number; maxPayload?: number }) => any };
 
 type StreamStartOptions = {
@@ -51,11 +54,85 @@ const studioDisplayWindows = new Map<number, BrowserWindow>();
 let authWindow: BrowserWindow | null = null;
 let mobileCamServer: any = null;
 const MOBILE_CAM_PAIRING_LIFETIME_MS = 3 * 60 * 1000;
-let mobileCamRoom: { code: string; expiresAt: number; studio: any | null; phone: any | null } | null = null;
+let mobileCamRoom: { code: string; expiresAt: number; studio: any | null; phone: any | null; phoneAddress: string | null } | null = null;
+const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const normalizeAddress = (address: string | undefined) => (address ?? '').replace(/^::ffff:/, '');
 const authTokenPath = () => path.join(app.getPath('userData'), 'auth-token.bin');
 const streamSettingsPath = () => path.join(app.getPath('userData'), 'stream-settings.bin');
 
 const isAuthWindow = (sender: Electron.WebContents) => authWindow?.webContents === sender;
+
+/** Tell Studio which monitors currently show output (or that monitors were plugged in or removed). */
+const notifyStudioDisplaysChanged = () => {
+  if (authWindow && !authWindow.isDestroyed()) {
+    authWindow.webContents.send('studio:displays-changed', [...studioDisplayWindows.entries()].filter(([, window]) => !window.isDestroyed()).map(([id]) => id));
+  }
+};
+
+/** True only for pages that belong to this app (the Vite dev server or the packaged renderer). */
+const isAppUrl = (rawUrl: string | undefined | null) => {
+  if (!rawUrl) return false;
+  try {
+    const url = new URL(rawUrl);
+    if (MAIN_WINDOW_VITE_DEV_SERVER_URL) return url.origin === new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL).origin;
+    if (url.protocol !== 'file:') return false;
+    const rendererIndex = path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`);
+    return path.normalize(decodeURIComponent(url.pathname).replace(/^\/([A-Za-z]:)/, '$1')).toLowerCase() === path.normalize(rendererIndex).toLowerCase();
+  } catch {
+    return false;
+  }
+};
+
+/** IPC that touches files, the encoder, or the network must come from the main Studio window's own page. */
+const isTrustedMainSender = (event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent) =>
+  isAuthWindow(event.sender) && isAppUrl(event.senderFrame?.url);
+
+const ALLOWED_PERMISSIONS = new Set(['media', 'display-capture', 'fullscreen', 'clipboard-sanitized-write']);
+
+const configureSessionSecurity = () => {
+  const ses = session.defaultSession;
+  // Electron grants every permission by default; only allow what Studio actually uses.
+  ses.setPermissionRequestHandler((webContents, permission, callback) => {
+    callback(ALLOWED_PERMISSIONS.has(permission) && isAppUrl(webContents.getURL()));
+  });
+  ses.setPermissionCheckHandler((webContents, permission) => (
+    ALLOWED_PERMISSIONS.has(permission) && !!webContents && isAppUrl(webContents.getURL())
+  ));
+
+  // Screen and desktop-audio sources use getDisplayMedia(), which Electron rejects unless
+  // the app supplies a handler. Ask the operator which screen to share.
+  ses.setDisplayMediaRequestHandler(async (request, callback) => {
+    try {
+      const frame = request.frame;
+      if (!frame || !authWindow || authWindow.webContents.mainFrame !== frame.top || !isAppUrl(frame.url)) {
+        callback({});
+        return;
+      }
+      const sources = await desktopCapturer.getSources({ types: ['screen'] });
+      if (!sources.length) { callback({}); return; }
+      let chosen = sources[0];
+      if (sources.length > 1 && authWindow) {
+        const { response } = await dialog.showMessageBox(authWindow, {
+          type: 'question',
+          title: 'Share a screen',
+          message: 'Which screen should FaithStream capture?',
+          buttons: [...sources.map((source, index) => source.name || `Screen ${index + 1}`), 'Cancel'],
+          cancelId: sources.length,
+          defaultId: 0,
+          noLink: true,
+        });
+        if (response >= sources.length) { callback({}); return; }
+        chosen = sources[response];
+      }
+      callback({
+        video: chosen,
+        ...(request.audioRequested && process.platform === 'win32' ? { audio: 'loopback' as const } : {}),
+      });
+    } catch {
+      callback({});
+    }
+  });
+};
 
 const startMobileCamPairing = async (sender: Electron.WebContents) => {
   if (!isAuthWindow(sender)) return { ok: false, message: 'Open Studio to pair a phone camera.' };
@@ -68,25 +145,45 @@ const startMobileCamPairing = async (sender: Electron.WebContents) => {
   }
   const server = new WebSocketServer({ host: '0.0.0.0', port: 0, maxPayload: 64 * 1024 });
   mobileCamServer = server;
-  await new Promise<void>((resolve, reject) => {
-    server.once('listening', resolve);
-    server.once('error', reject);
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('listening', resolve);
+      server.once('error', reject);
+    });
+  } catch {
+    // Without this reset a failed listen left a dead server behind and blocked later pairing attempts.
+    if (mobileCamServer === server) mobileCamServer = null;
+    try { server.close(); } catch { /* already closed */ }
+    return { ok: false, message: 'Could not start local camera pairing. Check that your firewall allows FaithStream.' };
+  }
+  server.on('error', () => { /* keep a socket error from crashing the main process */ });
   const address = server.address();
   if (!address || typeof address === 'string') return { ok: false, message: 'Could not start local camera pairing.' };
   const code = String(randomInt(100000, 1000000));
-  const room = { code, expiresAt: Date.now() + MOBILE_CAM_PAIRING_LIFETIME_MS, studio: null as any, phone: null as any };
+  const room = { code, expiresAt: Date.now() + MOBILE_CAM_PAIRING_LIFETIME_MS, studio: null as any, phone: null as any, phoneAddress: null as string | null };
   let invalidAttempts = 0;
   mobileCamRoom = room;
-  server.on('connection', (socket: any, request: { url?: string }) => {
+  server.on('connection', (socket: any, request: { url?: string; socket?: { remoteAddress?: string } }) => {
+    // An unhandled 'error' event (e.g. a malformed frame from the network) would crash the app.
+    socket.on('error', () => socket.terminate?.());
     const url = new URL(request.url ?? '/', 'http://localhost');
     const role = url.searchParams.get('role');
-    if (Date.now() >= room.expiresAt || url.searchParams.get('code') !== room.code || (role !== 'studio' && role !== 'phone')) {
+    const remoteAddress = request.socket?.remoteAddress ?? '';
+    // The Studio side always runs on this computer. Refusing "studio" connections from the
+    // network stops someone on the Wi-Fi from posing as Studio and receiving the phone's video.
+    const studioFromNetwork = role === 'studio' && !LOOPBACK_ADDRESSES.has(remoteAddress);
+    // Once a phone has paired, the code only works again for that same phone (so it can
+    // reconnect after a Wi-Fi blip). A code someone overheard is useless to anyone else.
+    const phoneNotBound = role === 'phone' && room.phoneAddress !== null && normalizeAddress(remoteAddress) !== room.phoneAddress;
+    if (Date.now() >= room.expiresAt || url.searchParams.get('code') !== room.code || (role !== 'studio' && role !== 'phone') || studioFromNetwork || phoneNotBound) {
       invalidAttempts += 1;
       socket.close(1008, 'Invalid pairing code');
       if (invalidAttempts >= 12) {
-        mobileCamRoom = null;
-        mobileCamServer = null;
+        // Too many wrong codes: treat it as a guessing attempt and end the pairing session.
+        room.studio?.close(1008, 'Pairing locked');
+        room.phone?.close(1008, 'Pairing locked');
+        if (mobileCamRoom === room) mobileCamRoom = null;
+        if (mobileCamServer === server) mobileCamServer = null;
         server.close();
       }
       return;
@@ -95,6 +192,7 @@ const startMobileCamPairing = async (sender: Electron.WebContents) => {
     const peerKey = role === 'studio' ? 'phone' : 'studio';
     room[key]?.close(1012, 'Replaced by a new connection');
     room[key] = socket;
+    if (key === 'phone') room.phoneAddress = normalizeAddress(remoteAddress);
     socket.send(JSON.stringify({ type: 'joined' }));
     if (room.studio && room.phone) {
       room.studio.send(JSON.stringify({ type: 'peer-ready' }));
@@ -126,6 +224,8 @@ const renewMobileCamPairingCode = (sender: Electron.WebContents) => {
   }
   mobileCamRoom.code = String(randomInt(100000, 1000000));
   mobileCamRoom.expiresAt = Date.now() + MOBILE_CAM_PAIRING_LIFETIME_MS;
+  // A fresh code may be used by a different phone.
+  if (!mobileCamRoom.phone) mobileCamRoom.phoneAddress = null;
   return { ok: true, code: mobileCamRoom.code, expiresAt: mobileCamRoom.expiresAt };
 };
 
@@ -275,7 +375,7 @@ const reportStreamPipeError = (session: StreamSession, error: unknown) => {
 const startRecording = async (window: BrowserWindow, capture: CaptureRect) => {
   if (recordingSession) return { ok: false, message: 'A recording is already running.' };
   if (!ffmpegPath) return { ok: false, message: 'The video encoder is unavailable on this computer.' };
-  if (![capture.x, capture.y, capture.width, capture.height].every(Number.isFinite) || capture.width < 100 || capture.height < 50) {
+  if (!capture || typeof capture !== 'object' || ![capture.x, capture.y, capture.width, capture.height].every(Number.isFinite) || capture.width < 100 || capture.height < 50 || capture.width > 16384 || capture.height > 16384) {
     return { ok: false, message: 'The on-air preview is not ready to record.' };
   }
   const chosen = await dialog.showSaveDialog(window, {
@@ -367,6 +467,9 @@ const stopRecording = (window: BrowserWindow) => {
 
 const startStream = async (window: BrowserWindow, options: StreamStartOptions) => {
   if (streamSession) return { ok: false, message: 'A stream is already running.' };
+  if (typeof options.serverUrl !== 'string' || typeof options.streamKey !== 'string' || options.serverUrl.length > 2048 || options.streamKey.length > 4096) {
+    return { ok: false, message: 'Stream settings are incomplete.' };
+  }
   if (!ffmpegPath) return { ok: false, message: 'The video encoder is unavailable on this computer.' };
   let endpoint: URL;
   try {
@@ -514,6 +617,15 @@ const startStream = async (window: BrowserWindow, options: StreamStartOptions) =
   return { ok: true };
 };
 
+// Defence in depth for every window, including any created in the future:
+// no <webview> tags, no pop-ups, and no navigating away from the app.
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  contents.on('will-navigate', (event, nextUrl) => { if (!isAppUrl(nextUrl)) event.preventDefault(); });
+  contents.on('will-redirect', (event, nextUrl) => { if (!isAppUrl(nextUrl)) event.preventDefault(); });
+});
+
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
   app.quit();
@@ -581,7 +693,7 @@ const createWindow = () => {
 
 app.whenReady().then(() => {
   ipcMain.handle('auth:token:get', async (event) => {
-    if (!isAuthWindow(event.sender) || !safeStorage.isEncryptionAvailable()) return null;
+    if (!isTrustedMainSender(event) || !safeStorage.isEncryptionAvailable()) return null;
     try {
       return safeStorage.decryptString(await readFile(authTokenPath()));
     } catch {
@@ -589,7 +701,7 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle('auth:token:set', async (event, token: unknown) => {
-    if (!isAuthWindow(event.sender) || !safeStorage.isEncryptionAvailable() || typeof token !== 'string' || token.length > 4096) return false;
+    if (!isTrustedMainSender(event) || !safeStorage.isEncryptionAvailable() || typeof token !== 'string' || token.length > 4096) return false;
     try {
       await writeFile(authTokenPath(), safeStorage.encryptString(token));
       return true;
@@ -598,7 +710,7 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle('auth:token:clear', async (event) => {
-    if (!isAuthWindow(event.sender)) return false;
+    if (!isTrustedMainSender(event)) return false;
     try {
       await rm(authTokenPath(), { force: true });
       return true;
@@ -607,7 +719,7 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle('stream-settings:get', async (event) => {
-    if (!isAuthWindow(event.sender) || !safeStorage.isEncryptionAvailable()) return null;
+    if (!isTrustedMainSender(event) || !safeStorage.isEncryptionAvailable()) return null;
     try {
       return JSON.parse(safeStorage.decryptString(await readFile(streamSettingsPath()))) as { serverUrl: string; streamKey: string };
     } catch {
@@ -615,7 +727,7 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle('stream-settings:save', async (event, payload: unknown) => {
-    if (!isAuthWindow(event.sender) || !safeStorage.isEncryptionAvailable() || !payload || typeof payload !== 'object') return false;
+    if (!isTrustedMainSender(event) || !safeStorage.isEncryptionAvailable() || !payload || typeof payload !== 'object') return false;
     const settings = payload as { serverUrl?: unknown; streamKey?: unknown };
     if (typeof settings.serverUrl !== 'string' || settings.serverUrl.length > 2048 || typeof settings.streamKey !== 'string' || settings.streamKey.length > 4096) return false;
     try {
@@ -625,7 +737,7 @@ app.whenReady().then(() => {
       return false;
     }
   });
-  ipcMain.handle('mobile-cam:start-pairing', (event) => startMobileCamPairing(event.sender));
+  ipcMain.handle('mobile-cam:start-pairing', (event) => (isTrustedMainSender(event) ? startMobileCamPairing(event.sender) : { ok: false, message: 'Open Studio to pair a phone camera.' }));
   ipcMain.handle('mobile-cam:renew-code', (event) => renewMobileCamPairingCode(event.sender));
   ipcMain.handle('mobile-cam:stop-pairing', (event) => {
     if (!isAuthWindow(event.sender) || !mobileCamServer) return false;
@@ -638,7 +750,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('presentation:render-pptx', async (event, sourcePath: unknown) => {
-    if (!BrowserWindow.fromWebContents(event.sender) || typeof sourcePath !== 'string' || sourcePath.length > 32_768) {
+    if (!isTrustedMainSender(event) || typeof sourcePath !== 'string' || sourcePath.length > 32_768) {
       return { ok: false, message: 'Choose a PowerPoint file to import.' };
     }
     try {
@@ -648,8 +760,27 @@ app.whenReady().then(() => {
       return { ok: false, message: error instanceof Error ? error.message : 'PowerPoint could not render this file.' };
     }
   });
+  // Save a backup or songbook file wherever the user chooses (e.g. a USB flash drive).
+  ipcMain.handle('files:save-text', async (event, suggestedName: unknown, content: unknown, kind: unknown) => {
+    if (!isTrustedMainSender(event) || typeof content !== 'string' || content.length > 200 * 1024 * 1024) return { ok: false, message: 'Nothing to save.' };
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const filter = kind === 'backup'
+      ? { name: 'FaithStream backup', extensions: ['fsbackup'] }
+      : { name: 'FaithStream songbook', extensions: ['fssongbook'] };
+    const baseName = (typeof suggestedName === 'string' ? path.basename(suggestedName) : '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').slice(0, 120) || `FaithStream.${filter.extensions[0]}`;
+    const options = { title: kind === 'backup' ? 'Save FaithStream backup' : 'Export songbook', defaultPath: path.join(app.getPath('documents'), baseName), filters: [filter] };
+    const chosen = window ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
+    if (chosen.canceled || !chosen.filePath) return { ok: true, canceled: true };
+    try {
+      await writeFile(chosen.filePath, content, 'utf8');
+      return { ok: true, filePath: chosen.filePath };
+    } catch {
+      return { ok: false, message: 'Could not save the file there. Check that the drive is connected and not full.' };
+    }
+  });
+
   ipcMain.handle('media:optimize-video', async (event, sourcePath: unknown) => {
-    if (!BrowserWindow.fromWebContents(event.sender) || typeof sourcePath !== 'string' || sourcePath.length > 32_768) {
+    if (!isTrustedMainSender(event) || typeof sourcePath !== 'string' || sourcePath.length > 32_768) {
       return { ok: false, message: 'Choose a video file to optimize.' };
     }
     try {
@@ -659,6 +790,7 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle('stream:start', (event, payload: unknown) => {
+    if (!isTrustedMainSender(event)) return { ok: false, message: 'Start streaming from the Studio window.' };
     if (!payload || typeof payload !== 'object') return { ok: false, message: 'Stream settings are incomplete.' };
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window) return { ok: false, message: 'Studio window is unavailable.' };
@@ -690,6 +822,7 @@ app.whenReady().then(() => {
     return stopStream();
   });
   ipcMain.handle('recording:start', async (event, payload: unknown) => {
+    if (!isTrustedMainSender(event)) return { ok: false, message: 'Start recording from the Studio window.' };
     if (!payload || typeof payload !== 'object') return { ok: false, message: 'Recording settings are incomplete.' };
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window) return { ok: false, message: 'Studio window is unavailable.' };
@@ -720,7 +853,8 @@ app.whenReady().then(() => {
       bounds: display.bounds,
     }));
   });
-  ipcMain.handle('studio:open-display', (_event, displayId: unknown) => {
+  ipcMain.handle('studio:open-display', (event, displayId: unknown) => {
+    if (!isTrustedMainSender(event)) return { ok: false, message: 'Open displays from the Studio window.' };
     if (typeof displayId !== 'number' || !Number.isFinite(displayId)) return { ok: false, message: 'Choose a connected monitor.' };
     const display = screen.getAllDisplays().find((item) => item.id === displayId);
     if (!display) return { ok: false, message: 'That monitor is no longer connected.' };
@@ -748,13 +882,30 @@ app.whenReady().then(() => {
     });
     protectWindowNavigation(outputWindow);
     studioDisplayWindows.set(display.id, outputWindow);
-    outputWindow.on('closed', () => { studioDisplayWindows.delete(display.id); });
+    outputWindow.on('closed', () => {
+      if (studioDisplayWindows.get(display.id) === outputWindow) studioDisplayWindows.delete(display.id);
+      notifyStudioDisplaysChanged();
+    });
+    notifyStudioDisplaysChanged();
     if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
       outputWindow.loadURL(`${MAIN_WINDOW_VITE_DEV_SERVER_URL}#/studio-output`);
     } else {
       outputWindow.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`), { hash: '/studio-output' });
     }
     return { ok: true };
+  });
+  ipcMain.handle('studio:get-open-displays', (event) => {
+    if (!isTrustedMainSender(event)) return [];
+    return [...studioDisplayWindows.entries()].filter(([, window]) => !window.isDestroyed()).map(([id]) => id);
+  });
+  ipcMain.handle('studio:close-displays', (event, displayIds: unknown) => {
+    if (!isTrustedMainSender(event)) return false;
+    const ids = Array.isArray(displayIds) ? displayIds.filter((id): id is number => typeof id === 'number' && Number.isFinite(id)) : [...studioDisplayWindows.keys()];
+    for (const id of ids) {
+      const outputWindow = studioDisplayWindows.get(id);
+      if (outputWindow && !outputWindow.isDestroyed()) outputWindow.close();
+    }
+    return true;
   });
   ipcMain.handle('studio:close-display', (event) => {
     const outputWindow = [...studioDisplayWindows.values()].find((window) => !window.isDestroyed() && window.webContents === event.sender);
@@ -817,6 +968,16 @@ app.whenReady().then(() => {
       }
     }
     return true;
+  });
+
+  configureSessionSecurity();
+
+  // Keep Studio's monitor list current when a projector or TV is plugged in or removed.
+  screen.on('display-added', notifyStudioDisplaysChanged);
+  screen.on('display-removed', (_event, removed) => {
+    const outputWindow = studioDisplayWindows.get(removed.id);
+    if (outputWindow && !outputWindow.isDestroyed()) outputWindow.close();
+    notifyStudioDisplaysChanged();
   });
 
   // Remove the default File, Edit, View, and Window menus.

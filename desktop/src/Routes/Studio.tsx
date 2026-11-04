@@ -2,8 +2,10 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, ty
 import { createPortal } from 'react-dom';
 import {
   ArrowRight,
+  BookOpen,
   Camera,
   Check,
+  ChevronDown,
   Circle,
   Eye,
   EyeOff,
@@ -29,7 +31,11 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import ConfirmationModal from '../components/modal/ConfirmationModal';
+import ScripturePickerModal, { type SelectedScriptureVerse } from '../components/modal/ScripturePickerModal';
 import CountdownDisplay, { type CountdownSettings } from '../components/CountdownDisplay';
+import StudioSongsPanel from '../components/StudioSongsPanel';
+import SongDesignPanel from '../components/SongDesignPanel';
+import { DEFAULT_SONG_STYLE, SHOW_SONG_EVENT, SONG_SAVED_EVENT, SONG_SLIDE_SETTINGS_EVENT, compareSongs, firstLine, loadLibrary, searchSongs, songSlideLayouts, type Song, type SongStyle, type SongTextLayout } from '../utils/songbooks';
 import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimization';
 import { getAccountDatabaseName, getAccountStorageKey } from '../utils/accountStorage';
 
@@ -42,6 +48,8 @@ type PresentationTextBox = {
   underline: boolean; align: 'left' | 'center' | 'right'; shadow: boolean; boxBg: string;
   boxBgOn: boolean; autoSize: boolean; lineHeight: number; letterSpacing: number;
   x: number; y: number; w: number; h: number; layerOrder?: number | 'back' | 'front';
+  /** Show the text in capital letters (the stored text keeps its normal case). */
+  uppercase?: boolean;
 };
 type PresentationPicture = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; layerOrder?: number | 'back' | 'front' };
 type PresentationShape = { id: number; kind: string; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number };
@@ -61,7 +69,68 @@ type Scene = {
   bg: string; // tailwind gradient classes (placeholder until real media is wired in)
   slides: StudioSlide[];
   presentationId?: string;
+  /** Set when this scene shows a song from the songbooks; editing the song updates the scene. */
+  songId?: string;
 };
+
+const SONG_SCENE_BG = 'from-purple-700 via-indigo-900 to-slate-950';
+/**
+ * Song text uses the same fitted text box as presentations, so it sits identically in the
+ * thumbnails, Preview, the output monitors and the stream: centred, inside safe margins,
+ * and shrunk automatically when a part has long lines.
+ */
+const songTextBox = (text: string, size = 64, uppercase = false): PresentationTextBox => ({
+  text, font: 'Segoe UI', size, color: '#FFFFFF', bold: true, italic: false, underline: false,
+  align: 'center', shadow: true, boxBg: '#000000', boxBgOn: false, autoSize: true, lineHeight: 1.2, letterSpacing: 0,
+  x: 6, y: 8, w: 88, h: 84, uppercase,
+});
+/** A song text area as a Studio text box. */
+const songLayoutBox = (layout: SongTextLayout): PresentationTextBox => ({
+  text: layout.text, font: layout.font, size: layout.size, color: layout.color, bold: layout.bold, italic: layout.italic,
+  underline: layout.underline, align: layout.align, shadow: layout.shadow, boxBg: '#000000', boxBgOn: false, autoSize: true,
+  lineHeight: layout.lineHeight, letterSpacing: 0, x: layout.x, y: layout.y, w: layout.w, h: layout.h, uppercase: layout.uppercase,
+});
+/**
+ * Builds a song's Studio slides from its style (its own design, or the default song style):
+ * an optional title slide, then the lyrics at one shared size, on the chosen background.
+ */
+const songSceneSlides = (song: Song, mediaUrls: StudioMediaUrlMap = {}): StudioSlide[] => songSlideLayouts(song).map((layout, index) => {
+  const asset = layout.backgroundAssetId ? mediaUrls[layout.backgroundAssetId] : undefined;
+  return {
+    text: layout.text,
+    title: layout.label ?? `Part ${index + 1}`,
+    bg: layout.background,
+    dim: layout.dim,
+    bgAssetId: layout.backgroundAssetId,
+    bgImage: asset?.type === 'image' ? asset.url : undefined,
+    bgVideo: asset?.type === 'video' ? asset.url : undefined,
+    bgVideoMuted: asset?.type === 'video' ? true : undefined,
+    design: {
+      box: songLayoutBox(layout.box),
+      extraBoxes: layout.subtitleBox ? [{ id: 1, box: songLayoutBox(layout.subtitleBox) }] : [],
+    },
+  };
+});
+/** Upgrades song scenes saved before songs used fitted text boxes. */
+const upgradeSongScenes = (list: Scene[]) => (list.some((scene) => scene.songId && scene.slides.some((slide) => !slide.design))
+  ? list.map((scene) => (scene.songId ? { ...scene, slides: scene.slides.map((slide) => (slide.design ? slide : { ...slide, dim: slide.dim ?? 0, design: { box: songTextBox(slide.text) } })) } : scene))
+  : list);
+/** Older Scripture scenes stored the reference and verse on one spaced line, unlike the designer's two-line preview. */
+const upgradeScriptureScenes = (list: Scene[]) => list.map((scene) => {
+  if (!scene.desc?.startsWith('Scripture ·')) return scene;
+  let changed = false;
+  const slides = scene.slides.map((slide) => {
+    const box = slide.design?.box;
+    if (!slide.ref || !box?.text.startsWith(`${slide.ref}  `)) return slide;
+    const body = box.text.slice(slide.ref.length).trimStart();
+    if (!body) return slide;
+    const text = `${slide.ref}\n${body}`;
+    if (box.text === text && slide.text === text) return slide;
+    changed = true;
+    return { ...slide, text, design: { ...slide.design!, box: { ...box, text } } };
+  });
+  return changed ? { ...scene, slides } : scene;
+});
 
 type SavedPresentationSlide = {
   id: number;
@@ -89,6 +158,7 @@ const STUDIO_SLIDESHOW_SCENES_KEY = 'faithstream.studio-slideshow-scenes';
 const STUDIO_OUTPUT_REF_KEY = 'faithstream.studio-output-ref';
 const STUDIO_STREAM_OUTPUT_REF_KEY = 'faithstream.studio-stream-output-ref';
 const STUDIO_DISPLAY_MODE_KEY = 'faithstream.studio-display-mode';
+const STUDIO_STREAM_DISPLAYS_KEY = 'faithstream.studio-stream-displays';
 const STUDIO_PREVIEW_MODE_KEY = 'faithstream.studio-preview-mode';
 const STUDIO_RESOLUTION_KEY = 'faithstream.studio-resolution';
 const STUDIO_FRAME_RATE_KEY = 'faithstream.studio-frame-rate';
@@ -154,13 +224,13 @@ const loadStudioScenes = (): Scene[] => {
     const saved = JSON.parse(localStorage.getItem(getAccountStorageKey(STUDIO_SCENES_KEY)) ?? '[]') as Scene[];
     if (!Array.isArray(saved)) return [];
     const presentations = JSON.parse(localStorage.getItem(getAccountStorageKey('faithstream.presentations')) ?? '[]') as SavedPresentation[];
-    return saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides))
+    return upgradeScriptureScenes(saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides))
       .filter((scene) => !scene.presentationId || presentations.some((item) => item.id === scene.presentationId))
       .map((scene) => {
       const presentation = presentations.find((item) => item.id === scene.presentationId);
       if (!presentation) return scene;
       return syncPresentationSlides(scene, presentation);
-    });
+    }));
   } catch { return []; }
 };
 
@@ -169,12 +239,12 @@ const loadSlideshowScenes = (): Scene[] => {
     const saved = JSON.parse(localStorage.getItem(getAccountStorageKey(STUDIO_SLIDESHOW_SCENES_KEY)) ?? 'null') as Scene[] | null;
     if (Array.isArray(saved)) {
       const presentations = readSavedPresentations();
-      return saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides))
+      return upgradeScriptureScenes(saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides))
         .filter((scene) => !scene.presentationId || presentations.some((item) => item.id === scene.presentationId))
         .map((scene) => {
           const presentation = presentations.find((item) => item.id === scene.presentationId);
           return presentation ? syncPresentationSlides(scene, presentation) : scene;
-        });
+        }));
     }
   } catch { /* Migrate existing Studio scenes below. */ }
   // Preserve existing projects while giving Slideshow its own editable scene copy.
@@ -423,7 +493,7 @@ function ProgramTextBox({ box, defaultLayerOrder = 3000 }: { box: PresentationTe
   return (
     <div ref={wrap} className="absolute flex items-center overflow-hidden" style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`, zIndex: typeof box.layerOrder === 'number' ? box.layerOrder : box.layerOrder === 'front' ? 5000 : box.layerOrder === 'back' ? 0 : defaultLayerOrder, background: box.boxBgOn ? box.boxBg : undefined, borderRadius: '1cqw' }}>
       <div ref={inner} className="w-full whitespace-pre-wrap break-words" style={{ textAlign: box.align, transform: `scale(${fitScale})`, transformOrigin: 'center', lineHeight: box.lineHeight, letterSpacing: `${(box.letterSpacing / 1280) * 100}cqw` }}>
-        <div className="whitespace-pre-wrap" style={{ fontFamily: `"${box.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(box.size / 1280) * 100}cqw`, fontWeight: box.bold ? 800 : 500, fontStyle: box.italic ? 'italic' : 'normal', textDecoration: box.underline ? 'underline' : 'none', color: box.color, textShadow: box.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : undefined }}>{box.text}</div>
+        <div className="whitespace-pre-wrap" style={{ fontFamily: `"${box.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(box.size / 1280) * 100}cqw`, fontWeight: box.bold ? 800 : 500, fontStyle: box.italic ? 'italic' : 'normal', textDecoration: box.underline ? 'underline' : 'none', textTransform: box.uppercase ? 'uppercase' : undefined, color: box.color, textShadow: box.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : undefined }}>{box.text}</div>
       </div>
     </div>
   );
@@ -479,6 +549,60 @@ function SlideView({
         </div>
       )}
     </div>
+  );
+}
+
+function ScriptureDesignModal({
+  reference,
+  verses,
+  onClose,
+  onAdd,
+}: {
+  reference: string;
+  verses: SelectedScriptureVerse[];
+  onClose: () => void;
+  onAdd: (style: SongStyle, verses: SelectedScriptureVerse[]) => void;
+}) {
+  const [style, setStyle] = useState<SongStyle>({ ...DEFAULT_SONG_STYLE, titleSlide: false });
+  const [editedVerses, setEditedVerses] = useState(verses);
+  const song = {
+    title: reference,
+    author: '',
+    copyright: '',
+    lyrics: editedVerses.map((verse) => `${verse.reference}\n${verse.text}`).join('\n\n'),
+  };
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/75 p-3 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="scripture-design-title" className="flex h-[min(900px,94vh)] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101d2a] shadow-2xl">
+        <header className="flex shrink-0 items-center justify-between border-b border-white/10 px-5 py-3.5">
+          <div><h2 id="scripture-design-title" className="text-base font-bold text-white">Design Scripture slides</h2><p className="mt-0.5 text-xs text-warm-white/50">{reference} · {verses.length} verses, one slide per verse</p></div>
+          <button type="button" onClick={onClose} aria-label="Back to Scripture selection" className="rounded-lg p-2 text-warm-white/55 hover:bg-white/10 hover:text-white"><X size={17} /></button>
+        </header>
+        <SongDesignPanel
+          song={song}
+          style={style}
+          ownDesign
+          designLabel="scripture passage"
+          showDefaultActions={false}
+          fixedVerseSlides
+          fixedVerseTexts={editedVerses}
+          onTextChange={({ index, text }) => setEditedVerses((current) => current.map((verse, verseIndex) => {
+            if (verseIndex !== index) return verse;
+            const [typedReference, ...verseLines] = text.split('\n');
+            return { ...verse, reference: typedReference.trim() || verse.reference, text: verseLines.join('\n').replace(/\s+$/, '') };
+          }))}
+          onChange={(patch) => setStyle((current) => ({ ...current, ...patch }))}
+          onUseDefault={() => undefined}
+          onMakeDefault={() => undefined}
+        />
+        <footer className="flex shrink-0 justify-end gap-2 border-t border-white/10 px-5 py-3">
+          <button type="button" onClick={onClose} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-warm-white/70 hover:bg-white/5">Back to Scripture</button>
+          <button type="button" onClick={() => onAdd(style, editedVerses)} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy hover:brightness-110">Add {editedVerses.length} slides to scene</button>
+        </footer>
+      </section>
+    </div>,
+    document.body,
   );
 }
 
@@ -703,6 +827,122 @@ function Switch({
   );
 }
 
+type MonitorOption = { id: number; name: string; primary: boolean };
+
+/**
+ * Compact multi-monitor chooser. It stays one button wide however many monitors are
+ * connected; the checklist opens in a floating layer so the Program panel never stretches.
+ */
+function MonitorPicker({ displays, selectedIds, liveIds, onToggle, onSetAll }: {
+  displays: MonitorOption[];
+  selectedIds: number[];
+  liveIds: number[];
+  onToggle: (id: number) => void;
+  onSetAll: (ids: number[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{ top: number; left: number; width: number } | null>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const popover = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const rect = trigger.current?.getBoundingClientRect();
+      if (!rect) return;
+      const width = Math.max(rect.width, 260);
+      const left = Math.min(Math.max(8, rect.left), window.innerWidth - width - 8);
+      setPosition({ top: rect.bottom + 6, left, width });
+    };
+    place();
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!trigger.current?.contains(target) && !popover.current?.contains(target)) setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false); };
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  const selected = displays.filter((display) => selectedIds.includes(display.id));
+  const liveCount = displays.filter((display) => liveIds.includes(display.id)).length;
+  const summary = !displays.length ? 'No monitors found'
+    : !selected.length ? 'Choose monitors'
+    : selected.length <= 2 ? selected.map((display) => display.name.replace(' (Primary)', '')).join(', ')
+    : `${selected.length} monitors`;
+
+  return (
+    <>
+      <button
+        ref={trigger}
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="Choose output monitors"
+        disabled={!displays.length}
+        onClick={() => setOpen((value) => !value)}
+        className={`flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border bg-slate-950 px-2.5 text-left text-[11px] text-warm-white outline-none transition hover:border-white/30 disabled:cursor-not-allowed disabled:opacity-40 ${open ? 'border-brand' : 'border-white/15'}`}
+      >
+        <span className={`min-w-0 flex-1 truncate ${selected.length ? '' : 'text-warm-white/50'}`}>{summary}</span>
+        {liveCount > 0 && <span className="flex shrink-0 items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />{liveCount} live</span>}
+        <ChevronDown size={13} className={`shrink-0 text-warm-white/50 transition ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && position && createPortal(
+        <div
+          ref={popover}
+          role="listbox"
+          aria-multiselectable="true"
+          aria-label="Output monitors"
+          style={{ position: 'fixed', top: position.top, left: position.left, width: position.width }}
+          className="z-[200] overflow-hidden rounded-xl border border-white/10 bg-panel shadow-2xl shadow-black/50"
+        >
+          <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-warm-white/50">Show output on</span>
+            <div className="flex items-center gap-2 text-[10px] font-semibold">
+              <button type="button" onClick={() => onSetAll(displays.map((display) => display.id))} className="text-brand hover:underline">All</button>
+              <span className="text-white/20">·</span>
+              <button type="button" onClick={() => onSetAll([])} className="text-warm-white/60 hover:text-warm-white hover:underline">None</button>
+            </div>
+          </div>
+          <ul className="max-h-64 overflow-y-auto p-1">
+            {displays.map((display) => {
+              const checked = selectedIds.includes(display.id);
+              const live = liveIds.includes(display.id);
+              return (
+                <li key={display.id}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={checked}
+                    onClick={() => onToggle(display.id)}
+                    className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-xs transition ${checked ? 'bg-brand/10 text-white' : 'text-warm-white/70 hover:bg-white/5'}`}
+                  >
+                    <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${checked ? 'border-brand bg-brand text-white' : 'border-white/25'}`}>{checked && <Check size={11} strokeWidth={3} />}</span>
+                    <Monitor size={14} className="shrink-0 text-warm-white/40" />
+                    <span className="min-w-0 flex-1 truncate">{display.name.replace(' (Primary)', '')}</span>
+                    {display.primary && <span className="shrink-0 rounded bg-white/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-warm-white/50">Primary</span>}
+                    {live && <span className="flex shrink-0 items-center gap-1 text-[10px] font-semibold text-emerald-300"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />Live</span>}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="border-t border-white/10 px-3 py-2 text-[10px] text-warm-white/40">Then press <span className="font-semibold text-warm-white/60">Show slides</span> to apply.</p>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 const selectClass =
   'rounded-lg border border-white/10 bg-navy px-3 py-1.5 text-sm text-warm-white outline-none focus:border-brand';
 
@@ -827,8 +1067,14 @@ const paintProgramSlide = async (ctx: CanvasRenderingContext2D, slide: StudioSli
         const x = box.x / 100 * w; const y = box.y / 100 * h; const bw = box.w / 100 * w; const bh = box.h / 100 * h;
         if (box.boxBgOn) { ctx.fillStyle = box.boxBg; ctx.fillRect(x, y, bw, bh); }
         let size = box.size / 1280 * w; const font = () => `${box.italic ? 'italic ' : ''}${box.bold ? '800' : '500'} ${size}px "${box.font.replaceAll('"', '')}", sans-serif`;
-        ctx.font = font(); let lines = streamTextLines(ctx, box.text, bw); const lineHeight = box.lineHeight * size;
-        if (box.autoSize && lines.length * lineHeight > bh) { size *= bh / (lines.length * lineHeight); ctx.font = font(); lines = streamTextLines(ctx, box.text, bw); }
+        const boxText = box.uppercase ? box.text.toLocaleUpperCase() : box.text;
+        ctx.font = font(); let lines = streamTextLines(ctx, boxText, bw); let lineHeight = box.lineHeight * size;
+        if (box.autoSize && lines.length * lineHeight > bh) {
+          size *= bh / (lines.length * lineHeight);
+          ctx.font = font();
+          lines = streamTextLines(ctx, boxText, bw);
+          lineHeight = box.lineHeight * size;
+        }
         ctx.textAlign = box.align; ctx.textBaseline = 'middle'; ctx.fillStyle = box.color; ctx.shadowColor = box.shadow ? 'rgba(0,0,0,.65)' : 'transparent'; ctx.shadowBlur = box.shadow ? size * .12 : 0;
         const tx = box.align === 'left' ? x : box.align === 'right' ? x + bw : x + bw / 2; const totalHeight = lines.length * lineHeight;
         lines.forEach((line, index) => ctx.fillText(line, tx, y + (bh - totalHeight) / 2 + (index + .5) * lineHeight, bw)); ctx.shadowBlur = 0;
@@ -903,13 +1149,21 @@ export default function Studio() {
   const [mediaUrls, setMediaUrls] = useState<StudioMediaUrlMap>({});
   const mediaUrlsRef = useRef(mediaUrls);
   const [addSceneOpen, setAddSceneOpen] = useState(false);
+  const [scripturePickerOpen, setScripturePickerOpen] = useState(false);
+  const [pendingScriptureDesign, setPendingScriptureDesign] = useState<{ reference: string; verses: SelectedScriptureVerse[] } | null>(null);
   const [selectedPresentationId, setSelectedPresentationId] = useState('');
+  // The Add scene window offers presentations or songs from the songbooks.
+  const [addSceneKind, setAddSceneKind] = useState<'presentation' | 'song'>('presentation');
+  const [addSceneSongs, setAddSceneSongs] = useState<Song[]>([]);
+  const [addSceneSongQuery, setAddSceneSongQuery] = useState('');
+  const [selectedSongId, setSelectedSongId] = useState('');
   const [sceneToDelete, setSceneToDelete] = useState<Scene | null>(null);
   const [sceneDeleteTab, setSceneDeleteTab] = useState<'stream' | 'slideshow'>('stream');
   const [clearScenesTab, setClearScenesTab] = useState<'stream' | 'slideshow' | null>(null);
   const [addSceneTab, setAddSceneTab] = useState<'stream' | 'slideshow'>('stream');
   const [sceneId, setSceneId] = useState(() => scenes[0]?.id ?? 0); // scene whose slides are listed (Scenes panel)
   const [sidebarPanel, setSidebarPanel] = useState<'scenes' | 'music'>('scenes');
+  const [musicView, setMusicView] = useState<'songs' | 'tracks'>('songs');
   const [selected, setSelected] = useState<Ref>(() => ({ sceneId: scenes[0]?.id ?? 0, slideIdx: 0 }));
   const slideCardRefs = useRef(new Map<string, HTMLDivElement>());
   const [preview, setPreview] = useState<Ref>(() => ({ sceneId: scenes[0]?.id ?? 0, slideIdx: 0 }));
@@ -1011,12 +1265,15 @@ export default function Studio() {
   const [previewMode, setPreviewMode] = useState(() => localStorage.getItem(STUDIO_PREVIEW_MODE_KEY) !== 'false');
   const [studioOutputTab, setStudioOutputTab] = useState<'slideshow' | 'stream'>('stream');
   const [offlineSlide, setOfflineSlide] = useState<Ref>(() => ({ sceneId: slideshowScenes[0]?.id ?? 0, slideIdx: 0 }));
-  const [offlineEditing, setOfflineEditing] = useState(false);
-  const [offlineTextDraft, setOfflineTextDraft] = useState('');
-  const [offlineRefDraft, setOfflineRefDraft] = useState('');
-  const [offlineBoxDrafts, setOfflineBoxDrafts] = useState<Record<string, string>>({});
   const [studioDisplays, setStudioDisplays] = useState<{ id: number; name: string; primary: boolean }[]>([]);
-  const [targetDisplayId, setTargetDisplayId] = useState<number | null>(null);
+  // Program output can go to several monitors at once (e.g. a projector and a confidence TV).
+  const [streamDisplayIds, setStreamDisplayIds] = useState<number[] | null>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STUDIO_STREAM_DISPLAYS_KEY) ?? 'null') as unknown;
+      return Array.isArray(saved) ? saved.filter((id): id is number => typeof id === 'number') : null;
+    } catch { return null; }
+  });
+  const [openDisplayIds, setOpenDisplayIds] = useState<number[]>([]);
   const [displayError, setDisplayError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirmEndStream, setConfirmEndStream] = useState(() => localStorage.getItem('faithstream.studio-confirm-end') !== 'false');
@@ -1194,12 +1451,26 @@ export default function Studio() {
 
   useEffect(() => {
     let active = true;
-    void window.faithstreamWindow?.getStudioDisplays().then((displays) => {
+    const loadDisplays = () => window.faithstreamWindow?.getStudioDisplays().then((displays) => {
       if (!active) return;
       setStudioDisplays(displays.map(({ id, name, primary }) => ({ id, name, primary })));
-      setTargetDisplayId((current) => current ?? displays.find((display) => !display.primary)?.id ?? displays[0]?.id ?? null);
+      // First run: pre-select every secondary monitor (or the only monitor, if there is just one).
+      setStreamDisplayIds((current) => {
+        // Keep the saved choice (including a deliberate "None") unless none of the saved monitors
+        // are connected any more, e.g. after moving to another church's projector setup.
+        if (current !== null && (current.length === 0 || current.some((id) => displays.some((display) => display.id === id)))) return current;
+        const secondary = displays.filter((display) => !display.primary).map((display) => display.id);
+        return secondary.length ? secondary : displays.slice(0, 1).map((display) => display.id);
+      });
     }).catch(() => {
       if (active) setDisplayError('Could not read the connected monitors.');
+    });
+    void loadDisplays();
+    void window.faithstreamWindow?.getOpenStudioDisplays?.().then((ids) => { if (active) setOpenDisplayIds(ids); }).catch(() => undefined);
+    const stopWatchingDisplays = window.faithstreamWindow?.onStudioDisplaysChanged?.((ids) => {
+      if (!active) return;
+      setOpenDisplayIds(ids);
+      void loadDisplays();
     });
     const onOutputChange = (event: StorageEvent) => {
       if (!event.newValue) return;
@@ -1213,9 +1484,15 @@ export default function Studio() {
     window.addEventListener('storage', onOutputChange);
     return () => {
       active = false;
+      stopWatchingDisplays?.();
       window.removeEventListener('storage', onOutputChange);
     };
   }, []);
+
+  useEffect(() => {
+    if (streamDisplayIds === null) return;
+    try { localStorage.setItem(STUDIO_STREAM_DISPLAYS_KEY, JSON.stringify(streamDisplayIds)); } catch { /* Keep the monitor choice for this session if storage is unavailable. */ }
+  }, [streamDisplayIds]);
 
   useEffect(() => {
     return window.faithstreamWindow?.onStreamStatus((event) => {
@@ -1422,7 +1699,9 @@ export default function Studio() {
     setAddSceneTab(studioOutputTab);
     setSavedPresentations(available);
     setSelectedPresentationId(available[0]?.id ?? '');
+    setAddSceneSongQuery('');
     setAddSceneOpen(true);
+    void loadLibrary().then(({ songs }) => setAddSceneSongs([...songs].sort(compareSongs))).catch(() => setAddSceneSongs([]));
   };
 
   const makePresentationScene = (presentation: SavedPresentation, id: number): Scene => {
@@ -1523,7 +1802,6 @@ export default function Studio() {
     if (tab === 'slideshow') {
       setSlideshowScenes([]);
       setOfflineSlide({ sceneId: 0, slideIdx: 0 });
-      setOfflineEditing(false);
     } else {
       sourceStreams.current.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
       sourceStreams.current.clear();
@@ -1602,63 +1880,54 @@ export default function Studio() {
   const setOfflineScene = (id: number) => {
     const target = { sceneId: id, slideIdx: 0 };
     setOfflineSlide(target);
-    setOfflineEditing(false);
-  };
-  const startOfflineEdit = () => {
-    const slide = offlineCurrent.slide;
-    const boxes: Record<string, string> = {};
-    if (slide.design?.box) boxes.main = slide.design.box.text;
-    slide.design?.extraBoxes?.forEach((item) => { boxes[`extra-${item.id}`] = item.box.text; });
-    setOfflineTextDraft(slide.text ?? '');
-    setOfflineRefDraft(slide.ref ?? '');
-    setOfflineBoxDrafts(boxes);
-    setOfflineEditing(true);
-  };
-  const saveOfflineEdit = () => {
-    setSlideshowScenes((current) => current.map((item) => item.id !== offlineSlide.sceneId ? item : {
-      ...item,
-      slides: item.slides.map((slide, index) => {
-        if (index !== offlineSlide.slideIdx) return slide;
-        if (!slide.design) return { ...slide, text: offlineTextDraft, ref: offlineRefDraft || undefined };
-        return {
-          ...slide,
-          text: offlineTextDraft,
-          ref: offlineRefDraft || undefined,
-          design: {
-            ...slide.design,
-            box: slide.design.box ? { ...slide.design.box, text: offlineBoxDrafts.main ?? slide.design.box.text } : slide.design.box,
-            extraBoxes: slide.design.extraBoxes?.map((box) => ({
-              ...box,
-              box: { ...box.box, text: offlineBoxDrafts[`extra-${box.id}`] ?? box.box.text },
-            })),
-          },
-        };
-      }),
-    }));
-    setOfflineEditing(false);
   };
   const openOfflineDisplay = async () => {
-    if (targetDisplayId === null) {
-      setDisplayError('Choose a connected monitor first.');
+    if (!selectedStreamDisplayIds.length) {
+      setDisplayError('Select at least one monitor first.');
       return;
     }
-    try { localStorage.setItem(STUDIO_DISPLAY_MODE_KEY, 'slideshow'); } catch { /* Keep the selected display usable if storage is unavailable. */ }
-    const result = await window.faithstreamWindow?.openStudioDisplay(targetDisplayId);
-    if (!result?.ok) setDisplayError(result?.message ?? 'Could not open the slideshow on that monitor.');
-    else setDisplayError('');
+    try {
+      localStorage.setItem(STUDIO_OUTPUT_REF_KEY, JSON.stringify(offlineSlide));
+      localStorage.setItem(STUDIO_DISPLAY_MODE_KEY, 'slideshow');
+    } catch { /* Keep the selected displays usable if storage is unavailable. */ }
+    const deselected = openDisplayIds.filter((id) => !selectedStreamDisplayIds.includes(id));
+    if (deselected.length) await window.faithstreamWindow?.closeStudioDisplays(deselected);
+    const failures: string[] = [];
+    for (const displayId of selectedStreamDisplayIds) {
+      const result = await window.faithstreamWindow?.openStudioDisplay(displayId);
+      if (!result?.ok) failures.push(`${studioDisplays.find((display) => display.id === displayId)?.name ?? 'A monitor'}: ${result?.message ?? 'could not open'}`);
+    }
+    setDisplayError(failures.join(' '));
+  };
+  const selectedStreamDisplayIds = (streamDisplayIds ?? []).filter((id) => studioDisplays.some((display) => display.id === id));
+  const toggleStreamDisplay = (displayId: number) => {
+    setStreamDisplayIds((current) => {
+      const list = (current ?? []).filter((id) => studioDisplays.some((display) => display.id === id));
+      return list.includes(displayId) ? list.filter((id) => id !== displayId) : [...list, displayId];
+    });
   };
   const openStreamDisplay = async () => {
-    if (targetDisplayId === null) {
-      setDisplayError('Choose a connected monitor first.');
+    if (!selectedStreamDisplayIds.length) {
+      setDisplayError('Select at least one monitor first.');
       return;
     }
     try {
       localStorage.setItem(STUDIO_STREAM_OUTPUT_REF_KEY, JSON.stringify(onAir));
       localStorage.setItem(STUDIO_DISPLAY_MODE_KEY, 'stream');
     } catch { /* Keep the selected display usable if storage is unavailable. */ }
-    const result = await window.faithstreamWindow?.openStudioDisplay(targetDisplayId);
-    if (!result?.ok) setDisplayError(result?.message ?? 'Could not open the stream slide on that monitor.');
-    else setDisplayError('');
+    // Turn off monitors that were deselected, then open every selected one.
+    const deselected = openDisplayIds.filter((id) => !selectedStreamDisplayIds.includes(id));
+    if (deselected.length) await window.faithstreamWindow?.closeStudioDisplays(deselected);
+    const failures: string[] = [];
+    for (const displayId of selectedStreamDisplayIds) {
+      const result = await window.faithstreamWindow?.openStudioDisplay(displayId);
+      if (!result?.ok) failures.push(`${studioDisplays.find((display) => display.id === displayId)?.name ?? 'A monitor'}: ${result?.message ?? 'could not open'}`);
+    }
+    setDisplayError(failures.join(' '));
+  };
+  const closeAllStreamDisplays = async () => {
+    await window.faithstreamWindow?.closeStudioDisplays();
+    setDisplayError('');
   };
   const stepOfflineSlide = (direction: -1 | 1) => {
     const count = offlineScene.slides.length;
@@ -1666,7 +1935,6 @@ export default function Studio() {
     const nextIndex = (offlineSlide.slideIdx + direction + count) % count;
     const target = { ...offlineSlide, slideIdx: nextIndex };
     setOfflineSlide(target);
-    setOfflineEditing(false);
   };
 
   const scene = scenes.find((x) => x.id === sceneId) ?? emptyScene;
@@ -1715,7 +1983,7 @@ export default function Studio() {
   const streamAudioStatus = !mixerChannels.length ? 'No inputs' : !connectedMixerChannels.length ? 'Disconnected' : !audibleMixerChannels.length ? 'Muted' : streamAudioPeak > 0.002 ? 'Signal' : 'No signal';
   const streamAudioPercent = streamAudioPeak > 0 ? Math.max(0, Math.min(100, ((20 * Math.log10(streamAudioPeak) + 60) / 60) * 100)) : 0;
 
-  // Step 1: clicking a slide only SELECTS it (it shows in the small "Selected slide" screen).
+  // In Preview Mode, clicking a slide only selects it; Direct Mode also sends it on air.
   const selectSlide = (i: number) => {
     const target = { sceneId, slideIdx: i };
     setSelected(target);
@@ -1734,45 +2002,143 @@ export default function Studio() {
     setAddSourceOpen(false);
   };
 
-  // Double-click a slide = send it to Preview right away (with Preview Mode off: straight on air).
-  const sendToPreview = (target: Ref) => {
-    setPreview(target);
-    if (!previewMode) setOnAir(target);
+  /**
+   * Adds a song from the songbooks to the Scenes list (one slide per part), or refreshes it if
+   * it is already there, and opens it in the slide list. It never goes on air by itself.
+   */
+  const addSongScene = (song: Song) => {
+    const slideshow = studioOutputTab === 'slideshow';
+    const list = slideshow ? slideshowScenes : scenes;
+    const existing = list.find((scene) => scene.songId === song.id);
+    // Adding an existing song must not refresh or replace its scene while it may be on air.
+    if (existing) return;
+    // A new id is also kept clear of any on-air / preview reference left by a deleted scene,
+    // so a freshly added song can never appear on air by itself.
+    const id = Math.max(0, ...list.map((scene) => scene.id), onAir.sceneId, preview.sceneId, selected.sceneId, offlineSlide.sceneId) + 1;
+    const slides = songSceneSlides(song, mediaUrlsRef.current);
+    const bg = slides[0]?.bg ?? SONG_SCENE_BG;
+    const scene: Scene = { bg, id, name: song.number ? `${song.number}. ${song.title}` : song.title, desc: `Song · ${slides.length} ${slides.length === 1 ? 'part' : 'parts'}`, slides, songId: song.id };
+    if (slideshow) {
+      setSlideshowScenes((current) => [...current, scene]);
+      return;
+    }
+    // Keep the operator on the current scene. Adding a song only makes it available in Scenes.
+    setScenes((current) => [...current, scene]);
   };
 
-  // ONE button that always does the next sensible step, and says what it will do.
-  const nothing = {
-    label: 'Showing on air',
-    hint: previewMode ? 'Pick another slide to continue' : 'Pick a slide, or press → / PageDown',
+  /** Add the designed passage as a scene, one slide per verse; it is not sent on air automatically. */
+  const beginScriptureDesign = (reference: string, text: string, selectedVerses?: SelectedScriptureVerse[]) => {
+    setScripturePickerOpen(false);
+    setPendingScriptureDesign({ reference, verses: selectedVerses?.length ? selectedVerses : [{ reference, text }] });
   };
-  const next: { label: string; hint: string; run?: () => void } = previewMode
-    ? !same(selected, preview)
-      ? {
-          label: 'Send to Preview',
-          hint: 'Moves the selected slide into Preview',
-          run: () => setPreview(selected),
-        }
-      : !same(preview, onAir)
-        ? {
-            label: 'Put on air',
-            hint: 'Shows the Preview slide to the audience',
-            run: () => {
-              setOnAir(preview);
-              // Get the next slide ready, so the next press is already lined up.
-              const count = scenes.find((x) => x.id === preview.sceneId)?.slides.length ?? 0;
-              if (same(selected, preview) && preview.slideIdx + 1 < count) {
-                setSelected({ sceneId: preview.sceneId, slideIdx: preview.slideIdx + 1 });
-              }
-            },
-          }
-        : nothing
-    : !same(selected, onAir)
-      ? {
-          label: 'Put on air',
-          hint: 'Goes on air right away. Tip: use ← → or PageUp / PageDown',
-          run: () => sendToPreview(selected),
-        }
-      : nothing;
+
+  const addScriptureScene = async (reference: string, verses: SelectedScriptureVerse[], style: SongStyle) => {
+    const slideshow = studioOutputTab === 'slideshow';
+    const list = slideshow ? slideshowScenes : scenes;
+    const id = Math.max(0, ...list.map((scene) => scene.id), onAir.sceneId, preview.sceneId, selected.sceneId, offlineSlide.sceneId) + 1;
+    let urls = mediaUrlsRef.current;
+    if (style.backgroundAssetId && !urls[style.backgroundAssetId]) {
+      try { urls = await refreshStudioMediaUrls(); } catch { /* The asset ID remains saved and will hydrate on reload. */ }
+    }
+    const lyrics = verses.map((verse) => `${verse.reference}\n${verse.text.replace(/\s+$/, '')}`).join('\n\n');
+    const layouts = songSlideLayouts({ title: reference, author: '', copyright: '', lyrics, style }, style);
+    const template = layouts[0];
+    const slides: StudioSlide[] = verses.map((verse) => {
+      const layout = template;
+      if (!layout) return { title: verse.reference, ref: verse.reference, text: `${verse.reference}\n${verse.text}`, bg: style.background, design: { box: songTextBox(`${verse.reference}\n${verse.text}`) } };
+      const text = `${verse.reference}\n${verse.text.replace(/\s+$/, '')}`;
+      const asset = style.backgroundAssetId ? urls[style.backgroundAssetId] : undefined;
+      return {
+        title: verse.reference,
+        ref: verse.reference,
+        text,
+        bg: layout.background,
+        dim: layout.dim,
+        bgAssetId: layout.backgroundAssetId,
+        bgImage: asset?.type === 'image' ? asset.url : undefined,
+        bgVideo: asset?.type === 'video' ? asset.url : undefined,
+        bgVideoMuted: asset?.type === 'video' ? true : undefined,
+        design: { box: { ...songLayoutBox(layout.box), text } },
+      };
+    });
+    const bg = slides[0]?.bg ?? style.background;
+    const scene: Scene = { id, name: reference, desc: `Scripture · ${slides.length} verses`, bg, slides };
+    if (slideshow) setSlideshowScenes((current) => [...current, scene]);
+    else setScenes((current) => [...current, scene]);
+    setPendingScriptureDesign(null);
+  };
+
+
+  const scenesRef = useRef(scenes);
+  scenesRef.current = scenes;
+  // "Show in Studio" from the songbook library (Studio keeps running in the background).
+  const addSongSceneRef = useRef(addSongScene);
+  addSongSceneRef.current = addSongScene;
+  useEffect(() => {
+    const onShowSong = (event: Event) => {
+      const detail = (event as CustomEvent<{ song: Song; screenIndex?: number }>).detail;
+      // "Add to Studio" from the songbook library: add the scene only, nothing goes on air.
+      if (detail?.song?.id) addSongSceneRef.current(detail.song);
+    };
+    window.addEventListener(SHOW_SONG_EVENT, onShowSong);
+    return () => window.removeEventListener(SHOW_SONG_EVENT, onShowSong);
+  }, []);
+
+  // A song was corrected (possibly while on screen): refresh every scene showing it.
+  useEffect(() => {
+    /**
+     * Rebuilds the scenes of the given songs. The on-air, preview and selected slide stay on the
+     * same words: adding or removing the title slide shifts every slide by one, and fewer lines
+     * per slide changes the count.
+     */
+    const rebuildSongScenes = (songFor: (scene: Scene) => Song | undefined) => {
+      const rebuild = (current: Scene[]) => current.map((scene) => {
+        const song = scene.songId ? songFor(scene) : undefined;
+        if (!song) return scene;
+        const slides = songSceneSlides(song, mediaUrlsRef.current);
+        return { ...scene, bg: slides[0]?.bg ?? scene.bg, name: song.number ? `${song.number}. ${song.title}` : song.title, slides, desc: `Song · ${slides.length} ${slides.length === 1 ? 'slide' : 'slides'}` };
+      });
+      const before = new Map(scenesRef.current.filter((scene) => scene.songId).map((scene) => [scene.id, scene]));
+      const after = new Map(rebuild(scenesRef.current).filter((scene) => scene.songId).map((scene) => [scene.id, scene]));
+      const follow = (ref: Ref): Ref => {
+        const oldScene = before.get(ref.sceneId);
+        const newScene = after.get(ref.sceneId);
+        if (!oldScene || !newScene || !newScene.slides.length) return ref;
+        const hadTitle = oldScene.slides[0]?.title === 'Title';
+        const hasTitle = newScene.slides[0]?.title === 'Title';
+        const shifted = ref.slideIdx + (hasTitle && !hadTitle ? 1 : !hasTitle && hadTitle ? -1 : 0);
+        const slideIdx = Math.min(Math.max(0, shifted), newScene.slides.length - 1);
+        return slideIdx === ref.slideIdx ? ref : { ...ref, slideIdx };
+      };
+      setScenes(rebuild);
+      setSlideshowScenes(rebuild);
+      setOnAir(follow);
+      setPreview(follow);
+      setSelected(follow);
+    };
+    // A song was corrected or redesigned (possibly while on screen).
+    const onSongSaved = (event: Event) => {
+      const song = (event as CustomEvent<Song>).detail;
+      if (song?.id) rebuildSongScenes((scene) => (scene.songId === song.id ? song : undefined));
+    };
+    // The default song style changed: rebuild every song scene.
+    const onSettingsChanged = () => {
+      void loadLibrary().then(({ songs }) => {
+        const byId = new Map(songs.map((song) => [song.id, song]));
+        rebuildSongScenes((scene) => (scene.songId ? byId.get(scene.songId) : undefined));
+      }).catch(() => setSourceError('Could not apply the song style.'));
+    };
+    window.addEventListener(SONG_SAVED_EVENT, onSongSaved);
+    window.addEventListener(SONG_SLIDE_SETTINGS_EVENT, onSettingsChanged);
+    setScenes(upgradeSongScenes);
+    setSlideshowScenes(upgradeSongScenes);
+    return () => {
+      window.removeEventListener(SONG_SAVED_EVENT, onSongSaved);
+      window.removeEventListener(SONG_SLIDE_SETTINGS_EVENT, onSettingsChanged);
+    };
+  }, []);
+
+  const showSelectedInPreview = () => setPreview(selected);
 
   // Fix typos in the slide that is in Preview, before it goes on air.
   useEffect(() => {
@@ -2651,7 +3017,7 @@ export default function Studio() {
       <>
       {/* Top row: takes all the leftover height */}
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1.35fr)_minmax(0,1.4fr)_minmax(190px,0.8fr)_minmax(180px,0.7fr)] gap-3">
-        {/* Left: Preview (big), Selected slide + On air side by side, then ONE next-step button */}
+        {/* On-air output remains separate from the Program setup and staging controls. */}
         <div className="flex min-h-0 flex-col gap-2">
           <div className="flex shrink-0 items-center justify-between px-1">
             <span className="text-[9px] font-semibold uppercase tracking-wider text-warm-white/55">On air</span>
@@ -2682,18 +3048,6 @@ export default function Studio() {
               })}
             </div>
           </Fit>
-
-          <button
-            onClick={next.run}
-            disabled={!next.run}
-            className={`flex shrink-0 items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-bold transition ${
-              next.run ? 'bg-brand text-white hover:brightness-110' : 'bg-white/10 text-warm-white/60'
-            }`}
-          >
-            {next.run ? <ArrowRight size={16} /> : <Check size={16} />}
-            {next.label}
-          </button>
-          <p className="shrink-0 text-center text-[11px] text-warm-white/60">{next.hint}</p>
 
           <div className="flex shrink-0 flex-wrap items-center gap-3 rounded-xl border border-white/10 bg-panel p-2">
             <label className="flex items-center gap-2 text-sm text-warm-white/70">
@@ -2727,15 +3081,21 @@ export default function Studio() {
         <Panel
           title="Program"
           className="min-w-0 overflow-hidden"
-          action={<span className="rounded bg-sky-500/15 px-2 py-1 text-[10px] font-bold text-sky-200">Setup</span>}
+          action={<span className="rounded bg-sky-500/15 px-2 py-1 text-[10px] font-bold text-sky-200">STAGE &amp; TAKE</span>}
         >
           <div className="mb-2 flex shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-black/20 p-2">
             <span className="flex shrink-0 items-center gap-1.5 rounded-md bg-sky-500/15 px-2 py-1.5 text-[11px] font-semibold text-sky-200"><Monitor size={13} /> Output display</span>
-            <select id="stream-output-monitor" aria-label="Streaming output monitor" value={targetDisplayId ?? ''} onChange={(event) => setTargetDisplayId(Number(event.target.value))} className="h-8 min-w-0 flex-1 rounded-md border border-white/15 bg-slate-950 px-2.5 text-[11px] text-warm-white outline-none focus:border-brand" disabled={!studioDisplays.length}>
-              {studioDisplays.map((display) => <option key={display.id} value={display.id}>{display.name}</option>)}
-            </select>
-            <button type="button" aria-label="Show slide on monitor" title="Show the on-air slide on this monitor" onClick={() => { void openStreamDisplay(); }} disabled={!studioDisplays.length} className="flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-brand px-2.5 text-[11px] font-bold text-white shadow-lg shadow-brand/15 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"><Monitor size={13} /> Show slides</button>
+            <MonitorPicker
+              displays={studioDisplays}
+              selectedIds={selectedStreamDisplayIds}
+              liveIds={openDisplayIds}
+              onToggle={toggleStreamDisplay}
+              onSetAll={(ids) => setStreamDisplayIds(ids)}
+            />
+            {openDisplayIds.length > 0 && <button type="button" title="Close the output on every monitor" onClick={() => { void closeAllStreamDisplays(); }} className="flex h-8 shrink-0 items-center rounded-md border border-white/15 px-2.5 text-[11px] font-semibold text-warm-white/80 hover:bg-white/5">Close all</button>}
+            <button type="button" aria-label="Show slides on selected monitors" title="Show the on-air slide on every selected monitor" onClick={() => { void openStreamDisplay(); }} disabled={!selectedStreamDisplayIds.length} className="flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-brand px-2.5 text-[11px] font-bold text-white shadow-lg shadow-brand/15 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"><Monitor size={13} /> Show slides{selectedStreamDisplayIds.length > 1 ? ` (${selectedStreamDisplayIds.length})` : ''}</button>
           </div>
+          {displayError && studioOutputTab === 'stream' && <p role="alert" className="mb-2 shrink-0 text-[11px] text-amber-200">{displayError}</p>}
           <div data-program-control className="mb-2 flex shrink-0 items-center justify-between gap-2">
             <p className="min-w-0 text-[10px] text-warm-white/50">Choose and arrange sources for the on-air output.</p>
             <div className="flex shrink-0 items-center gap-1">
@@ -2760,7 +3120,6 @@ export default function Studio() {
               {previewSceneSources.some((source) => source.kind === 'camera' || source.kind === 'mobile-camera') && (cameraOnlySnapshot
                 ? <button type="button" aria-pressed="true" onClick={undoCameraOnly} className="rounded border border-white/10 px-2 py-1 text-[10px] text-warm-white/70 hover:border-brand">Exit camera only</button>
                 : <button type="button" aria-pressed="false" disabled={!orientationControlCamera} title={orientationControlCamera ? `Show only ${orientationControlCamera.name}` : 'Select a camera first'} onClick={() => showCameraOnly(orientationControlCamera?.id)} className="rounded border border-white/10 px-2 py-1 text-[10px] text-warm-white/70 hover:border-brand disabled:cursor-not-allowed disabled:opacity-40">Camera only</button>)}
-              <button type="button" onClick={takePreviewSetupOnAir} className="flex items-center gap-1 rounded bg-brand px-2 py-1 text-[10px] font-bold text-white hover:brightness-110"><ArrowRight size={11} />Take to air</button>
             </div>
           </div>
           <div
@@ -2788,6 +3147,18 @@ export default function Studio() {
                 {selectedLayer && <button type="button" aria-label={`Resize ${source.name}`} title="Drag to resize" onPointerDown={(event) => beginProgramSourceDrag(event, source, 'resize')} className="absolute -bottom-1.5 -right-1.5 z-30 h-3.5 w-3.5 cursor-nwse-resize rounded-sm border border-white bg-sky-500 shadow" />}
               </div>;
             })}
+          </div>
+          <div className="mt-1.5 flex shrink-0 items-center gap-1.5 rounded-md border border-white/10 bg-black/25 p-1.5">
+            <div className="flex shrink-0 items-center gap-1.5 px-1">
+              <span className="text-[9px] font-semibold text-warm-white/70">Preview</span>
+              <button type="button" role="switch" aria-label="Preview Mode" aria-checked={previewMode} onClick={() => setPreviewMode(!previewMode)} title={previewMode ? 'Preview Mode is on: stage slides before putting them on air' : 'Preview Mode is off: selecting a slide sends it on air'} className={`h-5 w-9 rounded-full p-0.5 transition-colors ${previewMode ? 'bg-sky-500' : 'bg-white/15'}`}>
+                <span className={`block h-4 w-4 rounded-full bg-white transition-transform ${previewMode ? 'translate-x-4' : ''}`} />
+              </button>
+            </div>
+            {previewMode ? <>
+              <button type="button" disabled={same(selected, preview)} onClick={showSelectedInPreview} title="Stage the selected slide for review" className="flex min-h-7 min-w-0 flex-1 items-center justify-center gap-1 rounded border border-sky-300/30 bg-sky-400/10 px-1.5 py-1 text-[9px] font-bold text-sky-100 transition hover:bg-sky-400/20 disabled:cursor-default disabled:opacity-45"><Eye size={11} />Show Preview</button>
+              <button type="button" onClick={takePreviewSetupOnAir} title="Send the staged Program output to the audience" className="flex min-h-7 min-w-0 flex-1 items-center justify-center gap-1 rounded bg-brand px-1.5 py-1 text-[9px] font-bold text-white transition hover:brightness-110"><ArrowRight size={11} />Put on Air</button>
+            </> : <button type="button" onClick={takePreviewSetupOnAir} title="Send the selected slide and current Program layout directly to the audience" className="flex min-h-7 min-w-0 flex-1 items-center justify-center gap-1 rounded bg-brand px-1.5 py-1 text-[9px] font-bold text-white transition hover:brightness-110"><ArrowRight size={11} />Show on Air</button>}
           </div>
           {selectedProgramOverlay && selectedProgramLayout && <div data-program-layout-controls className="mt-1.5 flex shrink-0 items-end gap-1 rounded-lg border border-white/10 bg-black/20 p-1.5">
             <div className="mr-auto min-w-0 pb-1"><p className="truncate text-[9px] font-semibold text-warm-white">{selectedProgramOverlay.name}</p><p className="text-[8px] text-warm-white/45">Position and size</p></div>
@@ -2821,8 +3192,7 @@ export default function Studio() {
               return <div key={i} ref={(element) => { if (element) slideCardRefs.current.set(cardKey, element); else slideCardRefs.current.delete(cardKey); }} className="min-w-0 shrink-0">
                 <button
                   onClick={() => selectSlide(i)}
-                  onDoubleClick={() => sendToPreview(ref)}
-                  title={previewMode ? 'Click to select, double-click to send to Preview' : 'Click to show this slide on air'}
+                  title={previewMode ? 'Click to select, then use Program to stage it or put Preview on air' : 'Click to select; use Program to send it on air'}
                   aria-pressed={isSelected}
                   className={`relative block aspect-video w-full overflow-hidden rounded-lg border-2 transition ${isSelected ? 'border-brand ring-2 ring-brand/40' : 'border-white/10 hover:border-white/40'}`}
                 >
@@ -2841,19 +3211,21 @@ export default function Studio() {
 
         {/* Sidebar keeps Scenes and Music together while the active list uses the full height. */}
         <Panel
-          title={sidebarPanel === 'scenes' ? 'Scenes' : 'Music'}
+          title={sidebarPanel === 'scenes' ? 'Scenes' : musicView === 'songs' ? 'Songs' : 'Music'}
           className="min-w-0"
           action={
             sidebarPanel === 'scenes' ? (
               <div className="flex items-center gap-1">
                 <button type="button" onClick={() => setClearScenesTab('stream')} disabled={!scenes.length} title="Remove all scenes" className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-semibold text-red-300/80 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 size={12} />Clear all</button>
+                <button type="button" aria-label="Add scripture scene" title="Add a Scripture scene" onClick={() => setScripturePickerOpen(true)} className="rounded p-1 text-warm-white/70 hover:bg-white/5 hover:text-brand"><BookOpen size={17} /></button>
                 <button aria-label="Add scene" onClick={beginAddScene} className="rounded p-1 text-warm-white/70 hover:bg-white/5 hover:text-brand"><Plus size={18} /></button>
               </div>
-            ) : (
+            ) : musicView === 'songs' ? null : (
               <button type="button" onClick={() => musicFileRef.current?.click()} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold text-warm-white/75 hover:bg-white/5 hover:text-white"><Plus size={14} /> Upload</button>
             )
           }
         >
+          <input ref={musicFileRef} type="file" accept="audio/*" className="hidden" onChange={(event) => { void importMusicFile(event.currentTarget.files?.[0]); event.currentTarget.value = ''; }} />
           <div role="tablist" aria-label="Studio sidebar panels" className="mb-2 flex shrink-0 gap-1 rounded-lg bg-black/20 p-1">
             <button type="button" role="tab" aria-selected={sidebarPanel === 'scenes'} onClick={() => setSidebarPanel('scenes')} className={`flex-1 rounded-md px-2 py-1 text-xs font-semibold ${sidebarPanel === 'scenes' ? 'bg-white/10 text-white' : 'text-warm-white/55 hover:text-white'}`}>Scenes</button>
             <button type="button" role="tab" aria-selected={sidebarPanel === 'music'} onClick={() => setSidebarPanel('music')} className={`flex-1 rounded-md px-2 py-1 text-xs font-semibold ${sidebarPanel === 'music' ? 'bg-white/10 text-white' : 'text-warm-white/55 hover:text-white'}`}>Music</button>
@@ -2873,8 +3245,9 @@ export default function Studio() {
                     <SlideView bg={s.bg} slide={s.slides[0]} />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-warm-white">
-                      {s.id} {s.name}
+                    <p className="flex items-center gap-1 truncate text-sm font-medium text-warm-white">
+                      {s.songId ? <Music2 size={13} aria-label="Song" className="shrink-0 text-sky-300" /> : null}
+                      <span className="truncate">{s.songId ? s.name : `${s.id} ${s.name}`}</span>
                     </p>
                     <p className="truncate text-xs text-warm-white/50">{s.desc}</p>
                   </div>
@@ -2895,7 +3268,15 @@ export default function Studio() {
           </ul>
           <button onClick={beginAddScene} className="mt-2 flex w-full shrink-0 items-center justify-center gap-2 rounded-lg border border-white/10 py-1.5 text-sm text-warm-white hover:bg-white/5"><Plus size={16} />Add Scene</button>
           </> : <>
-          <input ref={musicFileRef} type="file" accept="audio/*" className="hidden" onChange={(event) => { void importMusicFile(event.currentTarget.files?.[0]); event.currentTarget.value = ''; }} />
+          <div role="tablist" aria-label="Music" className="mb-2 flex shrink-0 gap-3 border-b border-white/10 px-1">
+            <button type="button" role="tab" aria-selected={musicView === 'songs'} onClick={() => setMusicView('songs')} className={`-mb-px border-b-2 pb-1.5 text-[11px] font-semibold ${musicView === 'songs' ? 'border-brand text-white' : 'border-transparent text-warm-white/50 hover:text-white'}`}>Songbooks</button>
+            <button type="button" role="tab" aria-selected={musicView === 'tracks'} onClick={() => setMusicView('tracks')} className={`-mb-px border-b-2 pb-1.5 text-[11px] font-semibold ${musicView === 'tracks' ? 'border-brand text-white' : 'border-transparent text-warm-white/50 hover:text-white'}`}>Audio tracks</button>
+          </div>
+          {musicView === 'songs' ? (() => {
+            const liveScene = scenes.find((item) => item.id === onAir.sceneId);
+            const liveSong = liveScene?.songId ? { id: liveScene.songId, index: onAir.slideIdx } : null;
+            return <StudioSongsPanel liveSongId={liveSong?.id} liveScreenIndex={liveSong?.index} sceneSongIds={scenes.map((scene) => scene.songId).filter((id): id is string => !!id)} onAddToScenes={addSongScene} />;
+          })() : <>
           {musicAssets.length ? (
             <ul className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,.35) transparent' }}>
               {musicAssets.map((asset) => {
@@ -2909,6 +3290,7 @@ export default function Studio() {
               })}
             </ul>
           ) : <button type="button" onClick={() => musicFileRef.current?.click()} className="flex min-h-20 flex-1 items-center justify-center rounded-lg border border-dashed border-white/10 px-3 text-center text-xs text-warm-white/45 hover:border-brand/40 hover:text-warm-white/70">Upload a track to build your music library.</button>}
+          </>}
           </>}
         </Panel>
       </div>
@@ -3142,7 +3524,6 @@ export default function Studio() {
               <Circle size={16} className={recording ? 'fill-red-500 text-red-500' : ''} />
               {recording ? 'Stop Recording' : 'Record'}
             </button>
-            <Switch label="Preview Mode" on={previewMode} onChange={setPreviewMode} />
           </div>
         </Panel>
       </div>
@@ -3155,44 +3536,23 @@ export default function Studio() {
               <p className="mt-1 text-xs text-warm-white/50">Choose a scene, then send its slides to a connected projector or monitor.</p>
             </div>
             <div className="flex flex-wrap items-end gap-2">
-              <label className="text-xs text-warm-white/60">Output monitor
-                <select value={targetDisplayId ?? ''} onChange={(event) => setTargetDisplayId(Number(event.target.value))} className={`${selectClass} mt-1 block min-w-40`} disabled={!studioDisplays.length}>
-                  {studioDisplays.map((display) => <option key={display.id} value={display.id}>{display.name}</option>)}
-                </select>
-              </label>
-              <button type="button" onClick={() => { void openOfflineDisplay(); }} disabled={!studioDisplays.length} className="rounded-lg bg-brand px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40">Show on monitor</button>
+              <MonitorPicker
+                displays={studioDisplays}
+                selectedIds={selectedStreamDisplayIds}
+                liveIds={openDisplayIds}
+                onToggle={toggleStreamDisplay}
+                onSetAll={(ids) => setStreamDisplayIds(ids)}
+              />
+              {openDisplayIds.length > 0 && <button type="button" title="Close the output on every monitor" onClick={() => { void closeAllStreamDisplays(); }} className="rounded-lg border border-white/15 px-2.5 py-2 text-[11px] font-semibold text-warm-white/80 hover:bg-white/5">Close all</button>}
+              <button type="button" onClick={() => { void openOfflineDisplay(); }} disabled={!selectedStreamDisplayIds.length} className="rounded-lg bg-brand px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40">Show slides{selectedStreamDisplayIds.length > 1 ? ` (${selectedStreamDisplayIds.length})` : ''}</button>
             </div>
-            <p className="basis-full text-right text-[10px] text-warm-white/40">Open the same scene on another monitor by selecting it and choosing Show on monitor. Press Esc on a display to close it.</p>
+            <p className="basis-full text-right text-[10px] text-warm-white/40">Choose one or more displays for the slideshow output. Press Esc on a display to close it.</p>
           </div>
           {displayError && <p role="alert" className="shrink-0 text-xs text-amber-200">{displayError}</p>}
           <div className="grid min-h-0 flex-1 gap-3 md:grid-cols-[minmax(0,1fr)_280px_280px]">
             <div className="flex min-h-0 flex-col gap-3 rounded-xl border border-white/10 bg-panel p-3">
               <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg bg-black" style={{ containerType: 'inline-size' }}>
                 <SlideView bg={offlineCurrent.bg} slide={offlineCurrent.slide} scale={8} minRem={0.55} />
-                {!offlineEditing && <button type="button" onClick={startOfflineEdit} className="absolute right-3 top-3 z-10 flex items-center gap-1.5 rounded-lg border border-white/15 bg-black/65 px-3 py-2 text-xs font-semibold text-white hover:bg-black/85"><Pencil size={13} />Edit text</button>}
-                {offlineEditing && (
-                  <div className="absolute inset-0 z-20 flex flex-col overflow-hidden bg-[#0b1520]/95 p-4 backdrop-blur-sm">
-                    <div className="mb-3 flex shrink-0 items-start justify-between gap-3">
-                      <div><h3 className="text-sm font-semibold text-white">Edit this slide</h3><p className="mt-1 text-[11px] text-warm-white/50">Changes appear on every monitor showing this scene after you save.</p></div>
-                      <button type="button" aria-label="Close editor" onClick={() => setOfflineEditing(false)} className="rounded p-1 text-warm-white/50 hover:bg-white/10 hover:text-white"><X size={16} /></button>
-                    </div>
-                    <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
-                      {offlineCurrent.slide.design?.box || offlineCurrent.slide.design?.extraBoxes?.length ? (
-                        <>
-                          {offlineCurrent.slide.design.box && <label className="block text-xs text-warm-white/65">Main text<textarea value={offlineBoxDrafts.main ?? ''} onChange={(event) => setOfflineBoxDrafts((current) => ({ ...current, main: event.target.value }))} className="mt-1.5 min-h-20 w-full resize-y rounded-lg border border-white/10 bg-black/30 p-2 text-sm text-white outline-none focus:border-brand" /></label>}
-                          {offlineCurrent.slide.design.extraBoxes?.map((box, index) => <label key={box.id} className="block text-xs text-warm-white/65">Text box {index + 2}<textarea value={offlineBoxDrafts[`extra-${box.id}`] ?? ''} onChange={(event) => setOfflineBoxDrafts((current) => ({ ...current, [`extra-${box.id}`]: event.target.value }))} className="mt-1.5 min-h-20 w-full resize-y rounded-lg border border-white/10 bg-black/30 p-2 text-sm text-white outline-none focus:border-brand" /></label>)}
-                        </>
-                      ) : (
-                        <label className="block text-xs text-warm-white/65">Slide text<textarea value={offlineTextDraft} onChange={(event) => setOfflineTextDraft(event.target.value)} className="mt-1.5 min-h-28 w-full resize-y rounded-lg border border-white/10 bg-black/30 p-2 text-sm text-white outline-none focus:border-brand" /></label>
-                      )}
-                      <label className="block text-xs text-warm-white/65">Reference (optional)<input value={offlineRefDraft} onChange={(event) => setOfflineRefDraft(event.target.value)} className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/30 p-2 text-sm text-white outline-none focus:border-brand" placeholder="e.g. John 3:16" /></label>
-                    </div>
-                    <div className="mt-3 flex shrink-0 justify-end gap-2">
-                      <button type="button" onClick={() => setOfflineEditing(false)} className="rounded-lg border border-white/10 px-3 py-2 text-xs text-white/75 hover:bg-white/5">Cancel</button>
-                      <button type="button" onClick={saveOfflineEdit} className="rounded-lg bg-brand px-3 py-2 text-xs font-semibold text-white hover:brightness-110">Save changes</button>
-                    </div>
-                  </div>
-                )}
               </div>
               <div className="flex shrink-0 items-center justify-between gap-3">
                 <span className="text-xs text-warm-white/55">Slide {Math.min(offlineSlide.slideIdx + 1, Math.max(offlineScene.slides.length, 1))} of {offlineScene.slides.length}</span>
@@ -3207,14 +3567,24 @@ export default function Studio() {
                   <h3 className="text-sm font-semibold text-white">Scenes</h3>
                   <div className="flex items-center gap-1">
                     <button type="button" onClick={() => setClearScenesTab('slideshow')} disabled={!slideshowScenes.length} title="Remove all scenes" className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-semibold text-red-300/80 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 size={12} />Clear all</button>
+                    <button type="button" aria-label="Add scripture scene" title="Add a Scripture scene" onClick={() => setScripturePickerOpen(true)} className="rounded p-1 text-warm-white/60 hover:bg-white/10 hover:text-white"><BookOpen size={14} /></button>
                     <button type="button" aria-label="Add scene" title="Add scene" onClick={beginAddScene} className="rounded p-1 text-warm-white/60 hover:bg-white/10 hover:text-white"><Plus size={15} /></button>
                   </div>
                 </div>
                 <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto overscroll-contain pr-1">
                   {slideshowScenes.map((item) => <div key={item.id} className="group relative">
-                    <button type="button" onClick={() => setOfflineScene(item.id)} aria-pressed={offlineSlide.sceneId === item.id} className={`flex w-full items-center justify-between gap-2 rounded-lg border py-2 pl-3 pr-9 text-left transition ${offlineSlide.sceneId === item.id ? 'border-brand bg-brand/10 text-white' : 'border-white/10 text-warm-white/70 hover:border-white/25 hover:text-white'}`}>
-                      <span className="min-w-0"><span className="block truncate text-xs font-semibold">{item.name}</span><span className="mt-0.5 block text-[10px] text-warm-white/45">{item.slides.length} {item.slides.length === 1 ? 'slide' : 'slides'}</span></span>
-                      {onAir.sceneId === item.id && <span title="On air" className="h-2 w-2 shrink-0 rounded-full bg-red-500" />}
+                    <button type="button" onClick={() => setOfflineScene(item.id)} aria-pressed={offlineSlide.sceneId === item.id} className={`flex w-full items-center gap-3 rounded-lg border p-1.5 pr-9 text-left transition-colors ${offlineSlide.sceneId === item.id ? 'border-brand bg-brand/10 text-white' : 'border-white/10 text-warm-white/70 hover:border-white/25 hover:text-white'}`}>
+                      <div className="h-10 w-16 shrink-0 overflow-hidden rounded bg-black">
+                        <SlideView bg={item.bg} slide={item.slides[0]} />
+                      </div>
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-1 truncate text-xs font-semibold text-warm-white">
+                          {item.songId && <Music2 size={12} aria-label="Song" className="shrink-0 text-sky-300" />}
+                          <span className="truncate">{item.songId ? item.name : `${item.id} ${item.name}`}</span>
+                        </span>
+                        <span className="mt-0.5 block truncate text-[10px] text-warm-white/45">{item.desc || `${item.slides.length} ${item.slides.length === 1 ? 'slide' : 'slides'}`}</span>
+                      </span>
+                      {offlineSlide.sceneId === item.id && <span title="Selected scene" className="h-2 w-2 shrink-0 rounded-full bg-emerald-400" />}
                     </button>
                     <button type="button" aria-label={`Delete scene ${item.name}`} title={`Delete ${item.name}`} onClick={() => askDeleteScene(item, 'slideshow')} className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-warm-white/45 opacity-0 transition hover:bg-red-500/15 hover:text-red-300 focus:opacity-100 group-hover:opacity-100"><Trash2 size={13} /></button>
                   </div>)}
@@ -3226,7 +3596,7 @@ export default function Studio() {
                 <h3 className="mb-2 shrink-0 text-sm font-semibold text-white">Slides <span className="font-normal text-warm-white/45">· {offlineScene.name}</span></h3>
                 <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain pr-1">
                   {offlineScene.slides.map((slide, index) => (
-                    <button key={`${offlineScene.id}-${index}`} type="button" onClick={() => { setOfflineSlide({ sceneId: offlineScene.id, slideIdx: index }); setOfflineEditing(false); }} aria-pressed={offlineSlide.slideIdx === index} className={`flex items-center gap-2 rounded-lg border p-2 text-left transition ${offlineSlide.slideIdx === index ? 'border-brand bg-brand/10' : 'border-white/10 hover:border-white/25'}`}>
+                    <button key={`${offlineScene.id}-${index}`} type="button" onClick={() => setOfflineSlide({ sceneId: offlineScene.id, slideIdx: index })} aria-pressed={offlineSlide.slideIdx === index} className={`flex items-center gap-2 rounded-lg border p-2 text-left transition ${offlineSlide.slideIdx === index ? 'border-brand bg-brand/10' : 'border-white/10 hover:border-white/25'}`}>
                       <span className="relative block aspect-video w-24 shrink-0 overflow-hidden rounded bg-black" style={{ containerType: 'inline-size' }}><SlideView bg={offlineScene.bg} slide={slide} scale={4} minRem={0.4} /></span>
                       <span className="min-w-0"><span className="block text-[10px] text-warm-white/45">SLIDE {index + 1}</span><span className="block truncate text-xs text-white">{slide.title || slide.text || `Slide ${index + 1}`}</span></span>
                     </button>
@@ -3242,11 +3612,37 @@ export default function Studio() {
           <section role="dialog" aria-modal="true" aria-labelledby="add-scene-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h2 id="add-scene-title" className="text-lg font-bold text-warm-white">Add a presentation scene</h2>
-                <p className="mt-1 text-sm text-warm-white/55">Choose one of your saved presentations to add its slides to Studio.</p>
+                <h2 id="add-scene-title" className="text-lg font-bold text-warm-white">Add a scene</h2>
+                <p className="mt-1 text-sm text-warm-white/55">{addSceneKind === 'presentation' ? 'Add the slides of a saved presentation.' : 'Add a song from your songbooks. Each verse becomes a slide.'}</p>
               </div>
               <button aria-label="Close" onClick={() => setAddSceneOpen(false)} className="rounded-lg p-1.5 text-warm-white/55 hover:bg-white/10 hover:text-white"><X size={17} /></button>
             </div>
+            <div role="tablist" aria-label="Scene type" className="mt-4 flex gap-1 rounded-lg bg-black/25 p-1">
+              <button type="button" role="tab" aria-selected={addSceneKind === 'presentation'} onClick={() => setAddSceneKind('presentation')} className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-semibold ${addSceneKind === 'presentation' ? 'bg-brand text-navy' : 'text-warm-white/65 hover:bg-white/10 hover:text-white'}`}><Image size={14} /> Presentation</button>
+              <button type="button" role="tab" aria-selected={addSceneKind === 'song'} onClick={() => setAddSceneKind('song')} className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-semibold ${addSceneKind === 'song' ? 'bg-brand text-navy' : 'text-warm-white/65 hover:bg-white/10 hover:text-white'}`}><Music2 size={14} /> Song</button>
+            </div>
+            {addSceneKind === 'song' ? (() => {
+              const songResults = (addSceneSongQuery.trim() ? searchSongs(addSceneSongs, addSceneSongQuery) : addSceneSongs).slice(0, 200);
+              const chosen = songResults.find((song) => song.id === selectedSongId) ?? songResults[0];
+              return <>
+                <input autoFocus value={addSceneSongQuery} onChange={(event) => setAddSceneSongQuery(event.target.value)} placeholder="Search by number, title or words" aria-label="Search songs" className="mt-4 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-warm-white outline-none placeholder:text-warm-white/35 focus:border-brand" />
+                <div role="radiogroup" aria-label="Songs" className="mt-3 max-h-64 space-y-1 overflow-y-auto pr-1">
+                  {!songResults.length && <p className="rounded-xl border border-dashed border-white/15 p-4 text-sm text-warm-white/55">{addSceneSongs.length ? 'No songs match.' : 'No songs yet. Add songs in Presentations → Songbooks.'}</p>}
+                  {songResults.map((song) => {
+                    const checked = chosen?.id === song.id;
+                    return <button key={song.id} type="button" role="radio" aria-checked={checked} onClick={() => setSelectedSongId(song.id)} onDoubleClick={() => { addSongScene(song); setAddSceneOpen(false); }} className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left ${checked ? 'border-brand bg-brand/10' : 'border-white/10 hover:bg-white/5'}`}>
+                      <Music2 size={13} className="shrink-0 text-sky-300" />
+                      {song.number && <span className="shrink-0 text-xs tabular-nums text-warm-white/55">{song.number}</span>}
+                      <span className="min-w-0"><span className="block truncate text-sm text-warm-white">{song.title}</span><span className="block truncate text-[11px] text-warm-white/40">{firstLine(song)}</span></span>
+                    </button>;
+                  })}
+                </div>
+                <div className="mt-5 flex justify-end gap-2">
+                  <button onClick={() => setAddSceneOpen(false)} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-warm-white/75 hover:bg-white/5">Cancel</button>
+                  <button disabled={!chosen} onClick={() => { if (chosen) { addSongScene(chosen); setAddSceneOpen(false); } }} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy hover:brightness-110 disabled:opacity-40">Add song</button>
+                </div>
+              </>;
+            })() : (<>
             {savedPresentations.filter((presentation) => presentation.slides.length > 0).length > 0 ? (
               <>
                 <div role="radiogroup" aria-label="Saved presentations" className="mt-5 max-h-72 space-y-2 overflow-y-auto pr-1">
@@ -3266,6 +3662,7 @@ export default function Studio() {
             ) : (
               <div className="mt-5 rounded-xl border border-dashed border-white/15 bg-white/[0.03] p-4 text-sm text-warm-white/60">No saved presentations with slides yet. Create and save a presentation first, then return here to add it as a scene.</div>
             )}
+            </>)}
           </section>
         </div>, document.body)
       )}
@@ -3476,6 +3873,17 @@ export default function Studio() {
         onCancel={() => setClearScenesTab(null)}
         onConfirm={() => { if (clearScenesTab) clearAllScenes(clearScenesTab); }}
       />
+      <ScripturePickerModal
+        open={scripturePickerOpen}
+        onClose={() => setScripturePickerOpen(false)}
+        onAdd={beginScriptureDesign}
+      />
+      {pendingScriptureDesign && <ScriptureDesignModal
+        reference={pendingScriptureDesign.reference}
+        verses={pendingScriptureDesign.verses}
+        onClose={() => { setPendingScriptureDesign(null); setScripturePickerOpen(true); }}
+        onAdd={(style, verses) => { void addScriptureScene(pendingScriptureDesign.reference, verses, style); }}
+      />}
     </div>
   );
 }
@@ -3566,6 +3974,13 @@ export function StudioDisplayOutput() {
     ...slide,
     bgImage: asset?.type === 'image' ? asset.url : slide.bgImage,
     bgVideo: asset?.type === 'video' ? asset.url : slide.bgVideo,
+    design: slide.design ? {
+      ...slide.design,
+      pictures: slide.design.pictures?.map((picture) => {
+        const pictureAsset = picture.assetId ? assets[picture.assetId] : undefined;
+        return pictureAsset ? { ...picture, src: pictureAsset.url } : picture;
+      }),
+    } : undefined,
   } : undefined;
 
   return (

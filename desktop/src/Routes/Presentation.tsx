@@ -16,6 +16,8 @@ import {
   ArrowRight,
   Bold,
   BookOpen,
+  BookMarked,
+  Check,
   Circle as CircleIcon,
   ChevronDown,
   ChevronLeft,
@@ -25,15 +27,19 @@ import {
   LayoutTemplate,
   Loader2,
   FolderOpen,
+  FolderPlus,
   Lock,
   MoreHorizontal,
+  Pencil,
   Minus,
   Play,
   Plus,
   Save,
+  Search,
   Shapes,
   Square,
   Star,
+  Tag,
   Trash2,
   Triangle,
   Timer,
@@ -47,10 +53,28 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import ScripturePickerModal from '../components/modal/ScripturePickerModal';
 import ConfirmationModal from '../components/modal/ConfirmationModal';
+import {
+  DEFAULT_CATEGORIES,
+  cleanCategoryName,
+  dragHasFiles,
+  groupByFolder,
+  isBackgroundMedia,
+  isPowerPoint,
+  isSlideImage,
+  loadPresentationCategories,
+  naturalCompare,
+  pathedFilesFromInput,
+  readDroppedFiles,
+  savePresentationCategories,
+  type PathedFile,
+} from '../utils/slideLibrary';
 import CountdownDisplay, { type CountdownSettings } from '../components/CountdownDisplay';
 import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimization';
 import { getAccountDatabaseName, getAccountStorageKey } from '../utils/accountStorage';
 import GOOGLE_FONT_FAMILIES from '../data/google-font-families.json';
+import { API_BASE_URL as PRESENTATION_API_URL } from '../utils/apiConfig';
+import Songbooks from './Songbooks';
+import { songSlideLayouts, type Song, type SongTextLayout } from '../utils/songbooks';
 
 /* ---------- Types & data ---------- */
 
@@ -76,11 +100,13 @@ type TextBox = {
   y: number;
   w: number;
   h: number;
+  /** Show the text in capital letters. The typed text keeps its case, so this can be switched off again. */
+  uppercase?: boolean;
 };
 
 type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; aspectRatio?: number; layerOrder?: number | 'back' | 'front' };
 type ShapeT = { id: number; kind: 'rectangle' | 'circle' | 'triangle' | 'line' | 'star' | 'arrow'; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number };
-type MediaAsset = { id: string; name: string; type: 'image' | 'video'; category?: 'background' | 'slide'; blob: Blob; originalBlob?: Blob; optimized?: boolean; createdAt: number; url: string };
+type MediaAsset = { id: string; name: string; type: 'image' | 'video'; category?: 'background' | 'slide'; collection?: string; blob: Blob; originalBlob?: Blob; optimized?: boolean; createdAt: number; url: string };
 type StoredMediaAsset = Omit<MediaAsset, 'url'>;
 
 type SlideT = {
@@ -207,7 +233,6 @@ const INITIAL: SlideT[] = [
 
 const STORAGE_KEY = 'faithstream.presentation';
 const PROJECTS_STORAGE_KEY = 'faithstream.presentations';
-const PRESENTATION_API_URL = ((import.meta as ImportMeta & { env: { VITE_FAITHSTREAM_API_URL?: string } }).env.VITE_FAITHSTREAM_API_URL ?? 'http://127.0.0.1:8000/api').replace(/\/$/, '');
 const MEDIA_DB = 'faithstream.media';
 const MEDIA_STORE = 'assets';
 
@@ -272,9 +297,9 @@ const readMediaAssets = async (): Promise<StoredMediaAsset[]> => {
   });
 };
 
-const saveMediaAsset = async (file: File, category: 'background' | 'slide' = 'background'): Promise<StoredMediaAsset> => {
+const saveMediaAsset = async (file: File, category: 'background' | 'slide' = 'background', collection?: string): Promise<StoredMediaAsset> => {
   const prepared = await prepareMediaFile(file);
-  const asset: StoredMediaAsset = { id: crypto.randomUUID(), name: file.name, type: file.type.startsWith('video/') ? 'video' : 'image', category, blob: prepared.file, originalBlob: prepared.originalFile, optimized: !!prepared.originalFile, createdAt: Date.now() };
+  const asset: StoredMediaAsset = { id: crypto.randomUUID(), name: file.name, type: file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(file.name) ? 'video' : 'image', category, ...(collection ? { collection } : {}), blob: prepared.file, originalBlob: prepared.originalFile, optimized: !!prepared.originalFile, createdAt: Date.now() };
   const db = await openMediaDb();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(MEDIA_STORE, 'readwrite');
@@ -284,6 +309,20 @@ const saveMediaAsset = async (file: File, category: 'background' | 'slide' = 'ba
       window.dispatchEvent(new CustomEvent('faithstream:media-updated'));
       resolve(asset);
     };
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+    transaction.onabort = () => { db.close(); reject(transaction.error); };
+  });
+};
+
+/** Saves changed details (such as a collection name) for existing library items. */
+const updateMediaAssetsInDb = async (assets: StoredMediaAsset[]) => {
+  if (!assets.length) return;
+  const db = await openMediaDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(MEDIA_STORE, 'readwrite');
+    const store = transaction.objectStore(MEDIA_STORE);
+    for (const asset of assets) store.put(asset);
+    transaction.oncomplete = () => { db.close(); resolve(); };
     transaction.onerror = () => { db.close(); reject(transaction.error); };
     transaction.onabort = () => { db.close(); reject(transaction.error); };
   });
@@ -390,6 +429,7 @@ function TextBoxView({ box, defaultLayerOrder = 3000 }: { box: TextBox; defaultL
             fontWeight: box.bold ? 800 : 500,
             fontStyle: box.italic ? 'italic' : 'normal',
             textDecoration: box.underline ? 'underline' : 'none',
+            textTransform: box.uppercase ? 'uppercase' : undefined,
             color: box.color,
             textShadow: shadow,
           }}
@@ -704,7 +744,7 @@ export default function Presentation() {
   const [tab, setTab] = useState<PropsTab>('Content');
   const [dock, setDock] = useState<Dock>('Templates');
   const [zoom, setZoom] = useState('100%');
-  const [menuFor, setMenuFor] = useState<number | null>(null);
+  const [menuFor, setMenuFor] = useState<string | null>(null);
   const [projectMenuFor, setProjectMenuFor] = useState<string | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
   const [videoPreviewAsset, setVideoPreviewAsset] = useState<MediaAsset | null>(null);
@@ -728,6 +768,19 @@ export default function Presentation() {
   const [fontPickerOpen, setFontPickerOpen] = useState(false);
   const [fontSearch, setFontSearch] = useState('');
   const [accountSyncStatus, setAccountSyncStatus] = useState('Connecting to your account…');
+  // Library organisation (kept on this device).
+  const [projectCategories, setProjectCategories] = useState<Record<string, string>>(loadPresentationCategories);
+  const [librarySearch, setLibrarySearch] = useState('');
+  const [libraryCategory, setLibraryCategory] = useState('All');
+  const [newCategoryDraft, setNewCategoryDraft] = useState('');
+  const [importMenuOpen, setImportMenuOpen] = useState(false);
+  const [libraryDragOver, setLibraryDragOver] = useState(false);
+  // Background collections.
+  const [backgroundCollection, setBackgroundCollection] = useState('All');
+  const [renamingCollection, setRenamingCollection] = useState<string | null>(null);
+  const [collectionNameDraft, setCollectionNameDraft] = useState('');
+  const [backgroundImportProgress, setBackgroundImportProgress] = useState<{ message: string; current: number; total: number } | null>(null);
+  const [backgroundDragOver, setBackgroundDragOver] = useState(false);
   const fontPickerRef = useRef<HTMLDivElement>(null);
   const undoHistoryRef = useRef<SlideT[][]>([]);
   const previousSlidesRef = useRef(slides);
@@ -900,6 +953,21 @@ export default function Presentation() {
     });
   }, [slides, activeProjectId, projectName]);
 
+  // Close a presentation's ⋯ menu when clicking anywhere outside it, or pressing Esc.
+  useEffect(() => {
+    if (!projectMenuFor) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest('[data-project-menu]')) setProjectMenuFor(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setProjectMenuFor(null); };
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick);
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [projectMenuFor]);
+
   useEffect(() => {
     if (!fontPickerOpen) return;
     const closeOnOutsideClick = (event: PointerEvent) => {
@@ -922,6 +990,13 @@ export default function Presentation() {
   const canvasTextMeasureRef = useRef<HTMLDivElement>(null);
   const [canvasTextScale, setCanvasTextScale] = useState(1);
   const slideImportInput = useRef<HTMLInputElement>(null);
+  const slideFolderInput = useRef<HTMLInputElement>(null);
+  const backgroundFolderInput = useRef<HTMLInputElement>(null);
+  const backgroundFilesInput = useRef<HTMLInputElement>(null);
+  // React has no prop for folder pickers, so switch these inputs to folder mode directly.
+  const markFolderInput = useCallback((element: HTMLInputElement | null) => {
+    if (element) { element.setAttribute('webkitdirectory', ''); element.setAttribute('directory', ''); }
+  }, []);
   const contentInput = useRef<HTMLInputElement>(null);
 
   const cur = slides[index];
@@ -1471,10 +1546,18 @@ export default function Presentation() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [box, isBoxSelected, selectedBoxId, selectedPictureId, selectedShapeId, selectedCountdown, index, cur.locked, projectLocked]);
 
-  const insertSlide = (s: SlideT, at = index + 1) => {
+  const insertSlide = (s: SlideT, at = slides.length) => {
     if (projectLocked) return;
-    setSlides((l) => [...l.slice(0, at), s, ...l.slice(at)]);
-    setIndex(at);
+    const insertionIndex = clamp(at, 0, slides.length);
+    const usedIds = new Set(slides.map((slide) => slide.id));
+    let insertedSlide = s;
+    if (usedIds.has(s.id)) {
+      let id = nextId++;
+      while (usedIds.has(id)) id = nextId++;
+      insertedSlide = { ...s, id };
+    }
+    setSlides((current) => [...current.slice(0, insertionIndex), insertedSlide, ...current.slice(insertionIndex)]);
+    setIndex(insertionIndex);
   };
 
   const addBlank = () => insertSlide(makeSlide({ bg: BGS[4], text: 'New slide', size: 96 }));
@@ -1553,12 +1636,7 @@ export default function Presentation() {
       box: null,
       countdown: { targetAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), label: 'Event starts in', color: '#FFFFFF', x: 10, y: 30, w: 80, h: 40, size: 112 },
     };
-    setSlides((current) => {
-      const next = [...current];
-      next.splice(index + 1, 0, countdownSlide);
-      return next;
-    });
-    setIndex(index + 1);
+    insertSlide(countdownSlide);
     setSelectedBoxId(null);
     setIsBoxSelected(false);
     setSelectedPictureId(null);
@@ -1731,84 +1809,271 @@ export default function Presentation() {
     setDock('Templates');
   };
 
-  const importSlideImages = async (files: FileList | null) => {
-    const selectedFiles = Array.from(files ?? []);
-    const imageFiles = selectedFiles.filter((file) => file.type.startsWith('image/'));
-    const powerpoint = selectedFiles.find((file) => file.name.toLowerCase().endsWith('.pptx'));
-    if (!imageFiles.length && !powerpoint) return;
-    setSlideImportProgress({ message: 'Preparing slides…', current: 0, total: Math.max(1, imageFiles.length) });
-    try {
-      const importedSlides: SlideT[] = [];
-      const importedAssets: MediaAsset[] = [];
-      for (const [fileIndex, file] of imageFiles.entries()) {
-        setSlideImportProgress({ message: `Saving ${file.name}`, current: fileIndex, total: imageFiles.length });
-        const stored = await saveMediaAsset(file, 'slide');
+  type SlideImportGroup = { name: string; category?: string; images: File[]; powerpoint?: File };
+
+  /** Turns image files and PowerPoint files into slides for one new presentation. */
+  const buildSlidesFromGroup = async (group: SlideImportGroup, report: (message: string) => void, step: () => void) => {
+    const slidesOut: SlideT[] = [];
+    const assetsOut: MediaAsset[] = [];
+    const asSlide = (asset: MediaAsset, title: string): SlideT => ({
+      id: nextId++, title, bg: BGS[4], dim: 0, bgImage: asset.url, bgAssetId: asset.id, box: null, extraBoxes: [], pictures: [], shapes: [],
+    });
+    for (const file of group.images) {
+      report(`Saving ${file.name}`);
+      const stored = await saveMediaAsset(file, 'slide');
+      const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
+      assetsOut.push(asset);
+      slidesOut.push(asSlide(asset, file.name.replace(/\.[^.]+$/, '').trim() || `Slide ${slidesOut.length + 1}`));
+      step();
+    }
+    if (group.powerpoint) {
+      report(`Reading ${group.powerpoint.name} in PowerPoint`);
+      const rendered = await window.faithstreamWindow?.renderPowerPointSlides(group.powerpoint);
+      if (!rendered?.ok || !rendered.slides?.length) throw new Error(rendered?.message || 'PowerPoint rendering is unavailable.');
+      for (const renderedSlide of rendered.slides) {
+        const binary = atob(renderedSlide.data);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+        const png = new File([bytes], `${renderedSlide.name}.png`, { type: 'image/png' });
+        const stored = await saveMediaAsset(png, 'slide');
         const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
-        importedAssets.push(asset);
-        const title = file.name.replace(/\.[^.]+$/, '').trim() || `Slide ${importedSlides.length + 1}`;
-        importedSlides.push({
-          id: nextId++,
-          title,
-          bg: BGS[4],
-          dim: 0,
-          bgImage: asset.url,
-          bgAssetId: asset.id,
-          box: null,
-          extraBoxes: [],
-          pictures: [],
-          shapes: [],
+        assetsOut.push(asset);
+        slidesOut.push(asSlide(asset, renderedSlide.name));
+        report(`Saving ${renderedSlide.name}`);
+      }
+      step();
+    }
+    return { slides: slidesOut, assets: assetsOut };
+  };
+
+  /** Imports one or many presentations, keeps going if one fails, and reports a summary. */
+  const importSlideGroups = async (groups: SlideImportGroup[]) => {
+    const work = groups.filter((group) => group.images.length || group.powerpoint);
+    if (!work.length) {
+      flash('No slide images or PowerPoint files were found there.');
+      return;
+    }
+    const totalSteps = work.reduce((sum, group) => sum + group.images.length + (group.powerpoint ? 1 : 0), 0);
+    let done = 0;
+    setSlideImportProgress({ message: 'Preparing slides…', current: 0, total: totalSteps });
+    const created: PresentationProject[] = [];
+    const createdCategories: Record<string, string> = {};
+    const failures: string[] = [];
+    let slideTotal = 0;
+    let bytesTotal = 0;
+    for (const group of work) {
+      const groupEnd = done + group.images.length + (group.powerpoint ? 1 : 0);
+      let message = 'Preparing slides…';
+      try {
+        const { slides: groupSlides, assets } = await buildSlidesFromGroup(group, (next) => {
+          message = work.length > 1 ? `${group.name} · ${next}` : next;
+          setSlideImportProgress({ message, current: done, total: totalSteps });
+        }, () => {
+          done += 1;
+          setSlideImportProgress({ message, current: done, total: totalSteps });
         });
-        setSlideImportProgress({ message: `Saving ${file.name}`, current: fileIndex + 1, total: imageFiles.length });
+        done = groupEnd;
+        if (!groupSlides.length) continue;
+        setMediaAssets((current) => [...assets, ...current]);
+        const project: PresentationProject = { id: crypto.randomUUID(), name: group.name.slice(0, 120) || 'Imported slides', slides: serializable(groupSlides), updatedAt: Date.now() + created.length, deviceOnly: true };
+        created.push(project);
+        if (group.category) createdCategories[project.id] = group.category;
+        slideTotal += groupSlides.length;
+        bytesTotal += assets.reduce((sum, asset) => sum + asset.blob.size, 0);
+      } catch (error) {
+        done = groupEnd;
+        failures.push(`${group.name}: ${error instanceof Error ? error.message : 'could not be imported'}`);
       }
-      if (powerpoint) {
-        setSlideImportProgress({ message: `Reading ${powerpoint.name}`, current: 0, total: 0 });
-        const rendered = await window.faithstreamWindow?.renderPowerPointSlides(powerpoint);
-        if (!rendered?.ok || !rendered.slides?.length) throw new Error(rendered?.message || 'PowerPoint rendering is unavailable.');
-        setSlideImportProgress({ message: `Saving PowerPoint slides`, current: 0, total: rendered.slides.length });
-        for (const [slideIndex, renderedSlide] of rendered.slides.entries()) {
-          const binary = atob(renderedSlide.data);
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-          const png = new File([bytes], `${renderedSlide.name}.png`, { type: 'image/png' });
-          const stored = await saveMediaAsset(png, 'slide');
-          const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
-          importedAssets.push(asset);
-          importedSlides.push({
-            id: nextId++,
-            title: renderedSlide.name,
-            bg: BGS[4],
-            dim: 0,
-            bgImage: asset.url,
-            bgAssetId: asset.id,
-            box: null,
-            extraBoxes: [],
-            pictures: [],
-            shapes: [],
-          });
-          setSlideImportProgress({ message: `Saving ${renderedSlide.name}`, current: slideIndex + 1, total: rendered.slides.length });
-        }
-      }
-      if (!importedSlides.length) throw new Error('No slides found');
-      setMediaAssets((current) => [...importedAssets, ...current]);
-      const sourceName = powerpoint?.name ?? imageFiles[0]?.name ?? 'Imported slides';
-      const name = sourceName.replace(/\.[^.]+$/, '') || 'Imported slides';
-      const project: PresentationProject = {
-        id: crypto.randomUUID(),
-        name,
-        slides: serializable(importedSlides),
-        updatedAt: Date.now(),
-        deviceOnly: true,
-      };
-      const next = [project, ...projects];
+    }
+    setSlideImportProgress(null);
+    if (created.length) {
+      const next = [...created.reverse(), ...projectsRef.current];
       localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
       setProjects(next);
-      setSlideImportProgress(null);
-      const totalKb = importedAssets.reduce((sum, asset) => sum + asset.blob.size, 0);
-      flash(`${importedSlides.length} ${powerpoint ? 'PowerPoint ' : ''}slide${importedSlides.length === 1 ? '' : 's'} imported with original design · ${formatMediaSizeInKb(totalKb)} media stored`);
-    } catch (error) {
-      setSlideImportProgress(null);
-      flash(error instanceof Error ? error.message : 'Could not import these slides.');
+      if (Object.keys(createdCategories).length) updateCategories((current) => ({ ...current, ...createdCategories }));
     }
+    const summary = created.length
+      ? `${created.length === 1 ? `“${created[0].name}”` : `${created.length} presentations`} imported · ${slideTotal} ${slideTotal === 1 ? 'slide' : 'slides'} · ${formatMediaSizeInKb(bytesTotal)} stored`
+      : 'Nothing was imported.';
+    flash(failures.length ? `${summary}. Skipped ${failures.join('; ')}` : summary);
+  };
+
+  /** "Import files": the selected images (and one PowerPoint) become a single presentation, as before. */
+  const importSlideImages = async (files: FileList | null) => {
+    const selected = Array.from(files ?? []);
+    const images = selected.filter(isSlideImage).sort((a, b) => naturalCompare(a.name, b.name));
+    const powerpoint = selected.find(isPowerPoint);
+    if (!images.length && !powerpoint) return;
+    const name = (powerpoint?.name ?? images[0]?.name ?? 'Imported slides').replace(/\.[^.]+$/, '') || 'Imported slides';
+    await importSlideGroups([{ name, images, powerpoint, category: libraryCategory !== 'All' && libraryCategory !== 'Uncategorized' ? libraryCategory : undefined }]);
+  };
+
+  /**
+   * "Import folder" or drag-and-drop: every folder of images becomes its own presentation,
+   * named after the folder; every PowerPoint becomes its own presentation too. When the
+   * imported folder has subfolders ("Songs/Amazing Grace"), the top folder name becomes
+   * the category ("Songs").
+   */
+  const importSlideFolder = async (files: PathedFile[]) => {
+    const groups: SlideImportGroup[] = [];
+    const filterCategory = libraryCategory !== 'All' && libraryCategory !== 'Uncategorized' ? libraryCategory : undefined;
+    for (const folder of groupByFolder(files)) {
+      const category = folder.parentName ? cleanCategoryName(folder.parentName) : filterCategory;
+      const images = folder.files.filter(isSlideImage);
+      if (images.length) groups.push({ name: folder.name, category, images });
+      for (const powerpoint of folder.files.filter(isPowerPoint)) {
+        groups.push({ name: powerpoint.name.replace(/\.[^.]+$/, ''), category, images: [], powerpoint });
+      }
+    }
+    await importSlideGroups(groups);
+  };
+
+  /* ----- library categories ----- */
+
+  const updateCategories = (change: (current: Record<string, string>) => Record<string, string>) => {
+    setProjectCategories((current) => {
+      const next = change(current);
+      savePresentationCategories(next);
+      return next;
+    });
+  };
+  const setProjectCategory = (projectId: string, category: string | null) => {
+    const clean = category ? cleanCategoryName(category) : '';
+    updateCategories((current) => {
+      const next = { ...current };
+      if (clean) next[projectId] = clean;
+      else delete next[projectId];
+      return next;
+    });
+    setProjectMenuFor(null);
+    setNewCategoryDraft('');
+  };
+  const categoryNames = [...new Set([...DEFAULT_CATEGORIES, ...Object.values(projectCategories)])].sort(naturalCompare);
+
+  /* ----- songs → presentations ----- */
+
+  /**
+   * Turns a song from the songbooks into an ordinary presentation (a separate copy you can
+   * design with backgrounds and fonts, then add to Studio like any presentation).
+   */
+  const createPresentationFromSong = (song: Song) => {
+    // Same layout as the song shows in Studio: its own design (or the default song style),
+    // including font, spacing, ALL CAPS (the Aa setting, so it can be switched off per text box)
+    // and background.
+    const toBox = (layout: SongTextLayout): TextBox => ({
+      ...defaultBox(layout.text, layout.size),
+      font: layout.font, bold: layout.bold, italic: layout.italic, underline: layout.underline, uppercase: layout.uppercase,
+      align: layout.align, color: layout.color, shadow: layout.shadow, lineHeight: layout.lineHeight,
+      x: layout.x, y: layout.y, w: layout.w, h: layout.h,
+    });
+    const deck: SlideT[] = songSlideLayouts(song).map((layout, index) => {
+      const asset = layout.backgroundAssetId ? mediaAssets.find((item) => item.id === layout.backgroundAssetId) : undefined;
+      return {
+        id: nextId++,
+        title: layout.label ?? `Part ${index + 1}`,
+        bg: layout.background,
+        dim: layout.dim,
+        ...(asset ? { bgAssetId: asset.id, bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined, bgVideoMuted: asset.type === 'video' ? true : undefined } : {}),
+        box: toBox(layout.box),
+        extraBoxes: layout.subtitleBox ? [{ id: nextId++, box: toBox(layout.subtitleBox) }] : [],
+      };
+    });
+    const project: PresentationProject = { id: crypto.randomUUID(), name: song.title.slice(0, 120), slides: serializable(deck), updatedAt: Date.now() };
+    const next = [project, ...projects];
+    setProjects(next);
+    localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
+    updateCategories((current) => ({ ...current, [project.id]: 'Songs' }));
+    navigate('/presentations', { replace: true });
+    openProject({ ...project, slides: deck });
+    flash(`“${song.title}” is now a presentation with ${deck.length} slides. Design it here, then add it to Studio like any presentation.`);
+  };
+
+  /* ----- background collections ----- */
+
+  const collectionOf = (asset: MediaAsset) => asset.collection || 'Uploads';
+
+  /** Adds backgrounds. Each imported folder becomes a collection named after it. */
+  const importBackgrounds = async (files: PathedFile[], asFolder: boolean) => {
+    const media = files.filter(({ file }) => isBackgroundMedia(file));
+    if (!media.length) {
+      flash('No images or videos were found there.');
+      return;
+    }
+    const namedTarget = backgroundCollection !== 'All' && backgroundCollection !== 'Uploads' ? backgroundCollection : undefined;
+    const plan = asFolder
+      ? groupByFolder(media).flatMap((folder) => folder.files.map((file) => ({ file, collection: cleanCategoryName(folder.name) || namedTarget })))
+      : media.map(({ file }) => ({ file, collection: namedTarget }));
+    const added: MediaAsset[] = [];
+    let failed = 0;
+    for (const [position, item] of plan.entries()) {
+      setBackgroundImportProgress({ message: `Adding ${item.file.name}`, current: position, total: plan.length });
+      try {
+        const stored = await saveMediaAsset(item.file, 'background', item.collection);
+        added.push({ ...stored, url: URL.createObjectURL(stored.blob) });
+      } catch {
+        failed += 1;
+      }
+    }
+    setBackgroundImportProgress(null);
+    setMediaAssets((current) => [...added, ...current]);
+    const collections = [...new Set(added.map((asset) => asset.collection).filter((name): name is string => !!name))];
+    if (collections.length === 1) setBackgroundCollection(collections[0]);
+    flash(`${added.length} ${added.length === 1 ? 'background' : 'backgrounds'} added${collections.length ? ` to ${collections.length === 1 ? `“${collections[0]}”` : `${collections.length} collections`}` : ''}${failed ? ` · ${failed} could not be read` : ''}`);
+  };
+
+  const renameBackgroundCollection = async (from: string, to: string) => {
+    const name = cleanCategoryName(to);
+    setRenamingCollection(null);
+    if (!name || name === from || from === 'Uploads') return;
+    const changed = mediaAssets.filter((asset) => asset.category !== 'slide' && asset.collection === from).map((asset) => ({ ...asset, collection: name }));
+    try {
+      await updateMediaAssetsInDb(changed.map(({ url: _url, ...stored }) => stored));
+      setMediaAssets((current) => current.map((asset) => changed.find((item) => item.id === asset.id) ?? asset));
+      setBackgroundCollection(name);
+      flash(`Collection renamed to “${name}”`);
+    } catch {
+      flash('Could not rename this collection');
+    }
+  };
+
+  const deleteBackgroundCollection = (name: string) => {
+    const doomed = backgroundAssets.filter((asset) => collectionOf(asset) === name);
+    setDeleteConfirmation({
+      title: `Delete “${name}”?`,
+      message: `Delete the ${doomed.length} ${doomed.length === 1 ? 'background' : 'backgrounds'} in this collection? Slides using them will switch back to their color background.`,
+      onConfirm: () => {
+        void (async () => {
+          const ids = new Set<string>();
+          for (const asset of doomed) {
+            try { await deleteMediaAssetFromDb(asset.id); ids.add(asset.id); URL.revokeObjectURL(asset.url); } catch { /* keep the ones that could not be removed */ }
+          }
+          const clearSlide = (slide: SlideT): SlideT => ({
+            ...(slide.bgAssetId && ids.has(slide.bgAssetId) ? { ...slide, bgAssetId: undefined, bgImage: undefined, bgVideo: undefined } : slide),
+            bgPictureRestore: slide.bgPictureRestore?.assetId && ids.has(slide.bgPictureRestore.assetId) ? undefined : slide.bgPictureRestore,
+            pictures: slide.pictures?.filter((picture) => !picture.assetId || !ids.has(picture.assetId)),
+          });
+          setMediaAssets((current) => current.filter((item) => !ids.has(item.id)));
+          setSlides((current) => current.map(clearSlide));
+          setProjects((current) => {
+            const next = current.map((project) => ({ ...project, slides: project.slides.map(clearSlide) }));
+            try { localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next)); } catch { /* Keep the editor usable if storage is full. */ }
+            return next;
+          });
+          setBackgroundCollection('All');
+          setDeleteConfirmation(null);
+          flash(`Deleted “${name}” (${ids.size} ${ids.size === 1 ? 'background' : 'backgrounds'})`);
+        })();
+      },
+    });
+  };
+
+  /** Copies this slide's background (color, image or video, and darkening) to every unlocked slide. */
+  const applyBackgroundToAllSlides = () => {
+    if (projectLocked) return;
+    const fields: Partial<SlideT> = { bg: cur.bg, dim: cur.dim, bgImage: cur.bgImage, bgVideo: cur.bgVideo, bgVideoMuted: cur.bgVideoMuted, bgAssetId: cur.bgAssetId, bgPosition: cur.bgPosition, bgPictureRestore: undefined };
+    const changed = slides.filter((slide, slideIndex) => slideIndex !== index && !slide.locked).length;
+    setSlides((list) => list.map((slide, slideIndex) => (slideIndex === index || slide.locked ? slide : { ...slide, ...fields })));
+    flash(changed ? 'Background applied to all slides' : 'Every other slide is locked');
   };
 
   const toggleProjectLock = (id: string) => {
@@ -1828,6 +2093,7 @@ export default function Presentation() {
       message: `Delete “${project.name}” and all of its slides? This cannot be undone.`,
       onConfirm: () => {
         const next = projects.filter((item) => item.id !== id);
+        updateCategories((current) => { const rest = { ...current }; delete rest[id]; return rest; });
         setProjects(next);
         localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
         if (!project.deviceOnly && accountTokenRef.current) {
@@ -1861,9 +2127,11 @@ export default function Presentation() {
     setStatus('');
   };
 
+  const flashTimerRef = useRef<number | undefined>(undefined);
   const flash = (msg: string) => {
     setStatus(msg);
-    setTimeout(() => setStatus(''), 2500);
+    window.clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = window.setTimeout(() => setStatus(''), Math.min(9000, Math.max(2500, msg.length * 45)));
   };
 
   const deleteMediaAsset = async (asset: MediaAsset) => {
@@ -1978,8 +2246,118 @@ export default function Presentation() {
   /* ----- render ----- */
 
   if (!activeProjectId) {
+    const requestedView = new URLSearchParams(location.search).get('view');
+    const libraryView = requestedView === 'songbooks' || requestedView === 'backgrounds' ? requestedView : 'presentations';
+    const libraryTabs = (
+      <div role="tablist" aria-label="Library" className="mt-3 inline-flex gap-1 rounded-xl border border-white/10 bg-panel p-1">
+        {([['presentations', 'Presentations', FolderOpen], ['backgrounds', 'Backgrounds', ImageIcon], ['songbooks', 'Songbooks', BookMarked]] as const).map(([key, label, Icon]) => (
+          <button key={key} role="tab" aria-selected={libraryView === key} onClick={() => navigate(key === 'songbooks' || key === 'backgrounds' ? `/presentations?view=${key}` : '/presentations', { replace: true })} className={`flex items-center gap-2 rounded-lg px-3.5 py-1.5 text-sm font-semibold transition ${libraryView === key ? 'bg-brand text-navy' : 'text-warm-white/65 hover:bg-white/5 hover:text-white'}`}>
+            <Icon size={15} /> {label}
+          </button>
+        ))}
+      </div>
+    );
+    if (libraryView === 'songbooks') {
+      return (
+        <div className="flex h-full min-h-0 flex-col p-6 md:p-8">
+          <div className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col">
+            <div className="mb-5 flex shrink-0 items-center gap-3">
+              <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-brand/15 text-brand"><BookMarked size={22} /></span>
+              <div>
+                <h1 className="text-2xl font-bold text-warm-white">Songbooks</h1>
+                <p className="mt-1 text-sm text-warm-white/55">Your song library, connected to Studio (Music → Songbooks) and to your presentations.</p>
+              </div>
+            </div>
+            <div className="mb-4 shrink-0">{libraryTabs}</div>
+            <div className="min-h-0 flex-1"><Songbooks embedded onMakePresentation={createPresentationFromSong} /></div>
+          </div>
+        </div>
+      );
+    }
+    if (libraryView === 'backgrounds') {
+      const names = [...new Set(backgroundAssets.map(collectionOf))].sort((a, b) => (a === 'Uploads' ? 1 : b === 'Uploads' ? -1 : naturalCompare(a, b)));
+      const chips = ['All', ...names];
+      const active = chips.includes(backgroundCollection) ? backgroundCollection : 'All';
+      const visibleBackgrounds = backgroundAssets.filter((asset) => (active === 'All' || collectionOf(asset) === active));
+      return (
+        <div className="flex h-full min-h-0 flex-col overflow-y-auto p-6 md:p-8">
+          <div className="mx-auto flex w-full max-w-6xl flex-col">
+            <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-brand/15 text-brand"><ImageIcon size={22} /></span>
+                <div>
+                  <h1 className="text-2xl font-bold text-warm-white">Backgrounds</h1>
+                  <p className="mt-1 text-sm text-warm-white/55">Import and organize local images and videos for presentations and songbooks.</p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button type="button" disabled={backgroundImportProgress !== null} onClick={() => backgroundFolderInput.current?.click()} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-2.5 text-sm font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><FolderPlus size={16} /> Import folder</button>
+                <button type="button" disabled={backgroundImportProgress !== null} onClick={() => backgroundFilesInput.current?.click()} className="flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-bold text-navy hover:brightness-110 disabled:opacity-50"><Upload size={16} /> Add files</button>
+              </div>
+            </div>
+            {libraryTabs}
+            <input ref={(element) => { backgroundFolderInput.current = element; markFolderInput(element); }} type="file" multiple hidden onChange={(event) => { const picked = pathedFilesFromInput(event.target.files); event.target.value = ''; void importBackgrounds(picked, true); }} />
+            <input ref={backgroundFilesInput} type="file" accept="image/*,video/*" multiple hidden onChange={(event) => { const picked = pathedFilesFromInput(event.target.files); event.target.value = ''; void importBackgrounds(picked, false); }} />
+            {backgroundImportProgress && <div role="status" aria-live="polite" className="my-4 rounded-xl border border-brand/25 bg-brand/5 p-3 text-sm text-warm-white/75"><div className="flex items-center gap-2"><Loader2 size={16} className="animate-spin text-brand" /><span className="min-w-0 flex-1 truncate">{backgroundImportProgress.message}</span><span className="tabular-nums text-warm-white/50">{backgroundImportProgress.current}/{backgroundImportProgress.total}</span></div><div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full bg-brand transition-[width]" style={{ width: `${backgroundImportProgress.total ? backgroundImportProgress.current / backgroundImportProgress.total * 100 : 0}%` }} /></div></div>}
+            <div className="my-5 flex flex-wrap items-center justify-between gap-3">
+              <div role="tablist" aria-label="Background collections" className="flex max-w-full flex-wrap gap-1.5">
+                {chips.map((name) => <button key={name} role="tab" aria-selected={active === name} onClick={() => { setBackgroundCollection(name); setRenamingCollection(null); }} className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${active === name ? 'border-brand bg-brand/15 text-white' : 'border-white/10 text-warm-white/60 hover:text-white'}`}>{name}<span className="ml-1.5 tabular-nums text-brand/80">{name === 'All' ? backgroundAssets.length : backgroundAssets.filter((asset) => collectionOf(asset) === name).length}</span></button>)}
+              </div>
+              <span className="text-xs text-warm-white/45">{visibleBackgrounds.length} saved locally</span>
+            </div>
+            {active !== 'All' && active !== 'Uploads' && <div className="mb-4 flex items-center justify-end gap-1 text-xs">
+              {renamingCollection === active ? <form onSubmit={(event) => { event.preventDefault(); void renameBackgroundCollection(active, collectionNameDraft); }} className="flex gap-1.5"><input autoFocus value={collectionNameDraft} onChange={(event) => setCollectionNameDraft(event.target.value)} aria-label="Collection name" maxLength={40} className="rounded-md border border-white/10 bg-panel px-2 py-1 text-white outline-none focus:border-brand" /><button type="submit" className="rounded-md bg-brand/20 p-1.5 text-brand"><Check size={14} /></button><button type="button" onClick={() => setRenamingCollection(null)} className="rounded-md p-1.5 text-warm-white/50"><X size={14} /></button></form> : <><button type="button" onClick={() => { setRenamingCollection(active); setCollectionNameDraft(active); }} className="flex items-center gap-1 rounded-md px-2 py-1 text-warm-white/60 hover:bg-white/10"><Pencil size={12} /> Rename collection</button><button type="button" onClick={() => deleteBackgroundCollection(active)} className="flex items-center gap-1 rounded-md px-2 py-1 text-red-300/80 hover:bg-red-500/10"><Trash2 size={12} /> Delete collection</button></>}
+            </div>}
+            {visibleBackgrounds.length ? <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+              {visibleBackgrounds.map((asset) => <article key={asset.id} className="group relative overflow-hidden rounded-xl border border-white/10 bg-panel transition hover:border-brand/50">
+                <button type="button" onClick={() => setVideoPreviewAsset(asset.type === 'video' ? asset : null)} title={asset.type === 'video' ? `Preview ${asset.name}` : asset.name} className="block w-full text-left">
+                  <span className="relative block aspect-video overflow-hidden bg-navy">{asset.type === 'image' ? <img src={asset.url} alt={asset.name} loading="lazy" className="h-full w-full object-cover" /> : <video src={`${asset.url}#t=0.5`} muted preload="metadata" className="h-full w-full object-cover" />}<span className="absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white">{asset.type === 'video' ? 'VIDEO' : 'IMAGE'}</span></span>
+                  <span className="block truncate px-2 pt-2 text-xs font-semibold text-warm-white">{asset.name}</span><span className="block truncate px-2 pb-2 text-[10px] text-warm-white/45">{collectionOf(asset)} · {formatMediaSizeInKb(asset.blob.size)}</span>
+                </button>
+                {asset.type === 'video' && <button type="button" aria-label={`Play ${asset.name}`} onClick={() => setVideoPreviewAsset(asset)} className="absolute left-2 top-2 rounded-md bg-black/75 p-1.5 text-white opacity-0 transition group-hover:opacity-100 focus:opacity-100"><Play size={13} /></button>}
+                <button type="button" aria-label={`Delete ${asset.name}`} title="Remove from background library" onClick={() => setDeleteConfirmation({ title: 'Delete uploaded background?', message: `Delete “${asset.name}” from saved uploads? Slides using it will switch back to their color background.`, onConfirm: () => { void deleteMediaAsset(asset); } })} className="absolute right-2 top-2 rounded-md border border-white/15 bg-black/75 p-1.5 text-white/80 opacity-0 transition hover:bg-red-600 group-hover:opacity-100 focus:opacity-100"><Trash2 size={13} /></button>
+              </article>)}
+            </div> : <div className="mt-2 rounded-2xl border border-dashed border-white/15 px-6 py-14 text-center"><FolderPlus size={30} className="mx-auto text-warm-white/35" /><p className="mt-3 font-semibold text-warm-white">No backgrounds in this collection yet</p><p className="mt-1 text-sm text-warm-white/50">Import a folder of up to your whole background library, or add individual image and video files.</p><p className="mt-3 text-xs text-warm-white/40">Choose a background on a slide from its Background panel, or in a songbook from Design → Background.</p></div>}
+            <p className="mt-5 text-xs leading-relaxed text-warm-white/40">Backgrounds are stored on this computer and shared by the presentation editor and songbook designer. Imported folders are organized as collections.</p>
+          </div>
+          {videoPreviewAsset && <div className="fixed inset-0 z-130 flex items-center justify-center bg-black/85 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoPreviewAsset(null); }}>
+            <section role="dialog" aria-modal="true" aria-label={`Preview ${videoPreviewAsset.name}`} className="w-full max-w-4xl rounded-2xl border border-white/10 bg-[#101d2a] p-4 shadow-2xl">
+              <div className="mb-3 flex items-center justify-between gap-3"><h2 className="truncate text-sm font-semibold text-warm-white">{videoPreviewAsset.name}</h2><button type="button" onClick={() => setVideoPreviewAsset(null)} aria-label="Close video preview" className="rounded-lg p-2 text-warm-white/60 hover:bg-white/10 hover:text-white"><X size={17} /></button></div>
+              <video src={videoPreviewAsset.url} controls autoPlay playsInline className="max-h-[70vh] w-full rounded-lg bg-black" />
+              <p className="mt-3 text-xs text-warm-white/50">To use this background, open a presentation and choose it from the Background panel, or select it in a songbook’s Design → Background.</p>
+            </section>
+          </div>}
+        </div>
+      );
+    }
+    const query = librarySearch.trim().toLocaleLowerCase();
+    const inCategory = (project: PresentationProject, category: string) => category === 'All'
+      || (category === 'Uncategorized' ? !projectCategories[project.id] : projectCategories[project.id] === category);
+    const visibleProjects = projects.filter((project) => inCategory(project, libraryCategory)
+      && (!query || project.name.toLocaleLowerCase().includes(query) || (projectCategories[project.id] ?? '').toLocaleLowerCase().includes(query)));
+    const usedCategories = [...new Set(projects.map((project) => projectCategories[project.id]).filter((name): name is string => !!name))].sort(naturalCompare);
+    const filterChips = ['All', ...usedCategories, ...(projects.some((project) => !projectCategories[project.id]) && usedCategories.length ? ['Uncategorized'] : [])];
+    if (libraryCategory !== 'All' && !filterChips.includes(libraryCategory)) filterChips.push(libraryCategory);
+    const countIn = (category: string) => projects.filter((project) => inCategory(project, category)).length;
     return (
-      <div className="h-full min-h-0 overflow-y-auto p-6 md:p-8">
+      <div
+        className="relative h-full min-h-0 overflow-y-auto p-6 md:p-8"
+        onDragOver={(event) => { if (!dragHasFiles(event) || slideImportProgress) return; event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setLibraryDragOver(true); }}
+        onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setLibraryDragOver(false); }}
+        onDrop={(event) => {
+          if (!dragHasFiles(event)) return;
+          event.preventDefault();
+          setLibraryDragOver(false);
+          if (slideImportProgress) return;
+          const transfer = event.dataTransfer;
+          void readDroppedFiles(transfer).then((files) => importSlideFolder(files)).catch(() => flash('Could not read the dropped files.'));
+        }}
+      >
+        {libraryDragOver && <div className="pointer-events-none absolute inset-3 z-40 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-brand bg-studio/85 text-center backdrop-blur-sm">
+          <FolderPlus size={40} className="text-brand" />
+          <p className="mt-3 text-lg font-semibold text-warm-white">Drop to import slides</p>
+          <p className="mt-1 max-w-sm text-sm text-warm-white/60">Each folder of images becomes a presentation. PowerPoint files are converted too.</p>
+        </div>}
         <div className="mx-auto max-w-6xl">
           <div className="mb-7 flex flex-wrap items-center justify-between gap-4">
             <div>
@@ -1991,11 +2369,28 @@ export default function Presentation() {
                   <p className="mt-1 text-xs text-warm-white/40">{accountSyncStatus}</p>
                 </div>
               </div>
+              {libraryTabs}
             </div>
             <div className="flex flex-wrap gap-2">
-              <button disabled={slideImportProgress !== null} onClick={() => slideImportInput.current?.click()} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-3 text-sm font-semibold text-warm-white transition hover:bg-white/5 disabled:cursor-wait disabled:opacity-70">
-                {slideImportProgress ? <Loader2 size={17} className="animate-spin" /> : <Upload size={17} />} {slideImportProgress ? 'Importing…' : 'Import Slides'}
+              <div className="relative">
+              <button disabled={slideImportProgress !== null} aria-haspopup="menu" aria-expanded={importMenuOpen} onClick={() => setImportMenuOpen((open) => !open)} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-3 text-sm font-semibold text-warm-white transition hover:bg-white/5 disabled:cursor-wait disabled:opacity-70">
+                {slideImportProgress ? <Loader2 size={17} className="animate-spin" /> : <Upload size={17} />} {slideImportProgress ? 'Importing…' : 'Import'} {!slideImportProgress && <ChevronDown size={15} className={`transition ${importMenuOpen ? 'rotate-180' : ''}`} />}
               </button>
+              {importMenuOpen && <>
+                <div className="fixed inset-0 z-20" onClick={() => setImportMenuOpen(false)} />
+                <div role="menu" className="absolute right-0 top-full z-30 mt-2 w-72 rounded-xl border border-white/10 bg-navy p-1.5 text-sm text-warm-white shadow-xl">
+                  <button role="menuitem" onClick={() => { setImportMenuOpen(false); slideImportInput.current?.click(); }} className="flex w-full items-start gap-3 rounded-lg px-3 py-2.5 text-left hover:bg-white/10">
+                    <Upload size={17} className="mt-0.5 shrink-0 text-brand" />
+                    <span><span className="block font-semibold">Slide files</span><span className="block text-xs text-warm-white/50">Pick images or a PowerPoint — they become one presentation</span></span>
+                  </button>
+                  <button role="menuitem" onClick={() => { setImportMenuOpen(false); slideFolderInput.current?.click(); }} className="flex w-full items-start gap-3 rounded-lg px-3 py-2.5 text-left hover:bg-white/10">
+                    <FolderPlus size={17} className="mt-0.5 shrink-0 text-brand" />
+                    <span><span className="block font-semibold">Folder of slides</span><span className="block text-xs text-warm-white/50">Each folder inside becomes its own presentation</span></span>
+                  </button>
+                  <p className="px-3 pb-1 pt-2 text-[11px] text-warm-white/40">Tip: you can also drag folders onto this page.</p>
+                </div>
+              </>}
+              </div>
               <button onClick={createProject} className="flex items-center gap-2 rounded-xl bg-brand px-4 py-3 text-sm font-bold text-navy shadow-lg shadow-black/20 transition hover:brightness-110">
                 <Plus size={18} /> Create Presentation
               </button>
@@ -2012,6 +2407,31 @@ export default function Presentation() {
               event.target.value = '';
             }}
           />
+          <input
+            ref={(element) => { slideFolderInput.current = element; markFolderInput(element); }}
+            type="file"
+            multiple
+            hidden
+            onChange={(event) => {
+              const picked = pathedFilesFromInput(event.target.files);
+              event.target.value = '';
+              void importSlideFolder(picked);
+            }}
+          />
+
+          {projects.length > 0 && <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center">
+            <label className="relative block md:w-72">
+              <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-warm-white/40" />
+              <input value={librarySearch} onChange={(event) => setLibrarySearch(event.target.value)} placeholder="Search presentations" aria-label="Search presentations" className="w-full rounded-xl border border-white/10 bg-panel py-2.5 pl-9 pr-3 text-sm text-warm-white outline-none placeholder:text-warm-white/35 focus:border-brand" />
+            </label>
+            <div role="tablist" aria-label="Categories" className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto pb-1 md:pb-0">
+              {filterChips.map((category) => (
+                <button key={category} role="tab" aria-selected={libraryCategory === category} onClick={() => setLibraryCategory(category)} className={`flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition ${libraryCategory === category ? 'border-brand bg-brand/15 text-white' : 'border-white/10 text-warm-white/60 hover:border-white/25 hover:text-warm-white'}`}>
+                  {category}<span className={`tabular-nums ${libraryCategory === category ? 'text-brand' : 'text-warm-white/35'}`}>{countIn(category)}</span>
+                </button>
+              ))}
+            </div>
+          </div>}
 
           {slideImportProgress && <div role="status" aria-live="polite" className="mb-5 rounded-xl border border-brand/30 bg-brand/5 p-4">
             <div className="flex items-center gap-3">
@@ -2030,9 +2450,15 @@ export default function Presentation() {
             </div>
           </div>}
 
+          {projects.length > 0 && !visibleProjects.length && <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/15 bg-panel/50 px-6 py-16 text-center">
+            <Search size={26} className="text-warm-white/30" />
+            <p className="mt-3 text-sm font-semibold text-warm-white">No presentations match</p>
+            <button onClick={() => { setLibrarySearch(''); setLibraryCategory('All'); }} className="mt-3 text-xs font-semibold text-brand hover:underline">Show all presentations</button>
+          </div>}
+
           {projects.length ? (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {projects.map((project) => {
+              {visibleProjects.map((project) => {
                 const firstSlide = project.slides[0];
                 const asset = mediaAssets.find((item) => item.id === firstSlide?.bgAssetId);
                 const cover = firstSlide ? { ...firstSlide, bgImage: asset?.type === 'image' ? asset.url : firstSlide.bgImage, bgVideo: asset?.type === 'video' ? asset.url : firstSlide.bgVideo } : null;
@@ -2047,20 +2473,33 @@ export default function Presentation() {
                       <div className="flex items-center justify-between gap-3 p-4">
                         <div className="min-w-0">
                           <p className="truncate font-semibold text-warm-white">{project.name}</p>
-                          <p className="mt-1 text-xs text-warm-white/50">{project.slides.length} {project.slides.length === 1 ? 'slide' : 'slides'} · Updated {new Date(project.updatedAt).toLocaleDateString()}</p>
+                          <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-warm-white/50">{projectCategories[project.id] && <span className="inline-flex items-center gap-1 rounded-md bg-white/[0.07] px-1.5 py-0.5 text-[11px] font-semibold text-warm-white/75"><Tag size={11} />{projectCategories[project.id]}</span>}<span>{project.slides.length} {project.slides.length === 1 ? 'slide' : 'slides'} · Updated {new Date(project.updatedAt).toLocaleDateString()}</span></p>
                           {(project.hasLocalMedia || project.deviceOnly) && <p className="mt-1 text-[11px] text-amber-200/80">Imported media stays on its original device</p>}
                         </div>
                         <ChevronRight size={18} className="shrink-0 text-warm-white/40 transition group-hover:translate-x-0.5 group-hover:text-brand" />
                       </div>
                     </button>
-                    <button aria-label={`Options for ${project.name}`} onClick={() => setProjectMenuFor(projectMenuFor === project.id ? null : project.id)} className="absolute right-3 top-3 z-20 rounded-lg bg-black/65 p-2 text-white opacity-0 transition hover:bg-black/85 group-hover:opacity-100 focus:opacity-100">
+                    <button data-project-menu aria-label={`Options for ${project.name}`} onClick={() => setProjectMenuFor(projectMenuFor === project.id ? null : project.id)} className="absolute right-3 top-3 z-20 rounded-lg bg-black/65 p-2 text-white opacity-0 transition hover:bg-black/85 group-hover:opacity-100 focus:opacity-100">
                       <MoreHorizontal size={16} />
                     </button>
                     {projectMenuFor === project.id && <>
-                      <div className="fixed inset-0 z-20" onClick={() => setProjectMenuFor(null)} />
-                      <div className="absolute right-3 top-12 z-30 w-48 rounded-xl border border-white/10 bg-navy p-1.5 text-sm text-warm-white shadow-xl">
+                      <div data-project-menu className="absolute right-3 top-12 z-30 w-60 rounded-xl border border-white/10 bg-navy p-1.5 text-sm text-warm-white shadow-xl">
                         <button onClick={() => toggleProjectLock(project.id)} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-white/10">{project.locked ? <Unlock size={15} /> : <Lock size={15} />}{project.locked ? 'Unlock presentation' : 'Lock presentation'}</button>
                         <button onClick={() => deleteProject(project.id)} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-red-300 hover:bg-red-500/10"><Trash2 size={15} /> Delete presentation</button>
+                        <div className="my-1.5 border-t border-white/10" />
+                        <div className="max-h-36 overflow-y-auto">
+                        <p className="px-3 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-wider text-warm-white/40">Category</p>
+                        {categoryNames.map((category) => (
+                          <button key={category} onClick={() => setProjectCategory(project.id, category)} className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left hover:bg-white/10">
+                            <span className="flex w-4 justify-center">{projectCategories[project.id] === category && <Check size={14} className="text-brand" />}</span>{category}
+                          </button>
+                        ))}
+                        <form onSubmit={(event) => { event.preventDefault(); if (cleanCategoryName(newCategoryDraft)) setProjectCategory(project.id, newCategoryDraft); }} className="flex items-center gap-1.5 px-2 py-1.5">
+                          <input value={newCategoryDraft} onChange={(event) => setNewCategoryDraft(event.target.value)} placeholder="New category…" aria-label="New category name" maxLength={40} className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/20 px-2 py-1 text-xs text-white outline-none focus:border-brand" />
+                          <button type="submit" disabled={!cleanCategoryName(newCategoryDraft)} aria-label="Add category" className="rounded-md bg-brand/20 p-1 text-brand disabled:opacity-30"><Plus size={14} /></button>
+                        </form>
+                        {projectCategories[project.id] && <button onClick={() => setProjectCategory(project.id, null)} className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-warm-white/60 hover:bg-white/10"><span className="w-4" />Remove category</button>}
+                        </div>
                       </div>
                     </>}
                   </div>
@@ -2071,11 +2510,12 @@ export default function Presentation() {
             <div className="flex min-h-[min(480px,65vh)] flex-col items-center justify-center rounded-2xl border border-dashed border-white/15 bg-panel/50 px-6 text-center">
               <span className="flex h-16 w-16 items-center justify-center rounded-2xl bg-white/5 text-brand/80"><FolderOpen size={30} /></span>
               <h2 className="mt-5 text-lg font-semibold text-warm-white">No presentations yet</h2>
-              <p className="mt-2 max-w-sm text-sm leading-relaxed text-warm-white/55">Create a presentation to start adding slides, lyrics, scripture, images, and shapes.</p>
+              <p className="mt-2 max-w-sm text-sm leading-relaxed text-warm-white/55">Create a presentation, or drag a folder of slides here to import it.</p>
               <button onClick={createProject} className="mt-5 flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-bold text-navy transition hover:brightness-110"><Plus size={17} /> Create Presentation</button>
             </div>
           )}
         </div>
+        {status && <div role="status" className="pointer-events-none fixed bottom-16 left-1/2 z-50 max-w-[min(640px,90vw)] -translate-x-1/2 rounded-xl border border-white/10 bg-navy/95 px-4 py-2.5 text-center text-sm text-warm-white shadow-2xl backdrop-blur">{status}</div>}
         <ConfirmationModal
           open={deleteConfirmation !== null}
           title={deleteConfirmation?.title ?? ''}
@@ -2114,19 +2554,19 @@ export default function Presentation() {
           <ul className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
             {slides.map((s, i) => (
               <li
-                key={s.id}
-                draggable
-                onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(i)); setDraggingSlide(i); }}
+                key={`${s.id}:${i}`}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => { e.preventDefault(); const from = Number(e.dataTransfer.getData('text/plain')); reorderSlides(from, i); setDraggingSlide(null); }}
                 onDragEnd={() => setDraggingSlide(null)}
-                className={`relative cursor-grab active:cursor-grabbing ${draggingSlide === i ? 'opacity-40' : ''}`}
+                className={`relative ${draggingSlide === i ? 'opacity-40' : ''}`}
               >
                 <button
+                  draggable={!projectLocked}
+                  onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(i)); setDraggingSlide(i); }}
                   onClick={() => setIndex(i)}
                   aria-label={`Open slide ${i + 1}`}
                   aria-pressed={i === index}
-                  className={`relative block aspect-video w-full overflow-hidden rounded-lg border-2 transition ${
+                  className={`relative block aspect-video w-full cursor-grab overflow-hidden rounded-lg border-2 transition active:cursor-grabbing ${
                     i === index
                       ? 'border-brand ring-2 ring-brand/40'
                       : 'border-white/10 hover:border-white/40'
@@ -2149,17 +2589,19 @@ export default function Presentation() {
 
                 <button
                   aria-label={`Options for slide ${i + 1}`}
-                  onClick={() => setMenuFor(menuFor === s.id ? null : s.id)}
+                  onClick={() => setMenuFor(menuFor === `${s.id}:${i}` ? null : `${s.id}:${i}`)}
                   className="absolute right-1.5 top-1.5 z-10 rounded bg-black/65 p-1 text-white hover:bg-black/85"
                 >
                   <MoreHorizontal size={14} />
                 </button>
 
-                {menuFor === s.id && (
+                {menuFor === `${s.id}:${i}` && (
                   <>
                     <div className="fixed inset-0 z-10" onClick={() => setMenuFor(null)} />
                     <div className="absolute right-1.5 top-9 z-20 w-36 rounded-lg border border-white/10 bg-navy p-1 text-xs text-warm-white shadow-xl">
                       {[
+                        { label: 'Add slide above', run: () => insertSlide(makeSlide({ bg: BGS[4], text: 'New slide', size: 96 }), i), off: projectLocked },
+                        { label: 'Add slide below', run: () => insertSlide(makeSlide({ bg: BGS[4], text: 'New slide', size: 96 }), i + 1), off: projectLocked },
                         { label: 'Duplicate', run: () => duplicate(i), off: false },
                         { label: 'Move up', run: () => move(i, -1), off: i === 0 },
                         { label: 'Move down', run: () => move(i, 1), off: i === slides.length - 1 },
@@ -2299,7 +2741,7 @@ export default function Presentation() {
                 const align = (value: Align) => updateBoxById(id, { align: value });
                 return <div data-slide-object key={id ?? 'main'} onPointerDown={startDrag('move', id, textBox)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); if (cur.locked) return; setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); setPictureMenu({ kind: 'text', id, x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 220) }); }} className={`absolute z-10 cursor-move ${selected ? 'border border-white' : 'border border-transparent'}`} onClick={(e) => { e.stopPropagation(); setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); }} style={{ left: `${textBox.x}%`, top: `${textBox.y}%`, width: `${textBox.w}%`, height: `${textBox.h}%`, zIndex: typeof textBox.layerOrder === 'number' ? textBox.layerOrder : textBox.layerOrder === 'front' ? 5000 : textBox.layerOrder === 'back' ? 0 : id === null ? 3000 : 3001 + (cur.extraBoxes ?? []).findIndex((item) => item.id === id), touchAction: 'none' }}>
                   {selected && <div className="absolute inset-0 z-0 overflow-hidden px-1" style={{ background: textBox.boxBgOn ? textBox.boxBg : undefined }}>
-                    <div ref={canvasTextMeasureRef} aria-hidden className="pointer-events-none invisible absolute left-0 top-0 w-full whitespace-pre-wrap px-1" style={{ overflowWrap: 'anywhere', fontFamily: FONTS[textBox.font] ?? `"${textBox.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(textBox.size / 1280) * 100}cqw`, fontWeight: textBox.bold ? 800 : 500, fontStyle: textBox.italic ? 'italic' : 'normal', lineHeight: textBox.lineHeight, letterSpacing: `${(textBox.letterSpacing / 1280) * 100}cqw` }}>{textBox.text || ' '}</div>
+                    <div ref={canvasTextMeasureRef} aria-hidden className="pointer-events-none invisible absolute left-0 top-0 w-full whitespace-pre-wrap px-1" style={{ overflowWrap: 'anywhere', fontFamily: FONTS[textBox.font] ?? `"${textBox.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(textBox.size / 1280) * 100}cqw`, fontWeight: textBox.bold ? 800 : 500, fontStyle: textBox.italic ? 'italic' : 'normal', textTransform: textBox.uppercase ? 'uppercase' : undefined, lineHeight: textBox.lineHeight, letterSpacing: `${(textBox.letterSpacing / 1280) * 100}cqw` }}>{textBox.text || ' '}</div>
                     <textarea
                       ref={canvasTextRef}
                       aria-label="Edit text on slide"
@@ -2318,6 +2760,7 @@ export default function Presentation() {
                         fontWeight: textBox.bold ? 800 : 500,
                         fontStyle: textBox.italic ? 'italic' : 'normal',
                         textDecoration: textBox.underline ? 'underline' : 'none',
+                        textTransform: textBox.uppercase ? 'uppercase' : undefined,
                         lineHeight: textBox.lineHeight,
                         letterSpacing: `${(textBox.letterSpacing / 1280) * 100}cqw`,
                         color: textBox.color,
@@ -2529,6 +2972,9 @@ export default function Presentation() {
                     <IconBtn label="Underline" active={box.underline} onClick={() => updateBox({ underline: !box.underline })}>
                       <Underline size={15} />
                     </IconBtn>
+                    <IconBtn label={box.uppercase ? 'All caps on (click for normal text)' : 'All caps'} active={!!box.uppercase} onClick={() => updateBox({ uppercase: !box.uppercase })}>
+                      <span className="text-[12px] font-bold leading-none tracking-tight">{box.uppercase ? 'AA' : 'Aa'}</span>
+                    </IconBtn>
                     <span className="mx-1 h-5 w-px bg-white/10" />
                     <IconBtn label="Align left" active={box.align === 'left'} onClick={() => updateBox({ align: 'left' })}>
                       <AlignLeft size={15} />
@@ -2703,38 +3149,90 @@ export default function Presentation() {
                 </div>
                 {(cur.bgImage || cur.bgVideo) && <button type="button" onClick={() => removeBackgroundMedia(false)} className="rounded-lg border border-white/10 px-3 py-2 text-left text-xs text-red-200 hover:bg-red-500/10">Remove background {cur.bgVideo ? 'video' : 'image'}</button>}
                 {cur.bgImage && <p className="text-[11px] text-warm-white/50">Double-click the background on the slide, then drag it to reposition.</p>}
-                <p className="text-[10px] leading-relaxed text-warm-white/45">Choose from uploads added in Content. Smaller high quality copies are used when they save space; original uploads are kept.</p>
-                <div>
-                  <div className="mb-2 flex items-center justify-between">
-                    <p className="text-xs font-semibold text-warm-white/80">Recent uploads</p>
+                <button type="button" disabled={projectLocked || slides.length < 2} onClick={applyBackgroundToAllSlides} title="Copy this slide's background and darkening to every unlocked slide" className="flex items-center justify-center gap-2 rounded-lg border border-brand/40 bg-brand/10 px-3 py-2 text-xs font-semibold text-warm-white transition hover:bg-brand/20 disabled:cursor-not-allowed disabled:opacity-40"><Check size={14} className="text-brand" /> Use this background on all slides</button>
+                <div
+                  className={`relative rounded-xl transition ${backgroundDragOver ? 'ring-2 ring-brand ring-offset-2 ring-offset-panel' : ''}`}
+                  onDragOver={(event) => { if (!dragHasFiles(event) || backgroundImportProgress) return; event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setBackgroundDragOver(true); }}
+                  onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setBackgroundDragOver(false); }}
+                  onDrop={(event) => {
+                    if (!dragHasFiles(event)) return;
+                    event.preventDefault();
+                    setBackgroundDragOver(false);
+                    if (backgroundImportProgress) return;
+                    void readDroppedFiles(event.dataTransfer).then((files) => importBackgrounds(files, files.some(({ path }) => path.includes('/')))).catch(() => flash('Could not read the dropped files.'));
+                  }}
+                >
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-xs font-semibold text-warm-white/80">Background library</p>
                     <span className="text-[10px] text-warm-white/45">{backgroundAssets.length} saved</span>
                   </div>
-                  {backgroundAssets.length === 0 ? (
-                    <p className="rounded-lg border border-dashed border-white/15 p-3 text-center text-[11px] text-warm-white/50">Images and videos added in Content will appear here to use as backgrounds.</p>
-                  ) : (
-                    <div className="grid max-h-48 grid-cols-2 gap-2 overflow-y-auto pr-1">
-                      {backgroundAssets.map((asset) => (
-                        <div key={asset.id} className={`group relative overflow-hidden rounded-lg border transition ${cur.bgAssetId === asset.id ? 'border-brand ring-1 ring-brand/40' : 'border-white/10 hover:border-white/40'}`}>
-                          <button onClick={() => applyMediaAsset(asset)} title={`Set ${asset.name} as the slide background`} className="block w-full text-left">
-                            <span className="relative block aspect-video overflow-hidden bg-navy">
-                              {asset.type === 'image' ? <img src={asset.url} alt={asset.name} className="h-full w-full object-cover" /> : <video src={asset.url} muted className="h-full w-full object-cover" />}
-                              {asset.type === 'video' && <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white">VIDEO</span>}
-                            </span>
-                            <span className="block truncate px-1.5 pt-1 text-[10px] text-warm-white/75">{asset.name}</span>
-                            <span className="block truncate px-1.5 pb-1 text-[9px] text-warm-white/45">{asset.optimized && asset.originalBlob ? `${formatMediaSizeInKb(asset.originalBlob.size)} → ` : ''}{formatMediaSizeInKb(asset.blob.size)}{asset.optimized ? ' · optimized copy' : ''}</span>
-                          </button>
-                          {asset.type === 'video' && <button type="button" aria-label={`Preview ${asset.name}`} title={`Play preview of ${asset.name}`} onClick={() => setVideoPreviewAsset(asset)} className="absolute bottom-2 right-2 z-10 rounded-md bg-black/80 p-1.5 text-white hover:bg-brand"><Play size={13} /></button>}
-                          <button type="button" aria-label={`Delete ${asset.name}`} title={`Delete ${asset.name}`} onClick={() => setDeleteConfirmation({
-                            title: 'Delete uploaded background?',
-                            message: `Delete “${asset.name}” from saved uploads? Slides using this file will switch back to their color background.`,
-                            onConfirm: () => { void deleteMediaAsset(asset); },
-                          })} className="absolute right-1 top-1 z-10 rounded-md border border-white/15 bg-black/75 p-1.5 text-white/75 opacity-0 shadow transition hover:bg-red-600 hover:text-white focus:opacity-100 group-hover:opacity-100">
-                            <Trash2 size={12} />
-                          </button>
+                  <div className="mb-2 grid grid-cols-2 gap-1.5">
+                    <button type="button" disabled={backgroundImportProgress !== null} onClick={() => backgroundFolderInput.current?.click()} className="flex items-center justify-center gap-1.5 rounded-lg border border-white/15 px-2 py-2 text-[11px] font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><FolderPlus size={14} /> Import folder</button>
+                    <button type="button" disabled={backgroundImportProgress !== null} onClick={() => backgroundFilesInput.current?.click()} className="flex items-center justify-center gap-1.5 rounded-lg border border-white/15 px-2 py-2 text-[11px] font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><Upload size={14} /> Add files</button>
+                  </div>
+                  {backgroundImportProgress && <div role="status" aria-live="polite" className="mb-2 rounded-lg border border-brand/20 bg-brand/5 px-3 py-2 text-[11px] text-warm-white/75">
+                    <div className="flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-2"><Loader2 size={13} className="shrink-0 animate-spin text-brand" /><span className="truncate">{backgroundImportProgress.message}</span></span><span className="shrink-0 tabular-nums text-warm-white/50">{backgroundImportProgress.current}/{backgroundImportProgress.total}</span></div>
+                    <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-brand transition-[width]" style={{ width: `${backgroundImportProgress.total ? backgroundImportProgress.current / backgroundImportProgress.total * 100 : 0}%` }} /></div>
+                  </div>}
+                  {backgroundAssets.length > 0 && (() => {
+                    const names = [...new Set(backgroundAssets.map(collectionOf))].sort((a, b) => (a === 'Uploads' ? 1 : b === 'Uploads' ? -1 : naturalCompare(a, b)));
+                    const chips = ['All', ...names];
+                    const active = chips.includes(backgroundCollection) ? backgroundCollection : 'All';
+                    return (
+                      <>
+                        <div role="tablist" aria-label="Background collections" className="mb-2 flex max-h-[4.5rem] flex-wrap gap-1 overflow-y-auto">
+                          {chips.map((name) => (
+                            <button key={name} role="tab" aria-selected={active === name} onClick={() => { setBackgroundCollection(name); setRenamingCollection(null); }} className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold transition ${active === name ? 'border-brand bg-brand/15 text-white' : 'border-white/10 text-warm-white/55 hover:text-warm-white'}`}>
+                              {name} <span className={active === name ? 'text-brand' : 'text-warm-white/35'}>{name === 'All' ? backgroundAssets.length : backgroundAssets.filter((asset) => collectionOf(asset) === name).length}</span>
+                            </button>
+                          ))}
                         </div>
-                      ))}
+                        {active !== 'All' && active !== 'Uploads' && (renamingCollection === active ? (
+                          <form onSubmit={(event) => { event.preventDefault(); void renameBackgroundCollection(active, collectionNameDraft); }} className="mb-2 flex items-center gap-1.5">
+                            <input autoFocus value={collectionNameDraft} onChange={(event) => setCollectionNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setRenamingCollection(null); } }} aria-label="Collection name" maxLength={40} className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/20 px-2 py-1 text-xs text-white outline-none focus:border-brand" />
+                            <button type="submit" aria-label="Save collection name" className="rounded-md bg-brand/20 p-1.5 text-brand"><Check size={13} /></button>
+                            <button type="button" aria-label="Cancel rename" onClick={() => setRenamingCollection(null)} className="rounded-md p-1.5 text-warm-white/50 hover:bg-white/10"><X size={13} /></button>
+                          </form>
+                        ) : (
+                          <div className="mb-2 flex items-center justify-end gap-1 text-[10px]">
+                            <button type="button" onClick={() => { setRenamingCollection(active); setCollectionNameDraft(active); }} className="flex items-center gap-1 rounded-md px-2 py-1 text-warm-white/60 hover:bg-white/10 hover:text-warm-white"><Pencil size={11} /> Rename</button>
+                            <button type="button" onClick={() => deleteBackgroundCollection(active)} className="flex items-center gap-1 rounded-md px-2 py-1 text-red-300/80 hover:bg-red-500/10 hover:text-red-200"><Trash2 size={11} /> Delete collection</button>
+                          </div>
+                        ))}
+                        <div className="grid max-h-64 grid-cols-2 gap-2 overflow-y-auto pr-1">
+                          {backgroundAssets.filter((asset) => active === 'All' || collectionOf(asset) === active).map((asset) => (
+                          <div key={asset.id} className={`group relative overflow-hidden rounded-lg border transition ${cur.bgAssetId === asset.id ? 'border-brand ring-1 ring-brand/40' : 'border-white/10 hover:border-white/40'}`}>
+                            <button onClick={() => applyMediaAsset(asset)} title={`Set ${asset.name} as the slide background`} className="block w-full text-left">
+                              <span className="relative block aspect-video overflow-hidden bg-navy">
+                                {asset.type === 'image' ? <img src={asset.url} alt={asset.name} className="h-full w-full object-cover" /> : <video src={asset.url} muted className="h-full w-full object-cover" />}
+                                {asset.type === 'video' && <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white">VIDEO</span>}
+                              </span>
+                              <span className="block truncate px-1.5 pt-1 text-[10px] text-warm-white/75">{asset.name}</span>
+                              <span className="block truncate px-1.5 pb-1 text-[9px] text-warm-white/45">{asset.optimized && asset.originalBlob ? `${formatMediaSizeInKb(asset.originalBlob.size)} → ` : ''}{formatMediaSizeInKb(asset.blob.size)}{asset.optimized ? ' · optimized copy' : ''}</span>
+                            </button>
+                            {asset.type === 'video' && <button type="button" aria-label={`Preview ${asset.name}`} title={`Play preview of ${asset.name}`} onClick={() => setVideoPreviewAsset(asset)} className="absolute bottom-2 right-2 z-10 rounded-md bg-black/80 p-1.5 text-white hover:bg-brand"><Play size={13} /></button>}
+                            <button type="button" aria-label={`Delete ${asset.name}`} title={`Delete ${asset.name}`} onClick={() => setDeleteConfirmation({
+                              title: 'Delete uploaded background?',
+                              message: `Delete “${asset.name}” from saved uploads? Slides using this file will switch back to their color background.`,
+                              onConfirm: () => { void deleteMediaAsset(asset); },
+                            })} className="absolute right-1 top-1 z-10 rounded-md border border-white/15 bg-black/75 p-1.5 text-white/75 opacity-0 shadow transition hover:bg-red-600 hover:text-white focus:opacity-100 group-hover:opacity-100">
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                          ))}
+                        </div>
+                      </>
+                    );
+                  })()}
+                  {backgroundAssets.length === 0 && !backgroundImportProgress && (
+                    <div className="rounded-lg border border-dashed border-white/15 p-4 text-center text-[11px] leading-relaxed text-warm-white/50">
+                      <FolderPlus size={20} className="mx-auto mb-1.5 text-warm-white/30" />
+                      Import a folder of backgrounds, or drag one here. Each folder becomes a collection, like “Christmas” or “Motion loops”.
                     </div>
                   )}
+                  <p className="mt-2 text-[10px] leading-relaxed text-warm-white/40">Images and videos added in Content also appear under Uploads. Smaller high-quality copies are used when they save space.</p>
+                  <input ref={(element) => { backgroundFolderInput.current = element; markFolderInput(element); }} type="file" multiple hidden onChange={(event) => { const picked = pathedFilesFromInput(event.target.files); event.target.value = ''; void importBackgrounds(picked, true); }} />
+                  <input ref={backgroundFilesInput} type="file" accept="image/*,video/*" multiple hidden onChange={(event) => { const picked = pathedFilesFromInput(event.target.files); event.target.value = ''; void importBackgrounds(picked, false); }} />
                 </div>
                 {cur.bgVideo && (
                   <button

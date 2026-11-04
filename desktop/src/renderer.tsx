@@ -1,7 +1,7 @@
 import './index.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { HashRouter, Routes, Route } from 'react-router-dom';
+import { HashRouter, Navigate, Routes, Route } from 'react-router-dom';
 import Layout from './components/Layout';
 import { StudioDisplayOutput } from './Routes/Studio';
 import Presentation from './Routes/Presentation';
@@ -18,6 +18,8 @@ createRoot(document.getElementById('root')!).render(
         <Route element={<Layout />}>
           <Route index element={null} />
           <Route path="/presentations" element={<Presentation />} />
+          {/* Songbooks now live in the Presentations page. */}
+          <Route path="/songbooks" element={<Navigate to="/presentations?view=songbooks" replace />} />
           <Route path="/settings" element={<Settings />} />
         </Route>       
         <Route path="/studio-output" element={<StudioDisplayOutput />} />

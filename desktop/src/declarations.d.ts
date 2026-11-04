@@ -12,6 +12,9 @@ interface Window {
     stopMobileCamPairing: () => Promise<boolean>;
     openStudioDisplay: (displayId: number) => Promise<{ ok: boolean; message?: string }>;
     closeStudioDisplay: () => Promise<boolean>;
+    getOpenStudioDisplays: () => Promise<number[]>;
+    closeStudioDisplays: (displayIds?: number[]) => Promise<boolean>;
+    onStudioDisplaysChanged: (callback: (openDisplayIds: number[]) => void) => () => void;
     setPresentationFullscreen: (enabled: boolean) => Promise<boolean>;
     renderPowerPointSlides: (file: File) => Promise<{
       ok: boolean;
@@ -26,6 +29,7 @@ interface Window {
       data?: Uint8Array;
       message?: string;
     }>;
+    saveTextFile: (suggestedName: string, content: string, kind: 'backup' | 'songbook') => Promise<{ ok: boolean; canceled?: boolean; filePath?: string; message?: string }>;
     minimize: () => Promise<void>;
     toggleMaximize: () => Promise<boolean>;
     close: () => Promise<void>;

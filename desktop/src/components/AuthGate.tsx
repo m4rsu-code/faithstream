@@ -4,10 +4,10 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowRight, Eye, EyeOff, LockKeyhole, Mail, Minus, Square, X } from 'lucide-react';
 import FaithStreamLogo from '../assets/img/Logo.png';
 import LoadingAnimation from '../assets/img/loading.gif';
+import { API_BASE_URL } from '../utils/apiConfig';
 
 const LEGACY_TOKEN_KEY = 'faithstream.api-token';
 const PROFILE_KEY = 'faithstream.user-profile';
-const API_BASE_URL = ((import.meta as ImportMeta & { env: { VITE_FAITHSTREAM_API_URL?: string } }).env.VITE_FAITHSTREAM_API_URL ?? 'http://127.0.0.1:8000/api').replace(/\/$/, '');
 const AUTH_THEME_STYLE = {
   '--color-brand': '#CB874C',
   '--color-navy': '#14243A',
@@ -25,6 +25,15 @@ const requestWindowMode = async (authenticated: boolean) => {
   try {
     await window.faithstreamWindow?.setPresentationFullscreen(authenticated);
   } catch { /* Keep sign-in and sign-out available if window controls are unavailable. */ }
+};
+
+// A server error page (HTML) would otherwise surface as "Unexpected token '<'".
+const readJson = async (response: Response): Promise<any> => {
+  try {
+    return await response.json();
+  } catch {
+    return { message: response.ok ? undefined : `The FaithStream server returned an error (${response.status}). Try again in a moment.` };
+  }
 };
 
 type AuthMode = 'login' | 'register' | 'forgot';
@@ -97,7 +106,7 @@ export const updateLocalAccountProfile = async (name: string, role: string): Pro
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ name, role }),
     });
-    const data = await response.json() as { user?: ApiUser; message?: string; errors?: Record<string, string[]> };
+    const data = await readJson(response) as { user?: ApiUser; message?: string; errors?: Record<string, string[]> };
     if (!response.ok || !data.user) {
       const firstError = data.errors ? Object.values(data.errors).flat()[0] : undefined;
       throw new Error(firstError ?? data.message ?? 'Could not save your profile.');
@@ -121,7 +130,7 @@ export const updateLocalAccountProfilePhoto = async (photo: File): Promise<ApiUs
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
     body: form,
   });
-  const data = await response.json() as { user?: ApiUser; message?: string; errors?: Record<string, string[]> };
+  const data = await readJson(response) as { user?: ApiUser; message?: string; errors?: Record<string, string[]> };
   if (!response.ok || !data.user) {
     const firstError = data.errors ? Object.values(data.errors).flat()[0] : undefined;
     throw new Error(firstError ?? data.message ?? 'Could not save your profile photo.');
@@ -137,7 +146,7 @@ export const removeLocalAccountProfilePhoto = async (): Promise<ApiUser> => {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
-  const data = await response.json() as { user?: ApiUser; message?: string };
+  const data = await readJson(response) as { user?: ApiUser; message?: string };
   if (!response.ok || !data.user) throw new Error(data.message ?? 'Could not remove your profile photo.');
   saveUserProfile(data.user);
   return data.user;
@@ -151,7 +160,7 @@ export const updateLocalAccountProfilePhotoPosition = async (position: ProfilePh
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify(position),
   });
-  const data = await response.json() as { user?: ApiUser; message?: string; errors?: Record<string, string[]> };
+  const data = await readJson(response) as { user?: ApiUser; message?: string; errors?: Record<string, string[]> };
   if (!response.ok || !data.user) {
     const firstError = data.errors ? Object.values(data.errors).flat()[0] : undefined;
     throw new Error(firstError ?? data.message ?? 'Could not save your profile photo position.');
@@ -166,7 +175,7 @@ export const getLocalAccountDeletionStatus = async (): Promise<AccountDeletionSt
   const response = await fetch(`${API_BASE_URL}/user`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
-  const data = await response.json() as { user?: ApiUser; message?: string };
+  const data = await readJson(response) as { user?: ApiUser; message?: string };
   if (!response.ok || !data.user) throw new Error(data.message ?? 'Could not check your account status.');
   return data.user.deletion_request_status ?? null;
 };
@@ -179,7 +188,7 @@ export const requestLocalAccountDeletion = async (password: string): Promise<{ m
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ password }),
   });
-  const data = await response.json() as { message?: string; deletion_request_status?: AccountDeletionStatus; errors?: Record<string, string[]> };
+  const data = await readJson(response) as { message?: string; deletion_request_status?: AccountDeletionStatus; errors?: Record<string, string[]> };
   if (!response.ok) {
     const firstError = data.errors ? Object.values(data.errors).flat()[0] : undefined;
     throw new Error(firstError ?? data.message ?? 'Could not submit the account deletion request.');
@@ -194,7 +203,7 @@ export const cancelLocalAccountDeletionRequest = async (): Promise<{ message: st
     method: 'DELETE',
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
-  const data = await response.json() as { message?: string; deletion_request_status?: AccountDeletionStatus };
+  const data = await readJson(response) as { message?: string; deletion_request_status?: AccountDeletionStatus };
   if (!response.ok) throw new Error(data.message ?? 'Could not cancel your deletion request.');
   return { message: data.message ?? 'Deletion request cancelled.', status: data.deletion_request_status ?? null };
 };
@@ -266,7 +275,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
             return;
           }
           if (response.ok) {
-            const data = await response.json() as { user: ApiUser };
+            const data = await readJson(response) as { user: ApiUser };
             saveUserProfile(data.user);
           }
         } catch { /* Preserve the encrypted local token when the API is temporarily unreachable. */ }
@@ -372,7 +381,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ email_address: normalizedEmail }),
       });
-      const data = await response.json() as { message?: string; errors?: Record<string, string[]> };
+      const data = await readJson(response) as { message?: string; errors?: Record<string, string[]> };
       if (!response.ok) {
         const firstError = data.errors ? Object.values(data.errors).flat()[0] : undefined;
         throw new Error(firstError ?? data.message ?? 'Could not resend the verification link. Try again.');
@@ -407,7 +416,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify({ email_address: normalizedEmail }),
         });
-        const data = await response.json() as { message?: string; errors?: Record<string, string[]> };
+        const data = await readJson(response) as { message?: string; errors?: Record<string, string[]> };
         if (!response.ok) {
           const firstError = data.errors ? Object.values(data.errors).flat()[0] : undefined;
           throw new Error(firstError ?? data.message ?? 'Could not request a password reset. Try again.');
@@ -431,7 +440,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify(payload),
       });
-      const data = await response.json() as { user?: ApiUser; token?: string; message?: string; verification_required?: boolean; errors?: Record<string, string[]> };
+      const data = await readJson(response) as { user?: ApiUser; token?: string; message?: string; verification_required?: boolean; errors?: Record<string, string[]> };
       if (mode === 'register' && response.ok && data.verification_required) {
         setMode('login');
         setName('');
