@@ -11,6 +11,7 @@ class PresentationProject extends Model
         'project_id',
         'name',
         'slides',
+        'colors',
         'has_local_media',
         'project_updated_at',
     ];
@@ -19,6 +20,7 @@ class PresentationProject extends Model
     {
         return [
             'slides' => 'array',
+            'colors' => 'array',
             'has_local_media' => 'boolean',
             'project_updated_at' => 'integer',
         ];

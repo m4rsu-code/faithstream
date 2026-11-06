@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AdminDashboardController;
 use App\Http\Controllers\Api\PresentationProjectController;
+use App\Http\Controllers\Api\PresentationTemplateController;
 use App\Http\Middleware\EnsureAdminUser;
 use Illuminate\Support\Facades\Route;
 
@@ -18,6 +19,7 @@ Route::get('/profile-photos/{user}', [AuthController::class, 'showProfilePhoto']
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/user', [AuthController::class, 'user']);
     Route::patch('/user', [AuthController::class, 'updateUser']);
+    Route::patch('/user/service-title', [AuthController::class, 'updateServiceTitle']);
     Route::post('/user/deletion-request', [AuthController::class, 'requestAccountDeletion']);
     Route::delete('/user/deletion-request', [AuthController::class, 'cancelAccountDeletionRequest']);
     Route::post('/user/profile-photo', [AuthController::class, 'storeProfilePhoto']);
@@ -27,6 +29,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/presentations', [PresentationProjectController::class, 'index']);
     Route::put('/presentations/{projectId}', [PresentationProjectController::class, 'store']);
     Route::delete('/presentations/{projectId}', [PresentationProjectController::class, 'destroy']);
+    Route::get('/templates', [PresentationTemplateController::class, 'index']);
+    Route::put('/templates/{templateId}', [PresentationTemplateController::class, 'store']);
+    Route::delete('/templates/{templateId}', [PresentationTemplateController::class, 'destroy']);
 
     Route::prefix('admin')->middleware(EnsureAdminUser::class)->group(function () {
         Route::get('/overview', [AdminDashboardController::class, 'overview']);

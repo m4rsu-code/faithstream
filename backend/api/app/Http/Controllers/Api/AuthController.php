@@ -146,6 +146,20 @@ class AuthController extends Controller
         return response()->json(['user' => $this->userData($user)]);
     }
 
+    /** The service title shown in the desktop app's header (empty clears it). */
+    public function updateServiceTitle(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'service_title' => ['present', 'nullable', 'string', 'max:120'],
+        ]);
+        $title = trim((string) ($validated['service_title'] ?? ''));
+        $user = $request->user();
+        $user->service_title = $title === '' ? null : $title;
+        $user->save();
+
+        return response()->json(['user' => $this->userData($user)]);
+    }
+
     public function storeProfilePhoto(Request $request): JsonResponse
     {
         $validated = $request->validate([
@@ -224,7 +238,7 @@ class AuthController extends Controller
         return response()->json(['message' => 'Signed out.']);
     }
 
-    /** @return array{id: int, name: string, email_address: string, role: string, profile_photo_url: string|null, profile_photo_position: array{x: int, y: int}, deletion_request_status: 'pending'|'rejected'|null} */
+    /** @return array{id: int, name: string, email_address: string, role: string, service_title: string|null, profile_photo_url: string|null, profile_photo_position: array{x: int, y: int}, deletion_request_status: 'pending'|'rejected'|null} */
     private function userData(User $user): array
     {
         return [
@@ -232,6 +246,7 @@ class AuthController extends Controller
             'name' => $user->name,
             'email_address' => $user->email,
             'role' => $user->role,
+            'service_title' => $user->service_title,
             'profile_photo_url' => $user->profile_photo_path
                 ? URL::temporarySignedRoute('profile-photos.show', now()->addYear(), ['user' => $user->getKey()], absolute: false)
                 : null,

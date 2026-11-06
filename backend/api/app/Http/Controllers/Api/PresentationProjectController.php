@@ -31,6 +31,8 @@ class PresentationProjectController extends Controller
             'name' => ['required', 'string', 'max:120'],
             'slides' => ['required', 'array', 'max:500'],
             'slides.*' => ['required', 'array'],
+            'colors' => ['sometimes', 'nullable', 'array', 'max:24'],
+            'colors.*' => ['string', 'max:40'],
             'updatedAt' => ['required', 'integer', 'min:0'],
             'hasLocalMedia' => ['sometimes', 'boolean'],
         ]);
@@ -56,6 +58,7 @@ class PresentationProjectController extends Controller
         $project->fill([
             'name' => $validated['name'],
             'slides' => $validated['slides'],
+            'colors' => $validated['colors'] ?? null,
             'has_local_media' => (bool) ($validated['hasLocalMedia'] ?? false),
             'project_updated_at' => (int) $validated['updatedAt'],
         ]);
@@ -80,13 +83,14 @@ class PresentationProjectController extends Controller
         return response()->json(['message' => 'Presentation removed from account sync.']);
     }
 
-    /** @return array{id: string, name: string, slides: array, updatedAt: int, hasLocalMedia: bool} */
+    /** @return array{id: string, name: string, slides: array, colors: array|null, updatedAt: int, hasLocalMedia: bool} */
     private function projectData(PresentationProject $project): array
     {
         return [
             'id' => $project->project_id,
             'name' => $project->name,
             'slides' => $project->slides,
+            'colors' => $project->colors,
             'updatedAt' => $project->project_updated_at,
             'hasLocalMedia' => $project->has_local_media,
         ];
