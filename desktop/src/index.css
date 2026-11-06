@@ -9,6 +9,43 @@
   --color-warm-white: var(--theme-text);
 }
 
+/*
+ * Everything you can click shows the hand cursor, on every page. (Tailwind v4 no longer gives
+ * buttons a pointer by default.) Disabled controls show "not allowed". This sits in the base
+ * layer, so a specific cursor class on an element (move, resize, wait…) still takes priority.
+ */
+@layer base {
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']),
+  [role='tab'],
+  [role='menuitem'],
+  [role='option'],
+  [role='radio'],
+  [role='checkbox'],
+  [role='switch'],
+  [role='treeitem'] > button,
+  a[href],
+  summary,
+  select:not(:disabled),
+  label[for],
+  label:has(> input[type='checkbox']:not(:disabled)),
+  label:has(> input[type='radio']:not(:disabled)),
+  input[type='checkbox']:not(:disabled),
+  input[type='radio']:not(:disabled),
+  input[type='color']:not(:disabled),
+  input[type='range']:not(:disabled),
+  input[type='file']:not(:disabled) {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  select:disabled,
+  input:disabled,
+  [aria-disabled='true'] {
+    cursor: not-allowed;
+  }
+}
+
 :root,
 :root[data-theme='midnight'] {
   color-scheme: dark;

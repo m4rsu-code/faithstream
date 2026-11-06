@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Camera, Check, CircleUserRound, Loader2, LogOut, MonitorPlay, Palette, Radio, Settings as SettingsIcon, ShieldCheck, SlidersHorizontal, Trash2 } from 'lucide-react';
 import type { FormEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import { cancelLocalAccountDeletionRequest, getLocalAccountDeletionStatus, removeLocalAccountProfilePhoto, requestLocalAccountDeletion, signOutLocalAccount, updateLocalAccountProfile, updateLocalAccountProfilePhoto, updateLocalAccountProfilePhotoPosition } from '../components/AuthGate';
+import BodyPortal from '../components/BodyPortal';
+
+/** Sent when Settings changes a Studio setting (Studio listens, see Studio.tsx). */
+const STUDIO_SETTINGS_EVENT = 'faithstream:studio-settings';
 
 const KEYS = {
   previewMode: 'faithstream.studio-preview-mode',
@@ -109,11 +113,13 @@ export default function Settings() {
   const cropPreviewRef = useRef<HTMLDivElement>(null);
   const cropDragRef = useRef<{ pointerId: number; x: number; y: number; clientX: number; clientY: number } | null>(null);
 
-  useEffect(() => { localStorage.setItem(KEYS.previewMode, String(previewMode)); }, [previewMode]);
-  useEffect(() => { localStorage.setItem(KEYS.confirmEnd, String(confirmEnd)); }, [confirmEnd]);
-  useEffect(() => { localStorage.setItem(KEYS.resolution, resolution); }, [resolution]);
-  useEffect(() => { localStorage.setItem(KEYS.frameRate, frameRate); }, [frameRate]);
-  useEffect(() => { localStorage.setItem(KEYS.bitrate, bitrate); }, [bitrate]);
+  // Studio stays open in the background, so tell it straight away when one of its settings changes.
+  const tellStudio = () => window.dispatchEvent(new Event(STUDIO_SETTINGS_EVENT));
+  useEffect(() => { localStorage.setItem(KEYS.previewMode, String(previewMode)); tellStudio(); }, [previewMode]);
+  useEffect(() => { localStorage.setItem(KEYS.confirmEnd, String(confirmEnd)); tellStudio(); }, [confirmEnd]);
+  useEffect(() => { localStorage.setItem(KEYS.resolution, resolution); tellStudio(); }, [resolution]);
+  useEffect(() => { localStorage.setItem(KEYS.frameRate, frameRate); tellStudio(); }, [frameRate]);
+  useEffect(() => { localStorage.setItem(KEYS.bitrate, bitrate); tellStudio(); }, [bitrate]);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem(KEYS.theme, theme);
@@ -420,6 +426,7 @@ export default function Settings() {
                   <option value="2500">Low · 2,500 kbps</option>
                   <option value="4500">Balanced · 4,500 kbps</option>
                   <option value="6000">High · 6,000 kbps</option>
+                  <option value="8000">Highest · 8,000 kbps (1080p)</option>
                 </select>
               </label>
             </div>
@@ -432,7 +439,7 @@ export default function Settings() {
         </div>
       </div>
     </main>
-    {deletionDialogOpen && <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !deletionBusy) setDeletionDialogOpen(false); }}>
+    {deletionDialogOpen && <BodyPortal><div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !deletionBusy) setDeletionDialogOpen(false); }}>
       <section role="dialog" aria-modal="true" aria-labelledby="account-deletion-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 text-white shadow-2xl">
         <div className="flex items-start gap-3">
           <span className="mt-0.5 rounded-lg bg-red-400/10 p-2 text-red-200"><AlertTriangle size={18} /></span>
@@ -452,8 +459,8 @@ export default function Settings() {
           </div>
         </form>
       </section>
-    </div>}
-    {cropOpen && profile.photoUrl && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !cropSaving) setCropOpen(false); }}>
+    </div></BodyPortal>}
+    {cropOpen && profile.photoUrl && <BodyPortal><div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !cropSaving) setCropOpen(false); }}>
       <section role="dialog" aria-modal="true" aria-labelledby="profile-photo-crop-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 text-white shadow-2xl">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -485,7 +492,7 @@ export default function Settings() {
           <button type="button" disabled={cropSaving} onClick={() => { void savePhotoCrop(); }} className="flex items-center gap-2 rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy hover:brightness-110 disabled:cursor-wait disabled:opacity-50">{cropSaving && <Loader2 size={14} className="animate-spin" />}{cropSaving ? 'Saving…' : 'Save framing'}</button>
         </div>
       </section>
-    </div>}
+    </div></BodyPortal>}
     </>
   );
 }

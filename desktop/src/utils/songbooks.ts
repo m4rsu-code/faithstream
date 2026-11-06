@@ -9,6 +9,7 @@
 import { getAccountDatabaseName, getAccountStorageKey } from './accountStorage';
 import { STANDARD_SONGBOOKS } from '../data/standardHymns';
 import { splitLyrics } from './slideLibrary';
+import { isCustomBackground } from './slideBackground';
 
 export type Songbook = { id: string; name: string; kind: 'standard' | 'personal'; createdAt: number };
 export type Song = {
@@ -393,6 +394,31 @@ export const saveTextFile = async (suggestedName: string, content: string, kind:
  * How song slides look: a small presentation design applied to every slide of a song.
  * A song can have its own style; otherwise it uses the default song style kept on this computer.
  */
+export type SongTextAlign = 'left' | 'center' | 'right' | 'justify';
+export type SongLineAligns = (SongTextAlign | null)[];
+/** The key a slide's own line alignments are saved under: its text, so they reset when the text changes. */
+export const songLineKey = (text: string) => text.replace(/\s+$/, '');
+const MAX_LINE_ALIGN_SLIDES = 300;
+const cleanLineAligns = (value: unknown): Record<string, SongLineAligns> | undefined => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([key, aligns]) => key.length > 0 && key.length < 5000 && Array.isArray(aligns) && aligns.length < 200)
+    .map(([key, aligns]) => [key, (aligns as unknown[]).map((align) => (align === 'left' || align === 'center' || align === 'right' || align === 'justify' ? align : null))] as const)
+    .filter(([, aligns]) => aligns.some(Boolean))
+    .slice(-MAX_LINE_ALIGN_SLIDES);
+  return entries.length ? Object.fromEntries(entries) : undefined;
+};
+/** Sets (or clears) one slide's line alignments. */
+export const withSlideLineAligns = (all: Record<string, SongLineAligns> | undefined, slideText: string, aligns: SongLineAligns | undefined) => {
+  const next = { ...(all ?? {}) };
+  const key = songLineKey(slideText);
+  delete next[key];
+  if (aligns?.some(Boolean)) next[key] = aligns;
+  const keys = Object.keys(next);
+  for (const old of keys.slice(0, Math.max(0, keys.length - MAX_LINE_ALIGN_SLIDES))) delete next[old];
+  return Object.keys(next).length ? next : undefined;
+};
+export type SongTextVAlign = 'top' | 'middle' | 'bottom';
 export type SongStyle = {
   font: string;
   /** Text size in slide units (the slide is 1280 wide). */
@@ -405,7 +431,16 @@ export type SongStyle = {
   underline: boolean;
   /** Show lyrics in capital letters. Only the display changes; the songbook keeps normal text. */
   caps: boolean;
-  align: 'left' | 'center' | 'right';
+  align: SongTextAlign;
+  /** Where the lyrics sit inside the text area, top to bottom. Missing means middle (older styles). */
+  valign?: SongTextVAlign;
+  /** Extra space between letters, in px on a 1280-wide slide (like the Presentations editor). */
+  letterSpacing?: number;
+  /** A coloured box behind the lyrics (like a text box background in Presentations). */
+  boxBg?: string;
+  boxBgOn?: boolean;
+  /** Single lines aligned differently on one slide, keyed by that slide's text (see songLineKey). */
+  lineAligns?: Record<string, SongLineAligns>;
   color: string;
   shadow: boolean;
   position: 'top' | 'middle' | 'bottom';
@@ -436,7 +471,7 @@ export const SONG_BACKGROUNDS = [
 ];
 export const DEFAULT_SONG_STYLE: SongStyle = {
   font: 'Segoe UI', fontSize: 68, autoFit: true, lineHeight: 1.2, bold: true, italic: false, underline: false, caps: false,
-  align: 'center', color: '#FFFFFF', shadow: true, position: 'middle', linesPerSlide: 4, titleSlide: true,
+  align: 'center', valign: 'middle', color: '#FFFFFF', shadow: true, position: 'middle', linesPerSlide: 4, titleSlide: true,
   background: SONG_BACKGROUNDS[0], dim: 0,
 };
 export const DEFAULT_SONG_SLIDE_SETTINGS = DEFAULT_SONG_STYLE;
@@ -470,14 +505,19 @@ export const cleanSongStyle = (value: unknown, base: SongStyle = DEFAULT_SONG_ST
     italic: pick(raw.italic, isBool, base.italic),
     underline: pick(raw.underline, isBool, base.underline),
     caps: pick(raw.caps, isBool, base.caps),
-    align: pick(raw.align, (align) => align === 'left' || align === 'center' || align === 'right', base.align),
+    align: pick(raw.align, (align) => align === 'left' || align === 'center' || align === 'right' || align === 'justify', base.align),
+    valign: pick(raw.valign, (valign) => valign === 'top' || valign === 'middle' || valign === 'bottom', base.valign ?? 'middle'),
+    letterSpacing: pick(raw.letterSpacing, isNum(-4, 20), base.letterSpacing ?? 0),
+    boxBg: pick(raw.boxBg, (color) => typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color), base.boxBg ?? '#000000'),
+    boxBgOn: pick(raw.boxBgOn, isBool, base.boxBgOn ?? false),
     color: pick(raw.color, (color) => typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color), base.color),
     shadow: pick(raw.shadow, isBool, base.shadow),
     position: pick(raw.position, (position) => position === 'top' || position === 'middle' || position === 'bottom', base.position),
     area: cleanArea(raw.area),
+    lineAligns: cleanLineAligns(raw.lineAligns),
     linesPerSlide: Math.round(pick(raw.linesPerSlide, isNum(1, 12), base.linesPerSlide)),
     titleSlide: pick(raw.titleSlide, isBool, base.titleSlide),
-    background: pick(raw.background, (bg) => typeof bg === 'string' && SONG_BACKGROUNDS.includes(bg), base.background),
+    background: pick(raw.background, (bg) => typeof bg === 'string' && (SONG_BACKGROUNDS.includes(bg) || isCustomBackground(bg)), base.background),
     backgroundAssetId: pick(raw.backgroundAssetId, (id) => typeof id === 'string' && id.length > 0 && id.length < 100, undefined),
     dim: Math.round(pick(raw.dim, isNum(0, 80), base.dim)),
   };
@@ -545,7 +585,7 @@ export const songTextSize = (screens: SongScreen[], style: SongStyle) => {
 
 export type SongTextLayout = {
   text: string; font: string; size: number; lineHeight: number; bold: boolean; italic: boolean; underline: boolean;
-  uppercase: boolean; align: 'left' | 'center' | 'right'; color: string; shadow: boolean; x: number; y: number; w: number; h: number;
+  uppercase: boolean; align: SongTextAlign; valign: SongTextVAlign; lineAligns?: SongLineAligns; letterSpacing: number; boxBg: string; boxBgOn: boolean; color: string; shadow: boolean; x: number; y: number; w: number; h: number;
 };
 export type SongSlideLayout = {
   kind: SongScreen['kind'];
@@ -564,7 +604,8 @@ export const songSlideLayouts = (song: Pick<Song, 'lyrics' | 'title' | 'author' 
   const size = songTextSize(screens, style);
   const text = (value: string, boxSize: number, area: { x: number; y: number; w: number; h: number }): SongTextLayout => ({
     text: value, font: style.font, size: boxSize, lineHeight: style.lineHeight, bold: style.bold, italic: style.italic, underline: style.underline,
-    uppercase: style.caps, align: style.align, color: style.color, shadow: style.shadow, ...area,
+    uppercase: style.caps, align: style.align, valign: style.valign ?? 'middle', letterSpacing: style.letterSpacing ?? 0, boxBg: style.boxBg ?? '#000000', boxBgOn: style.boxBgOn ?? false,
+    color: style.color, shadow: style.shadow, ...area,
   });
   return screens.map((screen) => {
     const common = { kind: screen.kind, label: screen.label, text: screen.text, background: style.background, backgroundAssetId: style.backgroundAssetId, dim: style.dim };
@@ -572,11 +613,11 @@ export const songSlideLayouts = (song: Pick<Song, 'lyrics' | 'title' | 'author' 
       const titleSize = Math.min(112, Math.max(72, Math.round(size * 1.5)));
       return {
         ...common,
-        box: { ...text(screen.text, titleSize, { x: 6, y: screen.subtitle ? 18 : 8, w: 88, h: screen.subtitle ? 52 : 84 }), align: 'center' },
-        subtitleBox: screen.subtitle ? { ...text(screen.subtitle, 30, { x: 6, y: 72, w: 88, h: 12 }), bold: false, italic: false, underline: false, uppercase: false, align: 'center' } : undefined,
+        box: { ...text(screen.text, titleSize, { x: 6, y: screen.subtitle ? 18 : 8, w: 88, h: screen.subtitle ? 52 : 84 }), align: 'center', valign: 'middle' },
+        subtitleBox: screen.subtitle ? { ...text(screen.subtitle, 30, { x: 6, y: 72, w: 88, h: 12 }), bold: false, italic: false, underline: false, uppercase: false, align: 'center', valign: 'middle' } : undefined,
       };
     }
-    return { ...common, box: text(screen.text, size, songTextArea(style)) };
+    return { ...common, box: { ...text(screen.text, size, songTextArea(style)), lineAligns: style.lineAligns?.[songLineKey(screen.text)] } };
   });
 };
 

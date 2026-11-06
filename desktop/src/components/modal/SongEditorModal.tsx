@@ -4,6 +4,7 @@ import { splitLyrics } from '../../utils/slideLibrary';
 import { cleanSongStyle, newId, saveSongSlideSettings, type Song, type Songbook, type SongStyle } from '../../utils/songbooks';
 import SongDesignPanel from '../SongDesignPanel';
 import { useSongSlideSettings } from '../SongSlideSettingsButton';
+import BodyPortal from '../BodyPortal';
 
 const PART_LABELS = ['Verse', 'Chorus', 'Bridge', 'Pre-chorus', 'Ending'];
 
@@ -127,7 +128,7 @@ export default function SongEditorModal({
   const field = 'mt-1 w-full rounded-lg border border-white/10 bg-[#091521] px-3 py-2 text-sm font-normal text-white outline-none focus:border-brand';
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <BodyPortal><div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section role="dialog" aria-modal="true" aria-labelledby="song-editor-title" className={`flex w-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101d2a] shadow-2xl ${tab === 'design' ? 'h-[min(900px,94vh)] max-w-[1280px]' : 'max-h-[min(880px,94vh)] max-w-[880px]'}`}>
         <header className="flex items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
           <div className="flex min-w-0 items-center gap-3">
@@ -226,6 +227,6 @@ export default function SongEditorModal({
           <button onClick={() => { void submit(); }} disabled={saving} className="rounded-lg bg-brand px-4 py-2 text-sm font-bold text-navy transition hover:brightness-110 disabled:opacity-50">{saving ? 'Saving…' : 'Save song'}</button>
         </footer>
       </section>
-    </div>
+    </div></BodyPortal>
   );
 }

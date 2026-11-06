@@ -67,7 +67,7 @@ const clearStoredAuthToken = async () => {
 
 type ProfilePhotoPosition = { x: number; y: number };
 type AccountDeletionStatus = 'pending' | 'rejected' | null;
-type ApiUser = { id: number; name: string; email_address: string; role: string; profile_photo_url: string | null; profile_photo_position: ProfilePhotoPosition; deletion_request_status?: AccountDeletionStatus };
+type ApiUser = { id: number; name: string; email_address: string; role: string; service_title?: string | null; profile_photo_url: string | null; profile_photo_position: ProfilePhotoPosition; deletion_request_status?: AccountDeletionStatus };
 const MIN_PROFILE_SAVE_LOADING_MS = 3000;
 
 const waitForMinimumProfileSaveLoading = async (startedAt: number) => {
@@ -82,9 +82,25 @@ const saveUserProfile = (user: ApiUser) => {
     email: user.email_address,
     photoUrl: user.profile_photo_url ? new URL(user.profile_photo_url, `${API_BASE_URL}/`).toString() : null,
     photoPosition: user.profile_photo_position ?? { x: 50, y: 50 },
+    // The account's header title (empty when the account has not set one). Missing on older servers.
+    ...(user.service_title !== undefined ? { serviceTitle: user.service_title ?? '' } : {}),
   };
   localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
   window.dispatchEvent(new CustomEvent('faithstream:profile-updated', { detail: profile }));
+};
+
+/** Saves the header's service title to the account, so it shows on every device. */
+export const saveAccountServiceTitle = async (title: string): Promise<void> => {
+  const token = await getStoredAuthToken();
+  if (!token) throw new Error('Not signed in.');
+  const response = await fetch(`${API_BASE_URL}/user/service-title`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ service_title: title }),
+  });
+  const data = await readJson(response) as { user?: ApiUser };
+  if (!response.ok || !data.user) throw new Error('Could not save the title.');
+  saveUserProfile(data.user);
 };
 
 export const signOutLocalAccount = () => {

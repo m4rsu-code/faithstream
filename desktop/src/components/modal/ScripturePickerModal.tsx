@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { BookOpen, Check, LoaderCircle, Search, X } from 'lucide-react';
+import BodyPortal from '../BodyPortal';
 
 type Verse = { reference: string; text: string };
 export type SelectedScriptureVerse = Verse;
@@ -27,6 +28,62 @@ const selectionReference = (selected: Verse[]) => {
   return selected.map((verse) => verse.reference).join(', ');
 };
 
+type BibleLanguage = 'en' | 'ceb';
+/** A Bible ready to browse: every verse, grouped by book and chapter, with a quick position lookup. */
+type BibleIndex = { verses: Verse[]; catalog: BibleBook[]; position: Map<string, number> };
+
+const buildBibleIndex = (verses: Verse[]): BibleIndex => {
+  const books = new Map<string, Map<number, Verse[]>>();
+  const position = new Map<string, number>();
+  verses.forEach((verse, index) => {
+    position.set(verse.reference, index);
+    const match = /^(.*)\s+(\d+):(\d+)$/.exec(verse.reference);
+    if (!match) return;
+    const [, name, chapter, verseNumber] = match;
+    const chapters = books.get(name) ?? new Map<number, Verse[]>();
+    const chapterVerses = chapters.get(Number(chapter)) ?? [];
+    chapterVerses[Number(verseNumber) - 1] = verse;
+    chapters.set(Number(chapter), chapterVerses);
+    books.set(name, chapters);
+  });
+  const catalog: BibleBook[] = [...books.entries()].map(([name, chapters]) => ({
+    name,
+    testament: NEW_TESTAMENT_BOOKS.has(name) ? 'new' : 'old',
+    chapters: [...chapters.entries()].sort(([a], [b]) => a - b).map(([number, chapterVerses]) => ({ number, verses: chapterVerses.filter((verse): verse is Verse => !!verse) })),
+  }));
+  return { verses, catalog, position };
+};
+
+// Each Bible is read and organised once, then kept in memory, so the window opens instantly
+// every time after the first.
+const loadingBibles = new Map<BibleLanguage, Promise<BibleIndex>>();
+const readyBibles = new Map<BibleLanguage, BibleIndex>();
+
+const loadBible = (language: BibleLanguage) => {
+  let pending = loadingBibles.get(language);
+  if (!pending) {
+    pending = (language === 'en'
+      ? import('../../data/kjv.json').then(({ default: bible }) => (bible as BibleData).books.flatMap((book) => book.chapters.flatMap((chapter) =>
+        chapter.verses.map((verse) => ({ reference: `${book.englishName} ${chapter.chapter}:${verse.number}`, text: verse.text })))))
+      : import('../../data/ceb.json').then(({ default: data }) => data as Verse[]))
+      .then((verses) => {
+        const index = buildBibleIndex(verses);
+        readyBibles.set(language, index);
+        return index;
+      });
+    pending.catch(() => loadingBibles.delete(language));
+    loadingBibles.set(language, pending);
+  }
+  return pending;
+};
+
+/** Start preparing a Bible in the background (e.g. when the pointer reaches the Bible button). */
+export const preloadBible = (language: BibleLanguage = 'en') => { void loadBible(language).catch(() => undefined); };
+
+const NO_VERSES: Verse[] = [];
+const NO_BOOKS: BibleBook[] = [];
+const NO_POSITIONS = new Map<string, number>();
+
 export default function ScripturePickerModal({
   open,
   onClose,
@@ -36,11 +93,15 @@ export default function ScripturePickerModal({
   onClose: () => void;
   onAdd: (reference: string, text: string, verses?: SelectedScriptureVerse[]) => void;
 }) {
-  const [verses, setVerses] = useState<Verse[]>([]);
+  const [language, setLanguage] = useState<BibleLanguage>('en');
+  const [bible, setBible] = useState<BibleIndex | null>(() => readyBibles.get('en') ?? null);
+  const verses = bible?.verses ?? NO_VERSES;
+  const position = bible?.position ?? NO_POSITIONS;
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(false);
-  const [language, setLanguage] = useState<'en' | 'ceb'>('en');
   const [query, setQuery] = useState('');
+  // Search runs just after typing, so the search box never stutters.
+  const deferredQuery = useDeferredValue(query);
   const [selected, setSelected] = useState<Verse[]>([]);
   const [selectionAnchor, setSelectionAnchor] = useState<string | null>(null);
   const [hoveredVerseReference, setHoveredVerseReference] = useState<string | null>(null);
@@ -48,39 +109,27 @@ export default function ScripturePickerModal({
   const [bookName, setBookName] = useState('Genesis');
   const [chapterNumber, setChapterNumber] = useState(1);
 
-  const catalog = useMemo<BibleBook[]>(() => {
-    const books = new Map<string, Map<number, Verse[]>>();
-    for (const verse of verses) {
-      const match = /^(.*)\s+(\d+):(\d+)$/.exec(verse.reference);
-      if (!match) continue;
-      const [, name, chapter, verseNumber] = match;
-      const chapters = books.get(name) ?? new Map<number, Verse[]>();
-      const chapterVerses = chapters.get(Number(chapter)) ?? [];
-      chapterVerses[Number(verseNumber) - 1] = verse;
-      chapters.set(Number(chapter), chapterVerses);
-      books.set(name, chapters);
-    }
-    return [...books.entries()].map(([name, chapters]) => ({
-      name,
-      testament: NEW_TESTAMENT_BOOKS.has(name) ? 'new' : 'old',
-      chapters: [...chapters.entries()].sort(([a], [b]) => a - b).map(([number, chapterVerses]) => ({ number, verses: chapterVerses.filter((verse): verse is Verse => !!verse) })),
-    }));
-  }, [verses]);
+  const catalog = bible?.catalog ?? NO_BOOKS;
   const testamentBooks = useMemo(() => catalog.filter((book) => book.testament === testament), [catalog, testament]);
   const activeBook = testamentBooks.find((book) => book.name === bookName) ?? testamentBooks[0];
   const activeChapter = activeBook?.chapters.find((chapter) => chapter.number === chapterNumber) ?? activeBook?.chapters[0];
 
+  // Uses each verse's position instead of searching the whole Bible on every mouse move.
   const selectedForAdd = useMemo(() => {
-    const selectedReferences = new Set(selected.map((verse) => verse.reference));
+    const indexes = new Set<number>();
+    for (const verse of selected) {
+      const at = position.get(verse.reference);
+      if (at !== undefined) indexes.add(at);
+    }
     if (selectionAnchor && hoveredVerseReference) {
-      const first = verses.findIndex((verse) => verse.reference === selectionAnchor);
-      const last = verses.findIndex((verse) => verse.reference === hoveredVerseReference);
-      if (first >= 0 && last >= 0) {
-        verses.slice(Math.min(first, last), Math.max(first, last) + 1).forEach((verse) => selectedReferences.add(verse.reference));
+      const first = position.get(selectionAnchor);
+      const last = position.get(hoveredVerseReference);
+      if (first !== undefined && last !== undefined) {
+        for (let at = Math.min(first, last); at <= Math.max(first, last); at += 1) indexes.add(at);
       }
     }
-    return verses.filter((verse) => selectedReferences.has(verse.reference));
-  }, [hoveredVerseReference, selected, selectionAnchor, verses]);
+    return [...indexes].sort((a, b) => a - b).map((at) => verses[at]);
+  }, [hoveredVerseReference, selected, selectionAnchor, verses, position]);
 
   useEffect(() => {
     if (!testamentBooks.length) return;
@@ -93,13 +142,17 @@ export default function ScripturePickerModal({
 
   const selectVerse = (verse: Verse) => {
     if (selectionAnchor) {
-      const first = verses.findIndex((item) => item.reference === selectionAnchor);
-      const last = verses.findIndex((item) => item.reference === verse.reference);
+      const first = position.get(selectionAnchor) ?? -1;
+      const last = position.get(verse.reference) ?? -1;
       if (first >= 0 && last >= 0) {
         const range = verses.slice(Math.min(first, last), Math.max(first, last) + 1);
         setSelected((current) => {
-          const selectedReferences = new Set([...current, ...range].map((item) => item.reference));
-          return verses.filter((item) => selectedReferences.has(item.reference));
+          const indexes = new Set<number>();
+          for (const item of [...current, ...range]) {
+            const at = position.get(item.reference);
+            if (at !== undefined) indexes.add(at);
+          }
+          return [...indexes].sort((a, b) => a - b).map((at) => verses[at]);
         });
         setSelectionAnchor(null);
         setHoveredVerseReference(null);
@@ -107,7 +160,7 @@ export default function ScripturePickerModal({
       }
     }
     if (selected.some((item) => item.reference === verse.reference)) {
-      const orderedIndexes = selected.map((item) => verses.findIndex((candidate) => candidate.reference === item.reference)).sort((a, b) => a - b);
+      const orderedIndexes = selected.map((item) => position.get(item.reference) ?? -1).sort((a, b) => a - b);
       const isContinuousRange = orderedIndexes.length > 1 && orderedIndexes.every((item, index) => index === 0 || item === orderedIndexes[index - 1] + 1);
       const isRangeEndpoint = verse.reference === selected[0]?.reference || verse.reference === selected[selected.length - 1]?.reference;
       if (isContinuousRange && isRangeEndpoint) {
@@ -135,21 +188,19 @@ export default function ScripturePickerModal({
 
   useEffect(() => {
     if (!open) return;
+    const ready = readyBibles.get(language);
+    if (ready) {
+      // Already prepared: show it straight away.
+      setBible(ready);
+      setLoading(false);
+      setLoadError(false);
+      return;
+    }
     let alive = true;
     setLoading(true);
     setLoadError(false);
-    const load = language === 'en'
-      ? import('../../data/kjv.json').then(({ default: bible }) => {
-        const data = bible as BibleData;
-        return data.books.flatMap((book) => book.chapters.flatMap((chapter) =>
-          chapter.verses.map((verse) => ({
-            reference: `${book.englishName} ${chapter.chapter}:${verse.number}`,
-            text: verse.text,
-          })),
-        ));
-      })
-      : import('../../data/ceb.json').then(({ default: data }) => data as Verse[]);
-    load.then((allVerses) => { if (alive) setVerses(allVerses); })
+    loadBible(language)
+      .then((index) => { if (alive) setBible(index); })
       .catch(() => { if (alive) setLoadError(true); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
@@ -163,13 +214,13 @@ export default function ScripturePickerModal({
   }, [open, onClose]);
 
   const results = useMemo(() => {
-    const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const terms = deferredQuery.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
     if (!terms.length) return [];
     return verses.filter((verse) => {
       const searchable = `${verse.reference} ${verse.text}`.toLocaleLowerCase();
       return terms.every((term) => searchable.includes(term));
     }).slice(0, 100);
-  }, [query, verses]);
+  }, [deferredQuery, verses]);
 
   const chooseTestament = (value: 'old' | 'new') => {
     setTestament(value);
@@ -198,7 +249,7 @@ export default function ScripturePickerModal({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <BodyPortal><div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section role="dialog" aria-modal="true" aria-labelledby="scripture-picker-title" className="flex max-h-[min(760px,90vh)] w-full max-w-[780px] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101d2a] shadow-2xl">
         <header className="flex items-center justify-between border-b border-white/10 px-5 py-4">
           <div className="flex items-center gap-3">
@@ -211,7 +262,7 @@ export default function ScripturePickerModal({
         <div className="border-b border-white/10 p-4">
           <label className="mb-3 flex items-center justify-between gap-3 text-xs text-white/60">
             Scripture language
-            <select value={language} onChange={(event) => { setLanguage(event.target.value as 'en' | 'ceb'); setQuery(''); setSelected([]); setSelectionAnchor(null); setHoveredVerseReference(null); setVerses([]); }} className="rounded-lg border border-white/10 bg-[#091521] px-3 py-2 text-sm text-white outline-none focus:border-brand">
+            <select value={language} onChange={(event) => { setLanguage(event.target.value as 'en' | 'ceb'); setQuery(''); setSelected([]); setSelectionAnchor(null); setHoveredVerseReference(null); setBible(readyBibles.get(event.target.value as BibleLanguage) ?? null); }} className="rounded-lg border border-white/10 bg-[#091521] px-3 py-2 text-sm text-white outline-none focus:border-brand">
               <option value="en">English · King James Version</option>
               <option value="ceb">Bisaya · Cebuano</option>
             </select>
@@ -265,6 +316,6 @@ export default function ScripturePickerModal({
           <div className="flex items-center gap-2"><span className="text-[11px] text-white/45">{selectedForAdd.length > 1 ? `${selectedForAdd.length} verses selected` : ''}</span><button disabled={!selectedForAdd.length} onClick={addSelected} className="rounded-lg bg-brand px-4 py-2 text-sm font-bold text-navy hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40">{selectedForAdd.length > 1 ? 'Add verses to slide' : 'Add to slide'}</button><button onClick={onClose} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-warm-white/75 hover:bg-white/5">Cancel</button></div>
         </footer>
       </section>
-    </div>
+    </div></BodyPortal>
   );
 }

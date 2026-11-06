@@ -1,10 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import Header from './Header';
 import SidebarNav from './SidebarNav';
 import StatusFooter from './StatusFooter';
 import AuthGate from './AuthGate';
 import Studio from '../Routes/Studio';
+
+// Studio is the largest screen and stays loaded in the background. It takes no props, so
+// memo stops it from redrawing every time you change page.
+const BackgroundStudio = memo(Studio);
 
 type StudioSession = { live: boolean; streamStatus: string };
 const readStreamFooterMessage = () => {
@@ -55,8 +59,10 @@ export default function Layout() {
         <div className="flex min-h-0 flex-1">
           <SidebarNav />
           <main className="relative min-h-0 min-w-0 flex-1 overflow-visible">
-            <div ref={studioLayerRef} aria-hidden={!studioActive} style={{ zIndex: studioActive ? studioModalOpen ? 1000 : 30 : 0 }} className={`absolute inset-0 p-4 ${studioActive ? '' : 'pointer-events-none opacity-0'}`}>
-              <Studio />
+            {/* While another page is open, Studio is made invisible (not just see-through), so the
+                computer stops drawing its previews; streaming, recording and output windows keep running. */}
+            <div ref={studioLayerRef} aria-hidden={!studioActive} style={{ zIndex: studioActive ? studioModalOpen ? 1000 : 30 : 0 }} className={`absolute inset-0 p-4 ${studioActive ? '' : 'pointer-events-none invisible'}`}>
+              <BackgroundStudio />
             </div>
             <div ref={pageLayerRef} style={{ zIndex: studioActive ? 0 : studioModalOpen ? 1000 : 10 }} className={`absolute inset-0 p-4 ${studioActive ? 'hidden' : ''}`}>
               <Outlet />

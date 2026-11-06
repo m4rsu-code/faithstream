@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
-import { AlignCenter, AlignLeft, AlignRight, Bold, ChevronLeft, ChevronRight, Italic, Underline } from 'lucide-react';
+import { AlignCenter, AlignJustify, AlignLeft, AlignRight, AlignVerticalJustifyCenter, AlignVerticalJustifyEnd, AlignVerticalJustifyStart, Bold, ChevronLeft, ChevronRight, Italic, Underline } from 'lucide-react';
 import { readBackgroundLibrary, type BackgroundItem } from '../utils/mediaLibrary';
 import { PRESERVED_BLANK_LINE } from '../utils/slideLibrary';
-import { SONG_BACKGROUNDS, SONG_FONTS, songSlideLayouts, songTextArea, type Song, type SongSlideLayout, type SongStyle, type SongTextLayout } from '../utils/songbooks';
+import { backgroundClasses, backgroundStyle, customBackground, parseCustomBackground } from '../utils/slideBackground';
+import { activeAlign, alignText, hasLineAligns, lineAlignAt, remapLineAligns } from '../utils/lineAlign';
+import { SONG_BACKGROUNDS, SONG_FONTS, songLineKey, songSlideLayouts, songTextArea, withSlideLineAligns, type Song, type SongTextAlign, type SongSlideLayout, type SongStyle, type SongTextLayout } from '../utils/songbooks';
 
 /** One text area of a song slide, sized like Studio's text boxes (and shrunk if it would overflow). */
 function PreviewText({ layout }: { layout: SongTextLayout }) {
@@ -21,9 +23,14 @@ function PreviewText({ layout }: { layout: SongTextLayout }) {
     return () => observer.disconnect();
   }, [layout]);
   return (
-    <div ref={wrap} className="absolute flex items-center overflow-hidden" style={{ left: `${layout.x}%`, top: `${layout.y}%`, width: `${layout.w}%`, height: `${layout.h}%` }}>
-      <div ref={inner} className="w-full whitespace-pre-wrap break-words" style={{ transform: `scale(${fit})`, transformOrigin: 'center', textAlign: layout.align, lineHeight: layout.lineHeight }}>
-        <div style={{ fontFamily: `"${layout.font}", sans-serif`, fontSize: `${(layout.size / 1280) * 100}cqw`, fontWeight: layout.bold ? 800 : 500, fontStyle: layout.italic ? 'italic' : 'normal', textDecoration: layout.underline ? 'underline' : 'none', textTransform: layout.uppercase ? 'uppercase' : undefined, color: layout.color, textShadow: layout.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : undefined }}>{layout.text}</div>
+    <div ref={wrap} className={`absolute flex ${layout.valign === 'top' ? 'items-start' : layout.valign === 'bottom' ? 'items-end' : 'items-center'} overflow-hidden`} style={{ left: `${layout.x}%`, top: `${layout.y}%`, width: `${layout.w}%`, height: `${layout.h}%`, background: layout.boxBgOn ? layout.boxBg : undefined, borderRadius: '1cqw' }}>
+      <div ref={inner} className="w-full whitespace-pre-wrap break-words" style={{ transform: `scale(${fit})`, transformOrigin: layout.valign === 'top' ? 'top center' : layout.valign === 'bottom' ? 'bottom center' : 'center', textAlign: layout.align, textAlignLast: layout.align === 'justify' ? 'left' : undefined, lineHeight: layout.lineHeight, letterSpacing: `${((layout.letterSpacing ?? 0) / 1280) * 100}cqw` }}>
+        <div style={{ fontFamily: `"${layout.font}", sans-serif`, fontSize: `${(layout.size / 1280) * 100}cqw`, fontWeight: layout.bold ? 800 : 500, fontStyle: layout.italic ? 'italic' : 'normal', textDecoration: layout.underline ? 'underline' : 'none', textTransform: layout.uppercase ? 'uppercase' : undefined, color: layout.color, textShadow: layout.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : undefined }}>{hasLineAligns(layout.lineAligns)
+          ? layout.text.split('\n').map((line, lineIndex) => {
+            const lineAlign = lineAlignAt(layout.align, layout.lineAligns, lineIndex);
+            return <div key={lineIndex} style={{ textAlign: lineAlign, textAlignLast: lineAlign === 'justify' ? 'left' : undefined }}>{line || ' '}</div>;
+          })
+          : layout.text}</div>
       </div>
     </div>
   );
@@ -32,7 +39,7 @@ function PreviewText({ layout }: { layout: SongTextLayout }) {
 /** A song slide drawn like Studio draws it. Thumbnails pass still, so video backgrounds show a still frame. */
 export function SongSlidePreview({ layout, background, still = false }: { layout: SongSlideLayout; background?: BackgroundItem; still?: boolean }) {
   return (
-    <div className={`relative isolate aspect-video w-full overflow-hidden bg-gradient-to-br ${layout.background}`} style={{ containerType: 'inline-size' }}>
+    <div className={`relative isolate aspect-video w-full overflow-hidden bg-gradient-to-br ${backgroundClasses(layout.background)}`} style={{ containerType: 'inline-size', ...backgroundStyle(layout.background) }}>
       {background?.type === 'image' && <img src={background.url} alt="" draggable={false} className="absolute inset-0 h-full w-full object-cover" />}
       {background?.type === 'video' && (still
         ? <video src={`${background.url}#t=0.5`} muted playsInline preload="metadata" className="absolute inset-0 h-full w-full object-cover" />
@@ -45,12 +52,16 @@ export function SongSlidePreview({ layout, background, still = false }: { layout
 }
 
 type Area = { x: number; y: number; w: number; h: number };
-type Handle = 'move' | 'nw' | 'ne' | 'sw' | 'se';
+type Handle = 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w';
 const HANDLE_CLASS: Record<Exclude<Handle, 'move'>, string> = {
-  nw: '-left-1.5 -top-1.5 cursor-nwse-resize',
-  ne: '-right-1.5 -top-1.5 cursor-nesw-resize',
-  sw: '-bottom-1.5 -left-1.5 cursor-nesw-resize',
-  se: '-bottom-1.5 -right-1.5 cursor-nwse-resize',
+  nw: '-left-1.5 -top-1.5 h-3 w-3 rounded-sm cursor-nwse-resize',
+  ne: '-right-1.5 -top-1.5 h-3 w-3 rounded-sm cursor-nesw-resize',
+  sw: '-bottom-1.5 -left-1.5 h-3 w-3 rounded-sm cursor-nesw-resize',
+  se: '-bottom-1.5 -right-1.5 h-3 w-3 rounded-sm cursor-nwse-resize',
+  n: 'left-1/2 -top-1 h-2 w-6 -translate-x-1/2 rounded-full cursor-ns-resize',
+  s: 'left-1/2 -bottom-1 h-2 w-6 -translate-x-1/2 rounded-full cursor-ns-resize',
+  e: 'top-1/2 -right-1 h-6 w-2 -translate-y-1/2 rounded-full cursor-ew-resize',
+  w: 'top-1/2 -left-1 h-6 w-2 -translate-y-1/2 rounded-full cursor-ew-resize',
 };
 // Blank lines typed in the design editor are soft spacing within a slide. The song library
 // normally treats a blank line as a new slide, so retain it as an invisible line marker.
@@ -58,10 +69,14 @@ const encodeSlideText = (text: string) => text.replace(/\n[ \t]*\n/g, `\n${PRESE
 const decodeSlideText = (text: string) => text.replaceAll(PRESERVED_BLANK_LINE, '');
 
 /**
- * The lyrics area drawn over the preview: drag inside to move it, drag a corner to resize it.
- * It snaps to the centre of the slide (a guide line shows) and stays inside the slide.
+ * The lyrics area drawn over the preview, resized like a Canva text box:
+ * - drag inside to move it (it snaps to the slide's centre lines);
+ * - drag the left / right side to change the width: the words keep their size and rewrap;
+ * - drag a corner to make the words bigger or smaller with the box;
+ * - in both cases the height follows the text, sized for the longest slide, so nothing is
+ *   squeezed and there is no empty space. The top / bottom side sets a height by hand.
  */
-function AreaEditor({ area, onChange }: { area: Area; onChange: (area: Area) => void }) {
+function AreaEditor({ area, style, texts, textSize, onChange }: { area: Area; style: SongStyle; texts: string[]; /** The size the lyrics are shown at now (after any shrink-to-fit). */ textSize: number; onChange: (patch: Partial<SongStyle>) => void }) {
   const frame = useRef<HTMLDivElement>(null);
   const [guides, setGuides] = useState<{ x: boolean; y: boolean }>({ x: false, y: false });
   const start = (handle: Handle) => (event: ReactPointerEvent) => {
@@ -69,9 +84,31 @@ function AreaEditor({ area, onChange }: { area: Area; onChange: (area: Area) => 
     event.preventDefault();
     event.stopPropagation();
     const rect = frame.current.parentElement.getBoundingClientRect();
-    const origin = { px: event.clientX, py: event.clientY, ...area };
-    const MIN_W = 15;
-    const MIN_H = 10;
+    const origin = { px: event.clientX, py: event.clientY, ...area, fontSize: textSize };
+    const MIN_W = 10;
+    const MIN_H = 8;
+    const fitsText = handle !== 'move' && handle !== 'n' && handle !== 's';
+    const corner = handle.length === 2;
+    // An off-screen copy of the lyrics, styled like the slide, to measure how tall the text is.
+    const measure = fitsText ? document.createElement('div') : null;
+    if (measure) {
+      Object.assign(measure.style, {
+        position: 'fixed', left: '-10000px', top: '0', visibility: 'hidden', pointerEvents: 'none',
+        whiteSpace: 'pre-wrap', overflowWrap: 'break-word', fontFamily: `"${style.font}", sans-serif`,
+        fontWeight: style.bold ? '800' : '500', fontStyle: style.italic ? 'italic' : 'normal',
+        textTransform: style.caps ? 'uppercase' : 'none', lineHeight: String(style.lineHeight),
+      });
+      document.body.appendChild(measure);
+    }
+    const textHeight = (width: number, size: number) => {
+      if (!measure || !texts.length) return 0;
+      measure.style.width = `${(width / 100) * rect.width}px`;
+      measure.style.fontSize = `${(size / 1280) * rect.width}px`;
+      measure.style.letterSpacing = `${((style.letterSpacing ?? 0) / 1280) * rect.width}px`;
+      let tallest = 0;
+      for (const text of texts) { measure.textContent = text || ' '; tallest = Math.max(tallest, measure.offsetHeight); }
+      return (tallest / rect.height) * 100;
+    };
     const move = (moveEvent: PointerEvent) => {
       const dx = ((moveEvent.clientX - origin.px) / rect.width) * 100;
       const dy = ((moveEvent.clientY - origin.py) / rect.height) * 100;
@@ -82,8 +119,24 @@ function AreaEditor({ area, onChange }: { area: Area; onChange: (area: Area) => 
       } else {
         if (handle.includes('w')) { x = Math.min(Math.max(0, origin.x + dx), origin.x + origin.w - MIN_W); w = origin.x + origin.w - x; }
         if (handle.includes('e')) { w = Math.min(Math.max(MIN_W, origin.w + dx), 100 - origin.x); }
-        if (handle.includes('n')) { y = Math.min(Math.max(0, origin.y + dy), origin.y + origin.h - MIN_H); h = origin.y + origin.h - y; }
-        if (handle.includes('s')) { h = Math.min(Math.max(MIN_H, origin.h + dy), 100 - origin.y); }
+        if (handle === 'n') { y = Math.min(Math.max(0, origin.y + dy), origin.y + origin.h - MIN_H); h = origin.y + origin.h - y; }
+        if (handle === 's') { h = Math.min(Math.max(MIN_H, origin.h + dy), 100 - origin.y); }
+      }
+      if (fitsText) {
+        const fontSize = corner ? Math.min(140, Math.max(24, Math.round(origin.fontSize * (w / origin.w)))) : origin.fontSize;
+        const needed = Math.max(MIN_H, Math.ceil(textHeight(w, fontSize) + 1));
+        // Keep the edge that isn't being dragged still: top corners keep the bottom; sides keep the
+        // top, middle or bottom, following where the text sits in the box.
+        const bottom = origin.y + origin.h;
+        const middle = origin.y + origin.h / 2;
+        const anchor = handle === 'nw' || handle === 'ne' ? 'bottom' : handle === 'sw' || handle === 'se' ? 'top' : style.valign ?? 'middle';
+        if (anchor === 'top') { h = Math.min(needed, 100 - origin.y); y = origin.y; }
+        else if (anchor === 'bottom') { h = Math.min(needed, bottom); y = bottom - h; }
+        else { h = Math.min(needed, 2 * Math.min(middle, 100 - middle)); y = middle - h / 2; }
+        setGuides({ x: false, y: false });
+        // The area now fits the longest slide, so "shrink to fit" isn't needed (and would fight the resize).
+        onChange({ area: { x, y, w, h }, fontSize, autoFit: false });
+        return;
       }
       // Snap the box's centre to the slide's centre lines.
       const snapX = handle === 'move' && Math.abs(x + w / 2 - 50) < 1.5;
@@ -91,9 +144,10 @@ function AreaEditor({ area, onChange }: { area: Area; onChange: (area: Area) => 
       if (snapX) x = 50 - w / 2;
       if (snapY) y = 50 - h / 2;
       setGuides({ x: snapX, y: snapY });
-      onChange({ x, y, w, h });
+      onChange({ area: { x, y, w, h } });
     };
     const end = () => {
+      measure?.remove();
       setGuides({ x: false, y: false });
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', end);
@@ -107,12 +161,12 @@ function AreaEditor({ area, onChange }: { area: Area; onChange: (area: Area) => 
     <div
       ref={frame}
       onPointerDown={start('move')}
-      title="Drag to move the lyrics · drag a corner to resize"
+      title="Drag to move · drag a side to rewrap the words · drag a corner to resize the words"
       className="absolute z-10 cursor-move rounded-sm border-2 border-dashed border-brand/90 bg-brand/5 hover:bg-brand/10"
       style={{ left: `${area.x}%`, top: `${area.y}%`, width: `${area.w}%`, height: `${area.h}%` }}
     >
       {(Object.keys(HANDLE_CLASS) as Exclude<Handle, 'move'>[]).map((handle) => (
-        <span key={handle} onPointerDown={start(handle)} className={`absolute h-3 w-3 rounded-sm border-2 border-brand bg-white ${HANDLE_CLASS[handle]}`} />
+        <span key={handle} onPointerDown={start(handle)} className={`absolute border-2 border-brand bg-white ${HANDLE_CLASS[handle]}`} />
       ))}
     </div>
   </>;
@@ -209,13 +263,26 @@ export default function SongDesignPanel({
     const template = generated[0];
     return fixedVerseTexts.map((verse) => {
       const text = `${verse.reference}\n${verse.text}`;
-      return { ...template, label: verse.reference, text, box: { ...template.box, text } };
+      return { ...template, label: verse.reference, text, box: { ...template.box, text, lineAligns: style.lineAligns?.[songLineKey(text)] } };
     });
   }, [song, style, fixedVerseSlides, fixedVerseTexts]);
   const current = layouts[Math.min(index, Math.max(0, layouts.length - 1))];
   const [textDraft, setTextDraft] = useState(decodeSlideText(current?.text ?? ''));
   // Do not reset the editor draft on content updates while typing; reload it only when changing slides.
-  useEffect(() => { setTextDraft(decodeSlideText(current?.text ?? '')); }, [index]);
+  // Highlighted lines in "Text on this slide": the align buttons then change only those lines on this slide.
+  const [textRange, setTextRange] = useState<{ start: number; end: number } | null>(null);
+  useEffect(() => { setTextDraft(decodeSlideText(current?.text ?? '')); setTextRange(null); }, [index]);
+  const lineEditable = current?.kind === 'lyrics';
+  const slideLineAligns = current?.kind === 'lyrics' ? current.box.lineAligns : undefined;
+  const lineRange = lineEditable && textRange && textRange.end <= textDraft.length ? textRange : null;
+  const shownAlign = activeAlign(textDraft, style.align, slideLineAligns, lineRange);
+  const chooseAlign = (value: SongTextAlign) => {
+    if (!current || !lineRange) { onChange({ align: value }); return; }
+    const result = alignText(textDraft, style.align, slideLineAligns, value, lineRange);
+    // Everything highlighted: align the whole design, as before.
+    if (!result.lineAligns && result.align === value && value !== style.align) { onChange({ align: value, lineAligns: withSlideLineAligns(style.lineAligns, current.text, undefined) }); return; }
+    onChange({ lineAligns: withSlideLineAligns(style.lineAligns, current.text, result.lineAligns) });
+  };
   const backgroundItem = style.backgroundAssetId ? library.find((item) => item.id === style.backgroundAssetId) : undefined;
   const collections = ['All', ...[...new Set(library.map((item) => item.collection || 'Uploads'))].sort()];
   const visibleLibrary = collection === 'All' ? library : library.filter((item) => (item.collection || 'Uploads') === collection);
@@ -266,7 +333,7 @@ export default function SongDesignPanel({
           <FitStage>
             <div className="relative select-none overflow-hidden rounded-lg border border-white/10 shadow-2xl shadow-black/40">
               <SongSlidePreview layout={current} background={backgroundItem} />
-              {current.kind === 'lyrics' && <AreaEditor area={songTextArea(style)} onChange={(area) => onChange({ area })} />}
+              {current.kind === 'lyrics' && <AreaEditor area={songTextArea(style)} style={style} texts={layouts.filter((layout) => layout.kind === 'lyrics').map((layout) => layout.box.text)} textSize={current.box.size} onChange={onChange} />}
             </div>
           </FitStage>
           <div className="flex shrink-0 items-center justify-between gap-3">
@@ -280,7 +347,7 @@ export default function SongDesignPanel({
           <p className="shrink-0 text-center text-[11px] text-warm-white/45">{fixedVerseSlides
             ? 'Each verse is its own slide. Change the text layout, background, and styling here before adding the passage to Studio.'
             : current.kind === 'lyrics'
-            ? 'Drag the dashed box to move the lyrics, or a corner to resize. It applies to every lyric slide. Use ← → to change slides.'
+            ? 'Drag the dashed box to move the lyrics. Drag a side to rewrap the words, or a corner to make them bigger or smaller — the box fits the longest slide. It applies to every lyric slide. Use ← → to change slides.'
             : 'The title slide keeps a centred layout. Choose a lyric slide to move or resize the lyrics.'}</p>
           {/* Small screens: thumbnails underneath instead of the side rail */}
           <div className="flex shrink-0 gap-1.5 overflow-x-auto pb-1 md:hidden">
@@ -299,14 +366,42 @@ export default function SongDesignPanel({
           </div>}
         </div>
 
-        <Section title="Text">
-          {current && onTextChange && <label className="flex flex-col gap-1 text-[11px] text-warm-white/65">Text on this slide
-            <textarea aria-label="Text on this slide" value={textDraft} onChange={(event) => {
+        {current && (onTextChange || lineEditable) && <Section title="Text">
+          <label className="flex flex-col gap-1 text-[11px] text-warm-white/65">{onTextChange ? 'Text on this slide' : 'Lines on this slide'}
+            <textarea aria-label="Text on this slide" readOnly={!onTextChange} value={textDraft} onChange={(event) => {
+              if (!onTextChange) return;
               const text = event.target.value;
+              // Keep this slide's own line alignments with its new text.
+              if (current.kind === 'lyrics' && hasLineAligns(current.box.lineAligns)) {
+                const nextText = encodeSlideText(text);
+                const moved = remapLineAligns(current.text, nextText, current.box.lineAligns);
+                onChange({ lineAligns: withSlideLineAligns(withSlideLineAligns(style.lineAligns, current.text, undefined), nextText, moved) });
+              }
               setTextDraft(text);
               onTextChange({ index, kind: current.kind, oldText: current.text, occurrence: layouts.slice(0, index).filter((layout) => layout.kind === current.kind && layout.text === current.text).length, text: current.kind === 'lyrics' ? encodeSlideText(text) : text });
-            }} rows={5} spellCheck className="min-h-24 w-full resize-y rounded-md border border-white/10 bg-[#091521] px-2.5 py-2 text-xs leading-relaxed text-white outline-none focus:border-brand" />
-          </label>}
+            }} onSelect={(event) => setTextRange({ start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd })} rows={5} spellCheck className="min-h-24 w-full resize-y rounded-md border border-white/10 bg-[#091521] px-2.5 py-2 text-xs leading-relaxed text-white outline-none focus:border-brand" />
+            {lineEditable && <span className="text-[10px] leading-snug text-warm-white/45">Highlight lines here, then pick an alignment to change just those lines on this slide. With nothing highlighted, alignment changes every slide.</span>}
+          </label>
+        </Section>}
+
+        <Section title="Text style">
+          <div className="flex items-center gap-0.5">
+            <ToggleIcon label="Bold" active={style.bold} onClick={() => onChange({ bold: !style.bold })}><Bold size={15} /></ToggleIcon>
+            <ToggleIcon label="Italic" active={style.italic} onClick={() => onChange({ italic: !style.italic })}><Italic size={15} /></ToggleIcon>
+            <ToggleIcon label="Underline" active={style.underline} onClick={() => onChange({ underline: !style.underline })}><Underline size={15} /></ToggleIcon>
+            <ToggleIcon label={style.caps ? 'All caps on (click for normal text)' : 'All caps'} active={style.caps} onClick={() => onChange({ caps: !style.caps })}><span className="text-[12px] font-bold leading-none tracking-tight">{style.caps ? 'AA' : 'Aa'}</span></ToggleIcon>
+            <span className="mx-1 h-5 w-px bg-white/10" />
+            <ToggleIcon label="Align left" active={shownAlign === 'left'} onClick={() => chooseAlign('left')}><AlignLeft size={15} /></ToggleIcon>
+            <ToggleIcon label="Align center" active={shownAlign === 'center'} onClick={() => chooseAlign('center')}><AlignCenter size={15} /></ToggleIcon>
+            <ToggleIcon label="Align right" active={shownAlign === 'right'} onClick={() => chooseAlign('right')}><AlignRight size={15} /></ToggleIcon>
+            <ToggleIcon label="Justify" active={shownAlign === 'justify'} onClick={() => chooseAlign('justify')}><AlignJustify size={15} /></ToggleIcon>
+          </div>
+          <div className="flex items-center gap-0.5 text-[11px] text-warm-white/65">
+            <span className="mr-1.5">Position in box</span>
+            <ToggleIcon label="Text at top of the box" active={style.valign === 'top'} onClick={() => onChange({ valign: 'top' })}><AlignVerticalJustifyStart size={15} /></ToggleIcon>
+            <ToggleIcon label="Text in middle of the box" active={(style.valign ?? 'middle') === 'middle'} onClick={() => onChange({ valign: 'middle' })}><AlignVerticalJustifyCenter size={15} /></ToggleIcon>
+            <ToggleIcon label="Text at bottom of the box" active={style.valign === 'bottom'} onClick={() => onChange({ valign: 'bottom' })}><AlignVerticalJustifyEnd size={15} /></ToggleIcon>
+          </div>
           <select aria-label="Font" value={style.font} onChange={(event) => onChange({ font: event.target.value })} className={select} style={{ fontFamily: `"${style.font}", sans-serif` }}>
             {[...new Set([style.font, ...SONG_FONTS])].map((font) => <option key={font} value={font} style={{ fontFamily: `"${font}", sans-serif` }}>{font}</option>)}
           </select>
@@ -317,22 +412,25 @@ export default function SongDesignPanel({
             <input type="checkbox" checked={style.autoFit} onChange={(event) => onChange({ autoFit: event.target.checked })} className="h-3.5 w-3.5 accent-brand" />
             Shrink long parts to fit (same size on every slide)
           </label>
+        </Section>
+
+        <Section title="Spacing">
           <label className="text-[11px] text-warm-white/65"><span className="flex justify-between">Line spacing <span className="tabular-nums text-warm-white/85">{style.lineHeight.toFixed(2)}</span></span>
             <input type="range" min={0.8} max={2.2} step={0.05} value={style.lineHeight} onChange={(event) => onChange({ lineHeight: Number(event.target.value) })} className={slider} />
           </label>
-          <div className="flex items-center gap-0.5">
-            <ToggleIcon label="Bold" active={style.bold} onClick={() => onChange({ bold: !style.bold })}><Bold size={15} /></ToggleIcon>
-            <ToggleIcon label="Italic" active={style.italic} onClick={() => onChange({ italic: !style.italic })}><Italic size={15} /></ToggleIcon>
-            <ToggleIcon label="Underline" active={style.underline} onClick={() => onChange({ underline: !style.underline })}><Underline size={15} /></ToggleIcon>
-            <ToggleIcon label={style.caps ? 'All caps on (click for normal text)' : 'All caps'} active={style.caps} onClick={() => onChange({ caps: !style.caps })}><span className="text-[12px] font-bold leading-none tracking-tight">{style.caps ? 'AA' : 'Aa'}</span></ToggleIcon>
-            <span className="mx-1 h-5 w-px bg-white/10" />
-            <ToggleIcon label="Align left" active={style.align === 'left'} onClick={() => onChange({ align: 'left' })}><AlignLeft size={15} /></ToggleIcon>
-            <ToggleIcon label="Align center" active={style.align === 'center'} onClick={() => onChange({ align: 'center' })}><AlignCenter size={15} /></ToggleIcon>
-            <ToggleIcon label="Align right" active={style.align === 'right'} onClick={() => onChange({ align: 'right' })}><AlignRight size={15} /></ToggleIcon>
-          </div>
+          <label className="text-[11px] text-warm-white/65"><span className="flex justify-between">Letter spacing <span className="tabular-nums text-warm-white/85">{style.letterSpacing ?? 0}px</span></span>
+            <input type="range" min={-4} max={20} step={1} value={style.letterSpacing ?? 0} onChange={(event) => onChange({ letterSpacing: Number(event.target.value) })} className={slider} />
+          </label>
+        </Section>
+
+        <Section title="Look">
           <div className="flex items-center gap-3 text-[11px] text-warm-white/70">
             <label className="flex items-center gap-2">Colour <input type="color" value={style.color} onChange={(event) => onChange({ color: event.target.value.toUpperCase() })} className="h-7 w-10 cursor-pointer rounded border border-white/15 bg-transparent" /></label>
             <label className="flex cursor-pointer items-center gap-2"><input type="checkbox" checked={style.shadow} onChange={(event) => onChange({ shadow: event.target.checked })} className="h-3.5 w-3.5 accent-brand" /> Shadow</label>
+          </div>
+          <div className="flex items-center gap-3 text-[11px] text-warm-white/70">
+            <label className="flex items-center gap-2">Box background <input type="color" aria-label="Box background color" value={style.boxBg ?? '#000000'} onChange={(event) => onChange({ boxBg: event.target.value.toUpperCase(), boxBgOn: true })} className="h-7 w-10 cursor-pointer rounded border border-white/15 bg-transparent" /></label>
+            <label className="flex cursor-pointer items-center gap-2"><input type="checkbox" checked={style.boxBgOn ?? false} onChange={(event) => onChange({ boxBgOn: event.target.checked })} className="h-3.5 w-3.5 accent-brand" /> Show</label>
           </div>
         </Section>
 
@@ -351,6 +449,18 @@ export default function SongDesignPanel({
         </Section>
 
         <Section title="Background">
+          {(() => {
+            const custom = parseCustomBackground(style.background);
+            const from = custom?.from ?? '#1E293B';
+            const applyColor = (background: string) => onChange({ background, backgroundAssetId: undefined });
+            return <div className="flex flex-wrap items-center gap-2 text-[11px] text-warm-white/70">
+              <label className="flex items-center gap-1.5">Your own color
+                <input type="color" aria-label="Background color" value={from} onChange={(event) => applyColor(customBackground(event.target.value, custom?.to))} className={`h-7 w-10 cursor-pointer rounded border bg-transparent ${custom && !style.backgroundAssetId ? 'border-brand' : 'border-white/15'}`} />
+              </label>
+              <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={!!custom?.to} onChange={(event) => applyColor(customBackground(from, event.target.checked ? custom?.to ?? '#000000' : undefined))} className="h-3.5 w-3.5 accent-brand" /> Blend to</label>
+              {custom?.to && <input type="color" aria-label="Second background color" value={custom.to} onChange={(event) => applyColor(customBackground(from, event.target.value))} className="h-7 w-10 cursor-pointer rounded border border-white/15 bg-transparent" />}
+            </div>;
+          })()}
           <div className="grid grid-cols-4 gap-1.5">
             {SONG_BACKGROUNDS.map((background) => {
               const selected = !style.backgroundAssetId && style.background === background;

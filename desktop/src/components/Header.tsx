@@ -14,11 +14,13 @@ import {
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import Logo from '../assets/img/Logo.png';
-import { signOutLocalAccount } from './AuthGate';
+import { saveAccountServiceTitle, signOutLocalAccount } from './AuthGate';
+import { getAccountStorageKey } from '../utils/accountStorage';
 
-const SERVICE_HEADER_KEY = 'faithstream.service-header';
+/** The header title is saved per account: on this computer, and on the account so it shows on every device. */
+const SERVICE_TITLE_KEY = 'faithstream.service-title';
 const USER_PROFILE_KEY = 'faithstream.user-profile';
-const DEFAULT_SERVICE_NAME = 'Sunday Worship Service';
+const SERVICE_TITLE_PLACEHOLDER = 'Put your title here';
 type UserProfile = { name: string; role: string; email: string; photoUrl?: string | null; photoPosition?: { x: number; y: number } };
 const readUserProfile = (): UserProfile => {
   try {
@@ -27,16 +29,34 @@ const readUserProfile = (): UserProfile => {
   } catch { return { name: 'John Doe', role: 'Media Team', email: '', photoUrl: null, photoPosition: { x: 50, y: 50 } }; }
 };
 
-function readServiceHeader() {
+type LocalServiceTitle = { title: string; pending?: boolean };
+const readLocalServiceTitle = (): LocalServiceTitle => {
   try {
-    const saved = localStorage.getItem(SERVICE_HEADER_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved) as { name?: string };
-      return parsed.name || DEFAULT_SERVICE_NAME;
-    }
-  } catch { /* Use the defaults when saved settings are unavailable. */ }
-  return DEFAULT_SERVICE_NAME;
+    const saved = JSON.parse(localStorage.getItem(getAccountStorageKey(SERVICE_TITLE_KEY)) ?? 'null') as LocalServiceTitle | null;
+    if (saved && typeof saved.title === 'string') return { title: saved.title, pending: !!saved.pending };
+  } catch { /* Fall back to an empty title. */ }
+  return { title: '' };
+};
+const writeLocalServiceTitle = (value: LocalServiceTitle) => {
+  try { localStorage.setItem(getAccountStorageKey(SERVICE_TITLE_KEY), JSON.stringify(value)); } catch { /* Keep it for this session. */ }
+};
+/** The account's title wins, unless a change made on this computer has not reached the account yet. */
+function readServiceHeader() {
+  const local = readLocalServiceTitle();
+  if (local.pending) return local.title;
+  try {
+    const profile = JSON.parse(localStorage.getItem(USER_PROFILE_KEY) ?? 'null') as { serviceTitle?: unknown } | null;
+    if (typeof profile?.serviceTitle === 'string') return profile.serviceTitle;
+  } catch { /* Use this computer's copy. */ }
+  return local.title;
 }
+/** Saves the title here first, then to the account (retried after the next sign-in if offline). */
+const pushServiceTitle = (title: string) => {
+  writeLocalServiceTitle({ title, pending: true });
+  void saveAccountServiceTitle(title)
+    .then(() => writeLocalServiceTitle({ title }))
+    .catch(() => { /* Stays pending and is sent next time the account loads. */ });
+};
 
 type HeaderProps = {
   userName?: string;
@@ -81,9 +101,18 @@ const Header: React.FC<HeaderProps> = ({
   const previousSession = useRef(readStudioSession());
   const unreadCount = notifications.filter((notification) => !notification.read).length;
 
+  // Follow the signed-in account: switching accounts or loading the account's title updates the header.
   useEffect(() => {
-    try { localStorage.setItem(SERVICE_HEADER_KEY, JSON.stringify({ name: serviceName })); } catch { /* Keep the current header usable if storage is unavailable. */ }
-  }, [serviceName]);
+    const refresh = () => {
+      const local = readLocalServiceTitle();
+      if (local.pending) pushServiceTitle(local.title);
+      const title = readServiceHeader();
+      setServiceName(title);
+      if (!local.pending) writeLocalServiceTitle({ title });
+    };
+    window.addEventListener('faithstream:profile-updated', refresh);
+    return () => window.removeEventListener('faithstream:profile-updated', refresh);
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
@@ -254,14 +283,14 @@ const Header: React.FC<HeaderProps> = ({
         <div className="relative flex min-w-0 items-center gap-2">
           <div className="min-w-0">
             {editingName ? (
-              <form onSubmit={(event) => { event.preventDefault(); const name = nameDraft.trim() || serviceName || DEFAULT_SERVICE_NAME; setServiceName(name); setNameDraft(name); setEditingName(false); }} className="flex items-center gap-1">
-                <input autoFocus aria-label="Service title" value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setNameDraft(serviceName); setEditingName(false); } }} className="w-64 rounded bg-white/5 px-2 py-1 text-sm font-medium text-white outline-none ring-1 ring-brand" />
+              <form onSubmit={(event) => { event.preventDefault(); const name = nameDraft.trim().slice(0, 120); setServiceName(name); setNameDraft(name); setEditingName(false); if (name !== serviceName) pushServiceTitle(name); }} className="flex items-center gap-1">
+                <input autoFocus aria-label="Service title" placeholder={SERVICE_TITLE_PLACEHOLDER} maxLength={120} value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setNameDraft(serviceName); setEditingName(false); } }} className="w-64 rounded bg-white/5 px-2 py-1 text-sm font-medium text-white outline-none ring-1 ring-brand" />
                 <button type="submit" aria-label="Save service title" className="rounded p-1 text-emerald-300 hover:bg-white/10"><Check size={15} /></button>
                 <button type="button" aria-label="Cancel title edit" onClick={() => { setNameDraft(serviceName); setEditingName(false); }} className="rounded p-1 text-white/50 hover:bg-white/10"><X size={15} /></button>
               </form>
             ) : (
               <div className="flex items-center gap-1">
-                <button type="button" aria-label={`Edit service title: ${serviceName}`} title="Click to change the service title" onClick={() => { setNameDraft(serviceName); setEditingName(true); }} className="max-w-64 truncate text-left text-sm font-medium text-white hover:text-brand">{serviceName}</button>
+                <button type="button" aria-label={serviceName ? `Edit service title: ${serviceName}` : 'Add a service title'} title="Click to change the service title" onClick={() => { setNameDraft(serviceName); setEditingName(true); }} className={`max-w-64 truncate text-left text-sm font-medium hover:text-brand ${serviceName ? 'text-white' : 'italic text-white/40'}`}>{serviceName || SERVICE_TITLE_PLACEHOLDER}</button>
                 <button type="button" aria-label="Edit service title" title="Edit service title" onClick={() => { setNameDraft(serviceName); setEditingName(true); }} className="rounded p-1 text-white/45 hover:bg-white/10 hover:text-white"><Pencil size={12} /></button>
               </div>
             )}

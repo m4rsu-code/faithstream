@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { CircleHelp, Info, X } from 'lucide-react';
+import BodyPortal from './BodyPortal';
 
 const HELP_SECTIONS = [
   {
@@ -84,7 +85,7 @@ export default function StatusFooter({ message = 'Ready.' }: { message?: string 
       <button type="button" onClick={() => setHelpOpen(true)} className="flex items-center gap-1.5 text-xs hover:text-brand">
         <CircleHelp size={16} /> Need help?
       </button>
-      {helpOpen && <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}>
+      {helpOpen && <BodyPortal><div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}>
         <section role="dialog" aria-modal="true" aria-labelledby="stream-help-title" className="flex h-[90vh] max-h-[760px] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-white/10 bg-[#101d2a] text-white shadow-2xl">
           <header className="flex items-start justify-between border-b border-white/10 px-5 py-4">
             <div>
@@ -107,7 +108,7 @@ export default function StatusFooter({ message = 'Ready.' }: { message?: string 
             <button type="button" onClick={() => setHelpOpen(false)} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy hover:brightness-110">Close</button>
           </div>
         </section>
-      </div>}
+      </div></BodyPortal>}
     </footer>
   );
 }

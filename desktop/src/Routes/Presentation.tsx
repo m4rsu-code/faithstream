@@ -11,8 +11,12 @@ import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   AlignCenter,
+  AlignJustify,
   AlignLeft,
   AlignRight,
+  AlignVerticalJustifyCenter,
+  AlignVerticalJustifyEnd,
+  AlignVerticalJustifyStart,
   ArrowRight,
   Bold,
   BookOpen,
@@ -68,17 +72,24 @@ import {
   savePresentationCategories,
   type PathedFile,
 } from '../utils/slideLibrary';
-import CountdownDisplay, { type CountdownSettings } from '../components/CountdownDisplay';
+import CountdownDisplay, { COUNTDOWN_FONTS, DEFAULT_COUNTDOWN_UNITS, type CountdownFormat, type CountdownSettings } from '../components/CountdownDisplay';
 import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimization';
 import { getAccountDatabaseName, getAccountStorageKey } from '../utils/accountStorage';
 import GOOGLE_FONT_FAMILIES from '../data/google-font-families.json';
 import { API_BASE_URL as PRESENTATION_API_URL } from '../utils/apiConfig';
 import Songbooks from './Songbooks';
 import { songSlideLayouts, type Song, type SongTextLayout } from '../utils/songbooks';
+import SlideTextEditor from '../components/SlideTextEditor';
+import { backgroundClasses, backgroundStyle, customBackground, parseCustomBackground } from '../utils/slideBackground';
+import { activeAlign, alignText, hasLineAligns, lineAlignAt, remapLineAligns, type TextRange } from '../utils/lineAlign';
+import BodyPortal from '../components/BodyPortal';
 
 /* ---------- Types & data ---------- */
 
-type Align = 'left' | 'center' | 'right';
+type Align = 'left' | 'center' | 'right' | 'justify';
+type VAlign = 'top' | 'middle' | 'bottom';
+const VALIGN_ITEMS: Record<VAlign, string> = { top: 'items-start', middle: 'items-center', bottom: 'items-end' };
+const VALIGN_ORIGIN: Record<VAlign, string> = { top: 'top center', middle: 'center', bottom: 'bottom center' };
 
 type TextBox = {
   text: string; // first line = title, other lines = subtitle
@@ -102,6 +113,17 @@ type TextBox = {
   h: number;
   /** Show the text in capital letters. The typed text keeps its case, so this can be switched off again. */
   uppercase?: boolean;
+  /** Where the text sits inside its box, top to bottom. Missing means middle (older slides). */
+  valign?: VAlign;
+  /** Alignment of single lines that differ from the box's `align` (index = line number; null = follow the box). */
+  lineAligns?: (Align | null)[];
+};
+
+/** Applies a change to a text box; editing the text keeps each line's own alignment. */
+const patchTextBox = (box: TextBox, patch: Partial<TextBox>): TextBox => {
+  const next = { ...box, ...patch };
+  if (patch.text !== undefined && !('lineAligns' in patch) && box.lineAligns) next.lineAligns = remapLineAligns(box.text, patch.text, box.lineAligns);
+  return next;
 };
 
 type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; aspectRatio?: number; layerOrder?: number | 'back' | 'front' };
@@ -197,24 +219,75 @@ const defaultBox = (text: string, size = 96): TextBox => ({
   h: 50,
 });
 
-const TEMPLATES = [
-  { label: 'Worship', bg: BGS[0], text: 'Worship\nOur God is worthy', size: 96 },
-  {
-    label: 'Scripture',
-    bg: BGS[1],
-    text: 'Psalm 46:1\nGod is our refuge and strength, a very present help in trouble.',
-    size: 64,
-  },
-  { label: 'Lyrics', bg: BGS[7], text: 'Song title\nLyrics go here', size: 80 },
-  { label: 'Announcement', bg: BGS[2], text: 'Church\nAnnouncements', size: 88 },
-  { label: 'Custom Background', bg: BGS[5], text: 'Your text here', size: 96 },
+/**
+ * A template is a whole presentation design: a matching set of slides (welcome, worship,
+ * Scripture, sermon, announcements, giving, closing) in one look. "My templates" are
+ * presentations the user saved as a template.
+ */
+type SlideTemplate = { id: string; label: string; slides: Omit<SlideT, 'id'>[]; mine?: boolean; colors?: string[]; updatedAt?: number };
+type TemplateTheme = { id: string; label: string; bg: string; altBg: string; text: string; soft: string; accent: string; heading: string; body: string };
+const tb = (text: string, size: number, patch: Partial<TextBox>): TextBox => ({ ...defaultBox(text, size), autoSize: true, ...patch });
+const accentBar = (id: number, x: number, y: number, w: number, h: number, fill: string): ShapeT => ({ id, kind: 'rectangle', x, y, w, h, fill, layerOrder: 2000 });
+const TEMPLATE_THEMES: TemplateTheme[] = [
+  { id: 'midnight', label: 'Midnight', bg: customBackground('#0F1B2D', '#1E3A5F'), altBg: customBackground('#0B1422', '#16263D'), text: '#FFFFFF', soft: '#C9D8EC', accent: '#F5B971', heading: 'Montserrat', body: 'Montserrat' },
+  { id: 'warm', label: 'Warm Sunday', bg: customBackground('#2A1D17', '#5A3A28'), altBg: customBackground('#1E1511', '#3B281D'), text: '#FFF8F0', soft: '#EAD9C8', accent: '#F2A65A', heading: 'Poppins', body: 'Poppins' },
+  { id: 'light', label: 'Clean Light', bg: customBackground('#F7F4EE'), altBg: customBackground('#ECE6DC'), text: '#1F2937', soft: '#4B5563', accent: '#B4632E', heading: 'Montserrat', body: 'Calibri' },
+  { id: 'forest', label: 'Forest', bg: customBackground('#0E3B2E', '#06231B'), altBg: customBackground('#0A2C22', '#041A14'), text: '#FFFFFF', soft: '#CDEBDD', accent: '#E9C46A', heading: 'Montserrat', body: 'Cambria' },
 ];
+const themeSlides = (t: TemplateTheme): Omit<SlideT, 'id'>[] => {
+  const head = (text: string, size: number, patch: Partial<TextBox>) => tb(text, size, { font: t.heading, color: t.text, shadow: false, ...patch });
+  const body = (text: string, size: number, patch: Partial<TextBox>) => tb(text, size, { font: t.body, color: t.soft, bold: false, shadow: false, ...patch });
+  const label = (text: string, patch: Partial<TextBox>) => tb(text, 28, { font: t.heading, color: t.accent, letterSpacing: 6, shadow: false, ...patch });
+  return [
+    { title: 'Welcome', bg: t.bg, dim: 0, box: head('Welcome', 128, { x: 10, y: 28, w: 80, h: 22, letterSpacing: 2 }), extraBoxes: [{ id: 1, box: body("We're so glad you're here", 44, { x: 10, y: 56, w: 80, h: 10 }) }], shapes: [accentBar(1, 44, 52.5, 12, 0.7, t.accent)] },
+    { title: 'Worship', bg: t.altBg, dim: 0, box: head('Lyrics go here\nSecond line of the song', 76, { x: 8, y: 22, w: 84, h: 56, lineHeight: 1.25 }), extraBoxes: [{ id: 1, box: body('Song title', 26, { x: 8, y: 88, w: 84, h: 6 }) }] },
+    { title: 'Scripture', bg: t.bg, dim: 0, box: body('God is our refuge and strength, a very present help in trouble.', 64, { font: t.body, color: t.text, italic: true, x: 12, y: 26, w: 76, h: 40, lineHeight: 1.3 }), extraBoxes: [{ id: 1, box: label('PSALM 46:1', { x: 12, y: 72, w: 76, h: 8 }) }] },
+    { title: 'Sermon title', bg: t.altBg, dim: 0, box: head('Sermon Title', 104, { align: 'left', valign: 'top', x: 9, y: 36, w: 72, h: 30, lineHeight: 1.05 }), extraBoxes: [{ id: 1, box: label('THIS SUNDAY', { align: 'left', x: 9, y: 26, w: 50, h: 7 }) }, { id: 2, box: body('Pastor Name · Book 1:1-10', 38, { align: 'left', x: 9, y: 70, w: 72, h: 8 }) }], shapes: [accentBar(1, 9, 34, 8, 0.8, t.accent)] },
+    { title: 'Sermon point', bg: t.bg, dim: 0, box: head('The main point of this part of the message', 72, { align: 'left', valign: 'top', x: 9, y: 30, w: 80, h: 34, lineHeight: 1.15 }), extraBoxes: [{ id: 1, box: label('POINT 1', { align: 'left', x: 9, y: 21, w: 40, h: 7 }) }, { id: 2, box: body('Supporting verse or note', 36, { align: 'left', x: 9, y: 70, w: 80, h: 8 }) }], shapes: [accentBar(1, 0, 0, 1.4, 100, t.accent)] },
+    { title: 'Announcements', bg: t.altBg, dim: 0, box: head('Announcements', 64, { align: 'left', x: 9, y: 10, w: 82, h: 12 }), extraBoxes: [{ id: 1, box: body('• Youth night — Friday 7 PM\n• Prayer meeting — Wednesday 6 PM\n• Bible study — Saturday 9 AM', 44, { align: 'left', valign: 'top', x: 9, y: 30, w: 82, h: 58, lineHeight: 1.6, color: t.text }) }], shapes: [accentBar(1, 9, 23.5, 10, 0.7, t.accent)] },
+    { title: 'Giving', bg: t.bg, dim: 0, box: head('Tithes & Offering', 92, { x: 10, y: 26, w: 80, h: 20 }), extraBoxes: [{ id: 1, box: body('"Each of you should give what you have decided in your heart to give." — 2 Corinthians 9:7', 36, { italic: true, x: 14, y: 54, w: 72, h: 16, lineHeight: 1.35 }) }], shapes: [accentBar(1, 45, 50, 10, 0.7, t.accent)] },
+    { title: 'Closing', bg: t.altBg, dim: 0, box: head('Thank you for worshiping with us', 80, { x: 10, y: 30, w: 80, h: 26, lineHeight: 1.15 }), extraBoxes: [{ id: 1, box: body('See you next Sunday · God bless!', 40, { x: 10, y: 62, w: 80, h: 9 }) }] },
+  ];
+};
+const TEMPLATES: SlideTemplate[] = TEMPLATE_THEMES.map((theme) => ({ id: theme.id, label: theme.label, slides: themeSlides(theme), colors: [theme.bg, theme.altBg, customBackground(theme.accent)] }));
 
 const TEXT_PRESETS = [
   { label: 'Title + subtitle', text: 'Title\nSubtitle goes here', size: 96 },
 ];
 
 let nextId = 100;
+/** Presentations saved as templates ("My templates") for this account. */
+const MY_TEMPLATES_KEY = 'faithstream.presentation.templates';
+const loadMyTemplates = (): SlideTemplate[] => {
+  try {
+    const raw = JSON.parse(localStorage.getItem(getAccountStorageKey(MY_TEMPLATES_KEY)) ?? '[]') as unknown;
+    if (!Array.isArray(raw)) return [];
+    return raw.flatMap((item): SlideTemplate[] => {
+      if (!item || typeof item.id !== 'string' || typeof item.label !== 'string') return [];
+      // Early saves held a single slide.
+      const slides = Array.isArray(item.slides) ? item.slides : item.slide ? [item.slide] : [];
+      const colors = Array.isArray(item.colors) ? item.colors.filter((color: unknown): color is string => typeof color === 'string') : undefined;
+      const updatedAt = typeof item.updatedAt === 'number' ? item.updatedAt : 0;
+      return slides.length ? [{ id: item.id, label: item.label, slides, colors, updatedAt, mine: true }] : [];
+    });
+  } catch { return []; }
+};
+const saveMyTemplates = (templates: SlideTemplate[]) => {
+  try { localStorage.setItem(getAccountStorageKey(MY_TEMPLATES_KEY), JSON.stringify(templates.map(({ id, label, slides, colors, updatedAt }) => ({ id, label, slides, colors, updatedAt })))); } catch { /* storage full: keep them for this session */ }
+};
+/** A new slide from a template slide, with fresh ids so it never clashes with slides already in the deck. */
+const slideFromTemplate = (template: Omit<SlideT, 'id'>): SlideT => {
+  const copy = JSON.parse(JSON.stringify(template)) as Omit<SlideT, 'id'>;
+  return {
+    ...copy,
+    id: nextId++,
+    locked: undefined,
+    extraBoxes: copy.extraBoxes?.map((item) => ({ ...item, id: nextId++ })),
+    shapes: copy.shapes?.map((shape) => ({ ...shape, id: nextId++ })),
+    pictures: copy.pictures?.map((picture) => ({ ...picture, id: nextId++ })),
+  };
+};
+
 const makeSlide = (t: { bg: string; text: string; size: number; label?: string }): SlideT => ({
   id: nextId++,
   title: t.label ?? t.text.split('\n')[0] ?? 'Untitled slide',
@@ -236,8 +309,10 @@ const PROJECTS_STORAGE_KEY = 'faithstream.presentations';
 const MEDIA_DB = 'faithstream.media';
 const MEDIA_STORE = 'assets';
 
-type PresentationProject = { id: string; name: string; slides: SlideT[]; updatedAt: number; locked?: boolean; deviceOnly?: boolean; hasLocalMedia?: boolean };
-type SyncedPresentation = Pick<PresentationProject, 'id' | 'name' | 'slides' | 'updatedAt'> & { hasLocalMedia?: boolean };
+/** `colors`: background colours saved for this presentation only (same format as a slide's `bg`). */
+type PresentationProject = { id: string; name: string; slides: SlideT[]; updatedAt: number; locked?: boolean; deviceOnly?: boolean; hasLocalMedia?: boolean; colors?: string[] };
+type SyncedPresentation = Pick<PresentationProject, 'id' | 'name' | 'slides' | 'updatedAt' | 'colors'> & { hasLocalMedia?: boolean };
+const MAX_PRESENTATION_COLORS = 24;
 type DeleteConfirmation = { title: string; message: string; onConfirm: () => void };
 
 const prepareProjectForAccountSync = (project: PresentationProject): SyncedPresentation => {
@@ -260,7 +335,7 @@ const prepareProjectForAccountSync = (project: PresentationProject): SyncedPrese
     return { ...slideWithoutLocalBackground, pictures };
   });
 
-  return { id: project.id, name: project.name, slides, updatedAt: project.updatedAt, hasLocalMedia };
+  return { id: project.id, name: project.name, slides, updatedAt: project.updatedAt, hasLocalMedia, ...(project.colors?.length ? { colors: project.colors } : {}) };
 };
 
 const loadProjects = (): PresentationProject[] => {
@@ -296,6 +371,32 @@ const readMediaAssets = async (): Promise<StoredMediaAsset[]> => {
     request.transaction?.addEventListener('complete', () => db.close(), { once: true });
   });
 };
+
+/*
+ * Kept between visits to the Presentations page so reopening it is instant: the media library
+ * (with its preview URLs), which presentation versions the account already has, and when the
+ * account was last checked.
+ */
+let mediaLibraryCache: { db: string; assets: MediaAsset[] } | null = null;
+const syncedVersions = new Map<string, number>();
+let lastAccountCheck = 0;
+/** Template versions the account already has (so unchanged templates are not uploaded again). */
+const syncedTemplateVersions = new Map<string, number>();
+/** Templates deleted on this computer that still need deleting from the account (e.g. made offline). */
+const DELETED_TEMPLATES_KEY = 'faithstream.presentation.templates.deleted';
+const loadDeletedTemplateIds = (): string[] => {
+  try { const raw = JSON.parse(localStorage.getItem(getAccountStorageKey(DELETED_TEMPLATES_KEY)) ?? '[]'); return Array.isArray(raw) ? raw.filter((id): id is string => typeof id === 'string') : []; } catch { return []; }
+};
+const saveDeletedTemplateIds = (ids: string[]) => {
+  try { localStorage.setItem(getAccountStorageKey(DELETED_TEMPLATES_KEY), JSON.stringify([...new Set(ids)].slice(-200))); } catch { /* retried next time */ }
+};
+type SyncedTemplate = { id: string; name: string; slides: Omit<SlideT, 'id'>[]; colors?: string[]; updatedAt: number; hasLocalMedia?: boolean };
+/** A template as the account stores it: pictures and videos stay on this computer, like presentations. */
+const prepareTemplateForAccountSync = (template: SlideTemplate): SyncedTemplate => {
+  const synced = prepareProjectForAccountSync({ id: template.id, name: template.label, slides: template.slides as SlideT[], updatedAt: template.updatedAt ?? 0, colors: template.colors });
+  return { id: synced.id, name: synced.name.slice(0, 120), slides: synced.slides, colors: synced.colors, updatedAt: synced.updatedAt, hasLocalMedia: synced.hasLocalMedia };
+};
+const ACCOUNT_CHECK_INTERVAL_MS = 60_000;
 
 const saveMediaAsset = async (file: File, category: 'background' | 'slide' = 'background', collection?: string): Promise<StoredMediaAsset> => {
   const prepared = await prepareMediaFile(file);
@@ -399,7 +500,7 @@ function TextBoxView({ box, defaultLayerOrder = 3000 }: { box: TextBox; defaultL
   return (
     <div
       ref={wrap}
-      className="absolute flex items-center overflow-hidden"
+      className={`absolute flex ${VALIGN_ITEMS[box.valign ?? 'middle']} overflow-hidden`}
       style={{
         left: `${box.x}%`,
         top: `${box.y}%`,
@@ -415,8 +516,9 @@ function TextBoxView({ box, defaultLayerOrder = 3000 }: { box: TextBox; defaultL
         className="w-full whitespace-pre-wrap wrap-break-word"
         style={{
           textAlign: box.align,
+          textAlignLast: box.align === 'justify' ? 'left' : undefined,
           transform: `scale(${scale})`,
-          transformOrigin: 'center',
+          transformOrigin: VALIGN_ORIGIN[box.valign ?? 'middle'],
           lineHeight: box.lineHeight,
           letterSpacing: cqw(box.letterSpacing),
         }}
@@ -434,7 +536,12 @@ function TextBoxView({ box, defaultLayerOrder = 3000 }: { box: TextBox; defaultL
             textShadow: shadow,
           }}
         >
-          {box.text}
+          {hasLineAligns(box.lineAligns)
+            ? box.text.split('\n').map((line, lineIndex) => {
+              const lineAlign = lineAlignAt(box.align, box.lineAligns, lineIndex);
+              return <div key={lineIndex} style={{ textAlign: lineAlign, textAlignLast: lineAlign === 'justify' ? 'left' : undefined }}>{line || ' '}</div>;
+            })
+            : box.text}
         </div>
       </div>
     </div>
@@ -453,8 +560,8 @@ function SlideRender({ slide, onVideoSelect, editingTextBoxId }: { slide: SlideT
 
   return (
     <div
-      className={`absolute isolate inset-0 overflow-hidden bg-linear-to-br ${slide.bg}`}
-      style={{ containerType: 'inline-size' }}
+      className={`absolute isolate inset-0 overflow-hidden bg-linear-to-br ${backgroundClasses(slide.bg)}`}
+      style={{ containerType: 'inline-size', ...backgroundStyle(slide.bg) }}
     >
       {slide.bgImage && (
         <img src={slide.bgImage} alt="" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />
@@ -664,7 +771,7 @@ function PreviewOverlay({
   }, [onClose, slides.length]);
 
   return (
-    <div
+    <BodyPortal><div
       role="dialog"
       aria-modal="true"
       aria-label="Slide preview"
@@ -705,18 +812,19 @@ function PreviewOverlay({
           Next
         </button>
       </div>
-    </div>
+    </div></BodyPortal>
   );
 }
 
 /* ---------- Page ---------- */
 
-type Mode = 'move' | 'nw' | 'ne' | 'sw' | 'se';
-type PropsTab = 'Content' | 'Style' | 'Background';
+type Mode = 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w';
+/** Format: everything about the selected text, shape, video or countdown. Media: add pictures and videos. */
+type PropsTab = 'Format' | 'Media' | 'Background';
 type Dock = 'Templates' | 'Text' | 'Scripture' | 'Media' | 'Shapes';
 
 const DOCK: { key: Dock; icon: LucideIcon; hint: string }[] = [
-  { key: 'Templates', icon: LayoutTemplate, hint: 'Click a template to add it as a new slide' },
+  { key: 'Templates', icon: LayoutTemplate, hint: 'Pick a template to see its slides, then add them all or just the ones you need' },
   { key: 'Text', icon: Type, hint: 'Add another independent text box to this slide' },
   { key: 'Scripture', icon: BookOpen, hint: 'Find a verse and add it to this slide' },
   { key: 'Media', icon: ImageIcon, hint: 'Add pictures and video backgrounds' },
@@ -725,11 +833,18 @@ const DOCK: { key: Dock; icon: LucideIcon; hint: string }[] = [
 
 const ZOOMS: Record<string, number> = { '100%': 1, '75%': 0.75, '50%': 0.5 };
 
-const HANDLES: Record<Exclude<Mode, 'move'>, string> = {
+const HANDLES: Record<'nw' | 'ne' | 'sw' | 'se', string> = {
   nw: '-left-1.5 -top-1.5 cursor-nwse-resize',
   ne: '-right-1.5 -top-1.5 cursor-nesw-resize',
   sw: '-bottom-1.5 -left-1.5 cursor-nesw-resize',
   se: '-bottom-1.5 -right-1.5 cursor-nwse-resize',
+};
+/** Side handles for text boxes: left / right change only the width (the box then grows or shrinks to fit the text, like Canva); top / bottom change only the height. */
+const TEXT_SIDE_HANDLES: Record<'n' | 's' | 'e' | 'w', string> = {
+  n: 'left-1/2 -top-1 h-1.5 w-5 -translate-x-1/2 cursor-ns-resize',
+  s: 'left-1/2 -bottom-1 h-1.5 w-5 -translate-x-1/2 cursor-ns-resize',
+  e: 'top-1/2 -right-1 h-5 w-1.5 -translate-y-1/2 cursor-ew-resize',
+  w: 'top-1/2 -left-1 h-5 w-1.5 -translate-y-1/2 cursor-ew-resize',
 };
 
 export default function Presentation() {
@@ -739,9 +854,12 @@ export default function Presentation() {
   const [projects, setProjects] = useState<PresentationProject[]>(loadProjects);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [projectName, setProjectName] = useState('');
-  const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>([]);
+  const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>(() => (mediaLibraryCache?.db === getAccountDatabaseName(MEDIA_DB) ? mediaLibraryCache.assets : []));
+  // True once the media library has been read (or came from the cache), so the cache is never
+  // replaced by the empty list the page starts with.
+  const mediaReadyRef = useRef(mediaLibraryCache?.db === getAccountDatabaseName(MEDIA_DB));
   const [index, setIndex] = useState(0);
-  const [tab, setTab] = useState<PropsTab>('Content');
+  const [tab, setTab] = useState<PropsTab>('Format');
   const [dock, setDock] = useState<Dock>('Templates');
   const [zoom, setZoom] = useState('100%');
   const [menuFor, setMenuFor] = useState<string | null>(null);
@@ -759,6 +877,8 @@ export default function Presentation() {
   const [slideImportProgress, setSlideImportProgress] = useState<{ message: string; current: number; total: number } | null>(null);
   const [selectedBoxId, setSelectedBoxId] = useState<number | null>(null);
   const [isBoxSelected, setIsBoxSelected] = useState(false);
+  /** The text highlighted in a text box editor, so the align buttons can change just those lines. */
+  const [textSelection, setTextSelection] = useState<(TextRange & { slideId: number; boxId: number | null }) | null>(null);
   const [selectedPictureId, setSelectedPictureId] = useState<number | null>(null);
   const [pictureMenu, setPictureMenu] = useState<{ kind: 'picture' | 'text' | 'background'; id: number | null; x: number; y: number } | null>(null);
   const [selectedShapeId, setSelectedShapeId] = useState<number | null>(null);
@@ -823,6 +943,12 @@ export default function Presentation() {
       }
 
       accountTokenRef.current = token;
+      // Checked within the last minute: the saved list is already up to date.
+      if (Date.now() - lastAccountCheck < ACCOUNT_CHECK_INTERVAL_MS) {
+        accountSyncReadyRef.current = true;
+        if (!cancelled) setAccountSyncStatus('Connected — syncing presentations');
+        return;
+      }
       try {
         const response = await fetch(`${PRESENTATION_API_URL}/presentations`, {
           headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
@@ -835,7 +961,10 @@ export default function Presentation() {
         const merged = new Map<string, PresentationProject>();
         for (const project of remoteProjects) {
           merged.set(project.id, { ...project, hasLocalMedia: Boolean(project.hasLocalMedia) });
+          // The account already has this version; it does not need uploading again.
+          syncedVersions.set(project.id, project.updatedAt);
         }
+        lastAccountCheck = Date.now();
         for (const existingProject of projectsRef.current) {
           const project = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(existingProject.id)
             ? existingProject
@@ -864,7 +993,14 @@ export default function Presentation() {
   useEffect(() => {
     if (!accountSyncReadyRef.current || !accountTokenRef.current) return;
     const token = accountTokenRef.current;
-    const syncableProjects = projects.filter((project) => !project.deviceOnly && project.id !== activeProjectId);
+    const accountProjects = projects.filter((project) => !project.deviceOnly && project.id !== activeProjectId);
+    // Upload only presentations that changed since the account last had them. (Loading pictures
+    // also updates the list, but must not re-upload everything on every visit.)
+    const syncableProjects = accountProjects.filter((project) => syncedVersions.get(project.id) !== project.updatedAt);
+    if (accountProjects.length && !syncableProjects.length) {
+      setAccountSyncStatus('Synced to your account · imported media stays on this device');
+      return;
+    }
     if (!syncableProjects.length) {
       if (projects.some((project) => project.deviceOnly)) {
         setAccountSyncStatus('Connected — imported slide files stay on this device');
@@ -886,6 +1022,7 @@ export default function Presentation() {
           body: JSON.stringify(payload),
         });
         if (!response.ok) throw new Error('Account sync failed.');
+        syncedVersions.set(project.id, project.updatedAt);
       })).then(() => {
         setAccountSyncStatus('Synced to your account · imported media stays on this device');
       }).catch(() => {
@@ -896,41 +1033,47 @@ export default function Presentation() {
     return () => window.clearTimeout(timeout);
   }, [projects, activeProjectId]);
 
+  // Connects slides to their pictures and videos. The library is read from storage only on the
+  // first visit; after that it comes from memory, so the page opens without delay.
   useEffect(() => {
     let cancelled = false;
-    let urls: string[] = [];
-    readMediaAssets().then((stored) => {
-      const assets = stored.map((asset) => ({ ...asset, url: URL.createObjectURL(asset.blob) }));
-      urls = assets.map((asset) => asset.url);
-      if (cancelled) { urls.forEach(URL.revokeObjectURL); return; }
-      setMediaAssets(assets);
-      skipUndoRecordingRef.current = true;
-      setSlides((current) => current.map((slide) => {
-        const asset = assets.find((item) => item.id === slide.bgAssetId);
+    const attach = (assets: MediaAsset[]) => {
+      const byId = new Map(assets.map((asset) => [asset.id, asset]));
+      const withMedia = (slide: SlideT): SlideT => {
+        const asset = slide.bgAssetId ? byId.get(slide.bgAssetId) : undefined;
         const pictures = slide.pictures?.map((picture) => {
-          const pictureAsset = picture.assetId ? assets.find((item) => item.id === picture.assetId) : undefined;
+          const pictureAsset = picture.assetId ? byId.get(picture.assetId) : undefined;
           return pictureAsset ? { ...picture, src: pictureAsset.url } : picture;
         });
-        const restoreAsset = slide.bgPictureRestore?.assetId ? assets.find((item) => item.id === slide.bgPictureRestore?.assetId) : undefined;
+        const restoreAsset = slide.bgPictureRestore?.assetId ? byId.get(slide.bgPictureRestore.assetId) : undefined;
         const bgPictureRestore = restoreAsset && slide.bgPictureRestore ? { ...slide.bgPictureRestore, src: restoreAsset.url } : slide.bgPictureRestore;
         return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), bgPictureRestore, pictures };
-      }));
-      setProjects((current) => current.map((project) => ({
-        ...project,
-        slides: project.slides.map((slide) => {
-          const asset = assets.find((item) => item.id === slide.bgAssetId);
-          const pictures = slide.pictures?.map((picture) => {
-            const pictureAsset = picture.assetId ? assets.find((item) => item.id === picture.assetId) : undefined;
-            return pictureAsset ? { ...picture, src: pictureAsset.url } : picture;
-          });
-          const restoreAsset = slide.bgPictureRestore?.assetId ? assets.find((item) => item.id === slide.bgPictureRestore?.assetId) : undefined;
-          const bgPictureRestore = restoreAsset && slide.bgPictureRestore ? { ...slide.bgPictureRestore, src: restoreAsset.url } : slide.bgPictureRestore;
-          return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), bgPictureRestore, pictures };
-        }),
-      })));
+      };
+      skipUndoRecordingRef.current = true;
+      setSlides((current) => current.map(withMedia));
+      setProjects((current) => current.map((project) => ({ ...project, slides: project.slides.map(withMedia) })));
+    };
+    const dbName = getAccountDatabaseName(MEDIA_DB);
+    if (mediaLibraryCache?.db === dbName) {
+      attach(mediaLibraryCache.assets);
+      return () => { cancelled = true; };
+    }
+    readMediaAssets().then((stored) => {
+      const assets = stored.map((asset) => ({ ...asset, url: URL.createObjectURL(asset.blob) }));
+      if (cancelled) { assets.forEach((asset) => URL.revokeObjectURL(asset.url)); return; }
+      mediaLibraryCache = { db: dbName, assets };
+      mediaReadyRef.current = true;
+      setMediaAssets(assets);
+      attach(assets);
     }).catch(() => { if (!cancelled) setStatus('Could not load the media library'); });
-    return () => { cancelled = true; urls.forEach(URL.revokeObjectURL); };
+    // The preview URLs stay alive in the cache for the next visit; deleting an item frees its URL.
+    return () => { cancelled = true; };
   }, []);
+
+  // Keep the cache in step with media added or deleted on this page.
+  useEffect(() => {
+    if (mediaReadyRef.current) mediaLibraryCache = { db: getAccountDatabaseName(MEDIA_DB), assets: mediaAssets };
+  }, [mediaAssets]);
 
   useEffect(() => {
     slides.forEach((slide) => {
@@ -986,8 +1129,13 @@ export default function Presentation() {
 
   const stageRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
-  const canvasTextRef = useRef<HTMLTextAreaElement>(null);
+  const canvasTextRef = useRef<HTMLDivElement>(null);
   const canvasTextMeasureRef = useRef<HTMLDivElement>(null);
+  /**
+   * Set while a text box is resized from a side or corner: its height then hugs the text
+   * (like Canva). `bottom` keeps the bottom edge still when a top corner is dragged.
+   */
+  const fitTextHeightRef = useRef<{ bottom: number | null } | null>(null);
   const [canvasTextScale, setCanvasTextScale] = useState(1);
   const slideImportInput = useRef<HTMLInputElement>(null);
   const slideFolderInput = useRef<HTMLInputElement>(null);
@@ -1012,8 +1160,23 @@ export default function Presentation() {
     const contentHeight = measure.getBoundingClientRect().height;
     const scale = box?.autoSize && contentHeight > 0 ? Math.min(1, textarea.clientHeight / contentHeight) : 1;
     setCanvasTextScale((current) => Math.abs(current - scale) > 0.001 ? scale : current);
-    textarea.style.paddingTop = `${Math.max(4, (textarea.clientHeight - contentHeight * scale) / 2)}px`;
-  }, [box?.text, box?.size, box?.lineHeight, box?.letterSpacing, box?.font, box?.w, box?.h, box?.autoSize, canvasTextScale, isBoxSelected, selectedBoxId, zoom]);
+    const room = textarea.clientHeight - contentHeight * scale;
+    const valign = box?.valign ?? 'middle';
+    textarea.style.paddingTop = `${Math.max(0, valign === 'top' ? 0 : valign === 'bottom' ? room : room / 2)}px`;
+    // Resizing: the box hugs its text, so making it narrower makes it taller instead of shrinking the words.
+    const stageHeight = stageRef.current?.getBoundingClientRect().height ?? 0;
+    const fit = fitTextHeightRef.current;
+    if (fit && box && stageHeight > 0 && contentHeight > 0) {
+      const needed = Math.max(3, (contentHeight / stageHeight) * 100 + 0.4);
+      if (fit.bottom !== null) {
+        const wanted = Math.min(fit.bottom, needed);
+        if (Math.abs(wanted - box.h) > 0.2 || Math.abs(fit.bottom - wanted - box.y) > 0.2) updateBoxById(selectedBoxId, { y: fit.bottom - wanted, h: wanted });
+      } else {
+        const wanted = Math.min(100 - box.y, needed);
+        if (Math.abs(wanted - box.h) > 0.2) updateBoxById(selectedBoxId, { h: wanted });
+      }
+    }
+  }, [box?.valign, box?.text, box?.size, box?.lineHeight, box?.letterSpacing, box?.font, box?.w, box?.h, box?.autoSize, canvasTextScale, isBoxSelected, selectedBoxId, zoom]);
 
   useLayoutEffect(() => {
     if (!isBoxSelected) return;
@@ -1052,15 +1215,24 @@ export default function Presentation() {
 
   const updateBox = (patch: Partial<TextBox>) => !cur.locked && setSlides((l) => l.map((s, i) => {
     if (i !== index) return s;
-    if (selectedBoxId === null) return s.box ? { ...s, box: { ...s.box, ...patch } } : s;
-    return { ...s, extraBoxes: (s.extraBoxes ?? []).map((item) => item.id === selectedBoxId ? { ...item, box: { ...item.box, ...patch } } : item) };
+    if (selectedBoxId === null) return s.box ? { ...s, box: patchTextBox(s.box, patch) } : s;
+    return { ...s, extraBoxes: (s.extraBoxes ?? []).map((item) => item.id === selectedBoxId ? { ...item, box: patchTextBox(item.box, patch) } : item) };
   }));
 
   const updateBoxById = (id: number | null, patch: Partial<TextBox>) => !cur.locked && setSlides((l) => l.map((s, i) => {
     if (i !== index) return s;
-    if (id === null) return s.box ? { ...s, box: { ...s.box, ...patch } } : s;
-    return { ...s, extraBoxes: (s.extraBoxes ?? []).map((item) => item.id === id ? { ...item, box: { ...item.box, ...patch } } : item) };
+    if (id === null) return s.box ? { ...s, box: patchTextBox(s.box, patch) } : s;
+    return { ...s, extraBoxes: (s.extraBoxes ?? []).map((item) => item.id === id ? { ...item, box: patchTextBox(item.box, patch) } : item) };
   }));
+
+  /** The highlighted range in this box, if the highlight belongs to it. */
+  const selectionIn = (id: number | null) => textSelection && textSelection.slideId === cur.id && textSelection.boxId === id ? textSelection : null;
+  const rememberSelection = (id: number | null, start: number, end: number) => setTextSelection((current) => (
+    current && current.slideId === cur.id && current.boxId === id && current.start === start && current.end === end ? current : { slideId: cur.id, boxId: id, start, end }
+  ));
+  /** Highlighted lines get the alignment; with nothing highlighted the whole box does. */
+  const applyAlign = (id: number | null, target: TextBox, value: Align) => updateBoxById(id, alignText(target.text, target.align, target.lineAligns, value, selectionIn(id)));
+  const shownAlign = (id: number | null, target: TextBox) => activeAlign(target.text, target.align, target.lineAligns, selectionIn(id));
 
   const updatePicture = (id: number, patch: Partial<PictureT>) => !cur.locked && setSlides((l) => l.map((s, i) => i === index ? { ...s, pictures: (s.pictures ?? []).map((picture) => picture.id === id ? { ...picture, ...patch } : picture) } : s));
   const setPictureAsBackground = (id: number) => {
@@ -1180,8 +1352,8 @@ export default function Presentation() {
   };
   const updateShape = (id: number, patch: Partial<ShapeT>) => !cur.locked && setSlides((l) => l.map((s, i) => i === index ? { ...s, shapes: (s.shapes ?? []).map((shape) => shape.id === id ? { ...shape, ...patch } : shape) } : s));
 
-  const normalizedCountdown = (countdown: CountdownSettings): Required<CountdownSettings> => ({
-    targetAt: countdown.targetAt, label: countdown.label, color: countdown.color, align: countdown.align ?? 'center',
+  const normalizedCountdown = (countdown: CountdownSettings): CountdownSettings & Required<Pick<CountdownSettings, 'align' | 'x' | 'y' | 'w' | 'h' | 'size'>> => ({
+    ...countdown, align: countdown.align ?? 'center',
     x: countdown.x ?? 10, y: countdown.y ?? 30, w: countdown.w ?? 80, h: countdown.h ?? 40, size: countdown.size ?? 112,
   });
   const updateCountdown = (patch: Partial<CountdownSettings>) => {
@@ -1196,7 +1368,7 @@ export default function Presentation() {
     stageRef.current.focus({ preventScroll: true });
     setSelectedCountdown(true);
     setSelectedPictureId(null); setSelectedShapeId(null); setSelectedBoxId(null); setIsBoxSelected(false);
-    setTab('Content');
+    setTab('Format');
     const initial = normalizedCountdown(cur.countdown);
     const rect = stageRef.current.getBoundingClientRect();
     const startX = event.clientX;
@@ -1278,7 +1450,7 @@ export default function Presentation() {
     event.stopPropagation();
     stageRef.current.focus({ preventScroll: true });
     setSelectedShapeId(shape.id);
-    setTab('Content');
+    setTab('Format');
     setSelectedPictureId(null);
     setSelectedBoxId(null);
     setIsBoxSelected(false);
@@ -1587,6 +1759,26 @@ export default function Presentation() {
     });
   };
 
+  /** Deletes every slide (locked slides stay). An empty presentation gets one blank slide to start again. */
+  const removeAll = () => {
+    if (projectLocked) return;
+    const lockedCount = slides.filter((slide) => slide.locked).length;
+    const removable = slides.length - lockedCount;
+    if (!removable) { flash('All slides are locked. Unlock them to delete them.'); return; }
+    setDeleteConfirmation({
+      title: 'Delete all slides?',
+      message: lockedCount
+        ? `Delete ${removable} slide${removable === 1 ? '' : 's'}? ${lockedCount} locked slide${lockedCount === 1 ? ' stays' : 's stay'}. This cannot be undone.`
+        : `Delete all ${removable} slide${removable === 1 ? '' : 's'} in this presentation? You'll start again with one blank slide. This cannot be undone.`,
+      onConfirm: () => {
+        const kept = slides.filter((slide) => slide.locked);
+        setSlides(kept.length ? kept : [makeSlide({ bg: BGS[4], text: 'New slide', size: 96 })]);
+        setIndex(0);
+        setDeleteConfirmation(null);
+      },
+    });
+  };
+
   const move = (i: number, d: -1 | 1) => {
     if (projectLocked) return;
     const j = i + d;
@@ -1622,7 +1814,7 @@ export default function Presentation() {
     setSelectedBoxId(id);
     setIsBoxSelected(true);
     setSelectedCountdown(false);
-    setTab('Content');
+    setTab('Format');
     setTimeout(() => textRef.current?.select(), 0);
   };
 
@@ -1641,7 +1833,7 @@ export default function Presentation() {
     setIsBoxSelected(false);
     setSelectedPictureId(null);
     setSelectedShapeId(null);
-    setTab('Content');
+    setTab('Format');
   };
 
   const applyTextPreset = (p: { text: string; size: number }) => {
@@ -1662,7 +1854,7 @@ export default function Presentation() {
     setSelectedBoxId(id);
     setIsBoxSelected(true);
     setSelectedPictureId(null);
-    setTab('Content');
+    setTab('Format');
   };
 
   const applyMediaAsset = (asset: MediaAsset) => {
@@ -1691,7 +1883,9 @@ export default function Presentation() {
     const { x, y, w, h } = target;
     const sx = e.clientX;
     const sy = e.clientY;
-    const MIN = 8;
+    const MIN = 3;
+    // Sides and corners keep the box hugging its text; only the top / bottom handles set a height by hand.
+    fitTextHeightRef.current = mode === 'move' || mode === 'n' || mode === 's' ? null : { bottom: mode === 'nw' || mode === 'ne' ? target.y + target.h : null };
 
     const onMove = (ev: PointerEvent) => {
       const dx = ((ev.clientX - sx) / rect.width) * 100;
@@ -1735,24 +1929,193 @@ export default function Presentation() {
       let nw = w;
       let nh = h;
       if (mode.includes('e')) nw = clamp(w + dx, MIN, 100 - x);
+      // (the 'move' mode returned above, so 'e' / 'w' / 'n' / 's' here are always resize sides)
       if (mode.includes('w')) {
         nx = clamp(x + dx, 0, x + w - MIN);
         nw = w + (x - nx);
       }
-      if (mode.includes('s')) nh = clamp(h + dy, MIN, 100 - y);
-      if (mode.includes('n')) {
-        ny = clamp(y + dy, 0, y + h - MIN);
-        nh = h + (y - ny);
+      if (mode === 'n' || mode === 's') {
+        if (mode === 's') nh = clamp(h + dy, MIN, 100 - y);
+        else {
+          ny = clamp(y + dy, 0, y + h - MIN);
+          nh = h + (y - ny);
+        }
+        updateBoxById(boxId, { y: ny, h: nh });
+        return;
       }
-      updateBoxById(boxId, { x: nx, y: ny, w: nw, h: nh });
+      // Corners scale the text with the box (like Canva); left / right sides only rewrap it.
+      // The height is left to follow the text (see fitTextHeightRef).
+      const factor = nw / w;
+      updateBoxById(boxId, mode.length === 2
+        ? { x: nx, w: nw, size: clamp(Math.round(target.size * factor), 8, 400), letterSpacing: target.letterSpacing * factor }
+        : { x: nx, w: nw });
     };
     const onUp = () => {
+      fitTextHeightRef.current = null;
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       setAlignmentGuides({ x: null, y: null });
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+  };
+
+  /* ----- templates ----- */
+
+  const [myTemplates, setMyTemplates] = useState<SlideTemplate[]>(loadMyTemplates);
+  const templateSyncReadyRef = useRef(false);
+  const [templateSyncTick, setTemplateSyncTick] = useState(0);
+
+  // Account sync for "My templates" (same idea as presentations): templates are kept on this
+  // computer first, then uploaded; signing in on another device downloads them.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const token = await window.faithstreamWindow?.getAuthToken();
+      if (!token || cancelled) return;
+      const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
+      // Finish deletes made while offline first, so they don't come back.
+      const deleted = loadDeletedTemplateIds();
+      const stillDeleting: string[] = [];
+      await Promise.all(deleted.map(async (id) => {
+        try {
+          const response = await fetch(`${PRESENTATION_API_URL}/templates/${encodeURIComponent(id)}`, { method: 'DELETE', headers });
+          if (!response.ok && response.status !== 404) stillDeleting.push(id);
+        } catch { stillDeleting.push(id); }
+      }));
+      saveDeletedTemplateIds(stillDeleting);
+      try {
+        const response = await fetch(`${PRESENTATION_API_URL}/templates`, { headers });
+        if (!response.ok) throw new Error('Could not load templates.');
+        const result = await response.json() as { templates?: SyncedTemplate[] };
+        const remote = (Array.isArray(result.templates) ? result.templates : []).filter((item) => item && typeof item.id === 'string' && Array.isArray(item.slides) && !stillDeleting.includes(item.id));
+        if (cancelled) return;
+        for (const item of remote) syncedTemplateVersions.set(item.id, item.updatedAt);
+        setMyTemplates((current) => {
+          const merged = new Map(current.map((item) => [item.id, item]));
+          for (const item of remote) {
+            const local = merged.get(item.id);
+            // The newer copy wins; when equal, this computer's copy keeps its pictures.
+            if (!local || item.updatedAt > (local.updatedAt ?? 0)) merged.set(item.id, { id: item.id, label: item.name, slides: item.slides, colors: item.colors, updatedAt: item.updatedAt, mine: true });
+          }
+          const next = [...merged.values()].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+          saveMyTemplates(next);
+          return next;
+        });
+      } catch { /* offline: templates stay on this computer and sync next time */ }
+      templateSyncReadyRef.current = true;
+      if (!cancelled) setTemplateSyncTick((value) => value + 1);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (!templateSyncReadyRef.current) return;
+    const changed = myTemplates.filter((item) => syncedTemplateVersions.get(item.id) !== (item.updatedAt ?? 0));
+    if (!changed.length) return;
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        const token = await window.faithstreamWindow?.getAuthToken();
+        if (!token) return;
+        await Promise.all(changed.map(async (item) => {
+          try {
+            const response = await fetch(`${PRESENTATION_API_URL}/templates/${encodeURIComponent(item.id)}`, {
+              method: 'PUT',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+              body: JSON.stringify(prepareTemplateForAccountSync(item)),
+            });
+            if (response.ok) syncedTemplateVersions.set(item.id, item.updatedAt ?? 0);
+          } catch { /* offline: retried on the next change or visit */ }
+        }));
+      })();
+    }, 800);
+    return () => window.clearTimeout(timeout);
+  }, [myTemplates, templateSyncTick]);
+  const deleteTemplateFromAccount = (id: string) => {
+    syncedTemplateVersions.delete(id);
+    saveDeletedTemplateIds([...loadDeletedTemplateIds(), id]);
+    void (async () => {
+      const token = await window.faithstreamWindow?.getAuthToken();
+      if (!token) return;
+      try {
+        const response = await fetch(`${PRESENTATION_API_URL}/templates/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+        if (response.ok || response.status === 404) saveDeletedTemplateIds(loadDeletedTemplateIds().filter((item) => item !== id));
+      } catch { /* kept in the list and retried next time */ }
+    })();
+  };
+  /** The template whose slides are shown in the bottom bar (null = the list of templates). */
+  const [openTemplateId, setOpenTemplateId] = useState<string | null>(null);
+  const allTemplates = [...myTemplates, ...TEMPLATES];
+  const openTemplate = allTemplates.find((item) => item.id === openTemplateId) ?? null;
+  /** Links a template's saved pictures / videos to the media library. */
+  const withTemplateMedia = (slide: SlideT): SlideT => {
+    const byId = new Map(mediaAssets.map((asset) => [asset.id, asset]));
+    const asset = slide.bgAssetId ? byId.get(slide.bgAssetId) : undefined;
+    return {
+      ...slide,
+      ...(slide.bgAssetId ? { bgImage: asset?.type === 'image' ? asset.url : undefined, bgVideo: asset?.type === 'video' ? asset.url : undefined, bgAssetId: asset ? slide.bgAssetId : undefined } : {}),
+      pictures: slide.pictures?.map((picture) => { const pictureAsset = picture.assetId ? byId.get(picture.assetId) : undefined; return pictureAsset ? { ...picture, src: pictureAsset.url } : picture; }).filter((picture) => !!picture.src),
+    };
+  };
+  /** A brand-new presentation still has only its untouched starter slide; a template replaces it. */
+  const onlyStarterSlide = slides.length === 1 && !slides[0].locked && slides[0].title === 'New slide' && slides[0].box?.text === 'New slide'
+    && !slides[0].extraBoxes?.length && !slides[0].pictures?.length && !slides[0].shapes?.length && !slides[0].bgImage && !slides[0].bgVideo;
+  /** Background colours saved for the open presentation only. */
+  const deckColors = projects.find((project) => project.id === activeProjectId)?.colors ?? [];
+  const setDeckColors = (update: (colors: string[]) => string[]) => {
+    if (!activeProjectId || projectLocked) return;
+    setProjects((current) => {
+      const next = current.map((project) => {
+        if (project.id !== activeProjectId) return project;
+        const colors = [...new Set(update(project.colors ?? []))].slice(0, MAX_PRESENTATION_COLORS);
+        return { ...project, colors: colors.length ? colors : undefined, updatedAt: Date.now() };
+      });
+      try { localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next)); } catch { /* kept for this session */ }
+      return next;
+    });
+  };
+  const addDeckColor = (bg: string) => {
+    if (deckColors.includes(bg)) { flash('This color is already saved in this presentation.'); return; }
+    if (deckColors.length >= MAX_PRESENTATION_COLORS) { flash(`You can save up to ${MAX_PRESENTATION_COLORS} colors per presentation. Remove one first.`); return; }
+    setDeckColors((colors) => [...colors, bg]);
+  };
+  const removeDeckColor = (bg: string) => setDeckColors((colors) => colors.filter((color) => color !== bg));
+
+  const addTemplateSlides = (sources: Omit<SlideT, 'id'>[], label: string, colors?: string[]) => {
+    if (colors?.length) setDeckColors((current) => [...current, ...colors]);
+    if (projectLocked || !sources.length) return;
+    const added = sources.map((source) => withTemplateMedia(slideFromTemplate(source)));
+    if (onlyStarterSlide) {
+      setSlides(added);
+      setIndex(0);
+    } else {
+      const at = clamp(index + 1, 0, slides.length);
+      setSlides((current) => [...current.slice(0, at), ...added, ...current.slice(at)]);
+      setIndex(at);
+    }
+    flash(added.length === 1 ? `Added a “${added[0].title}” slide.` : `Added ${added.length} slides from “${label}”.`);
+  };
+  const saveDeckAsTemplate = () => {
+    const clean = serializable(slides).map(({ id: _id, locked: _locked, bgPictureRestore: _restore, ...slide }) => slide);
+    const template: SlideTemplate = { id: crypto.randomUUID(), label: (projectName.trim() || 'My template').slice(0, 120), slides: clean, colors: deckColors.length ? deckColors : undefined, updatedAt: Date.now(), mine: true };
+    setMyTemplates((current) => { const next = [template, ...current].slice(0, 40); saveMyTemplates(next); return next; });
+    setOpenTemplateId(null);
+    setDock('Templates');
+    flash(`Saved “${template.label}” as a template (${clean.length} slide${clean.length === 1 ? '' : 's'}).`);
+  };
+  const deleteMyTemplate = (id: string) => {
+    const template = myTemplates.find((item) => item.id === id);
+    if (!template) return;
+    setDeleteConfirmation({
+      title: 'Delete template?',
+      message: `Delete the template “${template.label}”? Presentations you already made from it are not changed.`,
+      onConfirm: () => {
+        setMyTemplates((current) => { const next = current.filter((item) => item.id !== id); saveMyTemplates(next); return next; });
+        deleteTemplateFromAccount(id);
+        setOpenTemplateId((current) => (current === id ? null : current));
+        setDeleteConfirmation(null);
+        flash(`Deleted the template “${template.label}”.`);
+      },
+    });
   };
 
   /* ----- save / export ----- */
@@ -1963,7 +2326,8 @@ export default function Presentation() {
     const toBox = (layout: SongTextLayout): TextBox => ({
       ...defaultBox(layout.text, layout.size),
       font: layout.font, bold: layout.bold, italic: layout.italic, underline: layout.underline, uppercase: layout.uppercase,
-      align: layout.align, color: layout.color, shadow: layout.shadow, lineHeight: layout.lineHeight,
+      align: layout.align, valign: layout.valign, lineAligns: layout.lineAligns, color: layout.color, shadow: layout.shadow, lineHeight: layout.lineHeight,
+      letterSpacing: layout.letterSpacing, boxBg: layout.boxBg, boxBgOn: layout.boxBgOn,
       x: layout.x, y: layout.y, w: layout.w, h: layout.h,
     });
     const deck: SlideT[] = songSlideLayouts(song).map((layout, index) => {
@@ -2181,6 +2545,7 @@ export default function Presentation() {
         name: projectName.trim() || 'Untitled presentation',
         slides: serializable(),
         updatedAt: Date.now(),
+        colors: projects.find((item) => item.id === id)?.colors,
       };
       const next = [project, ...projects.filter((item) => item.id !== id)];
       localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
@@ -2291,8 +2656,8 @@ export default function Presentation() {
                 </div>
               </div>
               <div className="flex gap-2">
-                <button type="button" disabled={backgroundImportProgress !== null} onClick={() => backgroundFolderInput.current?.click()} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-2.5 text-sm font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><FolderPlus size={16} /> Import folder</button>
-                <button type="button" disabled={backgroundImportProgress !== null} onClick={() => backgroundFilesInput.current?.click()} className="flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-bold text-navy hover:brightness-110 disabled:opacity-50"><Upload size={16} /> Add files</button>
+                <button type="button" disabled={backgroundImportProgress !== null} title="Add every picture and video in a folder (its subfolders become collections)" onClick={() => backgroundFolderInput.current?.click()} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-2.5 text-sm font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><FolderPlus size={16} /> Add a folder</button>
+                <button type="button" disabled={backgroundImportProgress !== null} title="Pick one picture or video, or select several (Ctrl+click)" onClick={() => backgroundFilesInput.current?.click()} className="flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-bold text-navy hover:brightness-110 disabled:opacity-50"><Upload size={16} /> Add pictures or videos</button>
               </div>
             </div>
             {libraryTabs}
@@ -2320,13 +2685,23 @@ export default function Presentation() {
             </div> : <div className="mt-2 rounded-2xl border border-dashed border-white/15 px-6 py-14 text-center"><FolderPlus size={30} className="mx-auto text-warm-white/35" /><p className="mt-3 font-semibold text-warm-white">No backgrounds in this collection yet</p><p className="mt-1 text-sm text-warm-white/50">Import a folder of up to your whole background library, or add individual image and video files.</p><p className="mt-3 text-xs text-warm-white/40">Choose a background on a slide from its Background panel, or in a songbook from Design → Background.</p></div>}
             <p className="mt-5 text-xs leading-relaxed text-warm-white/40">Backgrounds are stored on this computer and shared by the presentation editor and songbook designer. Imported folders are organized as collections.</p>
           </div>
-          {videoPreviewAsset && <div className="fixed inset-0 z-130 flex items-center justify-center bg-black/85 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoPreviewAsset(null); }}>
+          {videoPreviewAsset && <BodyPortal><div className="fixed inset-0 z-130 flex items-center justify-center bg-black/85 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoPreviewAsset(null); }}>
             <section role="dialog" aria-modal="true" aria-label={`Preview ${videoPreviewAsset.name}`} className="w-full max-w-4xl rounded-2xl border border-white/10 bg-[#101d2a] p-4 shadow-2xl">
               <div className="mb-3 flex items-center justify-between gap-3"><h2 className="truncate text-sm font-semibold text-warm-white">{videoPreviewAsset.name}</h2><button type="button" onClick={() => setVideoPreviewAsset(null)} aria-label="Close video preview" className="rounded-lg p-2 text-warm-white/60 hover:bg-white/10 hover:text-white"><X size={17} /></button></div>
               <video src={videoPreviewAsset.url} controls autoPlay playsInline className="max-h-[70vh] w-full rounded-lg bg-black" />
               <p className="mt-3 text-xs text-warm-white/50">To use this background, open a presentation and choose it from the Background panel, or select it in a songbook’s Design → Background.</p>
             </section>
-          </div>}
+          </div></BodyPortal>}
+          {/* This view is its own screen, so it needs its own status message and confirmation
+              window; without them, deleting a background only asked after switching tabs. */}
+          {status && <div role="status" className="pointer-events-none fixed bottom-16 left-1/2 z-50 max-w-[min(640px,90vw)] -translate-x-1/2 rounded-xl border border-white/10 bg-navy/95 px-4 py-2.5 text-center text-sm text-warm-white shadow-2xl backdrop-blur">{status}</div>}
+          <ConfirmationModal
+            open={deleteConfirmation !== null}
+            title={deleteConfirmation?.title ?? ''}
+            message={deleteConfirmation?.message ?? ''}
+            onCancel={() => setDeleteConfirmation(null)}
+            onConfirm={() => deleteConfirmation?.onConfirm()}
+          />
         </div>
       );
     }
@@ -2543,12 +2918,24 @@ export default function Presentation() {
         <Panel
           title={`Slides (${slides.length})`}
           action={
-            <button
-              onClick={addBlank}
-              className="flex items-center gap-1 rounded-lg bg-brand px-3 py-1.5 text-xs font-bold text-navy hover:brightness-110"
-            >
-              <Plus size={14} /> Add Slide
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                aria-label="Delete all slides"
+                title="Delete all slides"
+                disabled={projectLocked || onlyStarterSlide}
+                onClick={removeAll}
+                className="flex items-center rounded-lg border border-white/10 p-1.5 text-warm-white/60 transition hover:border-red-400/50 hover:bg-red-500/10 hover:text-red-200 disabled:pointer-events-none disabled:opacity-30"
+              >
+                <Trash2 size={14} />
+              </button>
+              <button
+                onClick={addBlank}
+                className="flex items-center gap-1 rounded-lg bg-brand px-3 py-1.5 text-xs font-bold text-navy hover:brightness-110"
+              >
+                <Plus size={14} /> Add Slide
+              </button>
+            </div>
           }
         >
           <ul className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
@@ -2684,7 +3071,7 @@ export default function Presentation() {
 
               {(cur.pictures ?? []).map((picture, pictureIndex) => <div data-slide-object key={picture.id} onPointerDown={picture.mediaType === 'video' ? undefined : startPictureDrag(picture)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); if (cur.locked) return; selectPicture(picture.id); setPictureMenu({ kind: 'picture', id: picture.id, x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 220) }); }} onClick={(e) => { if (picture.mediaType === 'video') return; e.stopPropagation(); selectPicture(picture.id); }} className={`absolute z-10 ${picture.mediaType === 'video' ? 'pointer-events-none' : 'cursor-move'} ${selectedPictureId === picture.id ? 'border-2 border-cyan-300' : 'border border-transparent'}`} style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, zIndex: typeof picture.layerOrder === 'number' ? picture.layerOrder : picture.layerOrder === 'front' ? 5000 : picture.layerOrder === 'back' ? 0 : 1000 + pictureIndex, touchAction: 'none' }}>
                 {picture.mediaType === 'video' && <div onPointerDown={startPictureDrag(picture)} onClick={(event) => { event.stopPropagation(); setSelectedPictureId(picture.id); setSelectedCountdown(false); }} aria-label="Drag to move video" className="pointer-events-auto absolute inset-x-0 -top-3 h-3 cursor-move" />}
-                {selectedPictureId === picture.id && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((handle) => <span key={handle} onPointerDown={startPictureResize(picture, handle)} className={`pointer-events-auto absolute z-20 h-3.5 w-3.5 rounded-sm border-2 border-cyan-700 bg-white shadow ${HANDLES[handle]}`} />)}
+                {selectedPictureId === picture.id && (Object.keys(HANDLES) as (keyof typeof HANDLES)[]).map((handle) => <span key={handle} onPointerDown={startPictureResize(picture, handle)} className={`pointer-events-auto absolute z-20 h-3.5 w-3.5 rounded-sm border-2 border-cyan-700 bg-white shadow ${HANDLES[handle]}`} />)}
                 {selectedPictureId === picture.id && <button onPointerDown={(e) => e.stopPropagation()} onClick={() => { updateSlide({ pictures: (cur.pictures ?? []).filter((item) => item.id !== picture.id) }); setSelectedPictureId(null); }} aria-label={picture.mediaType === 'video' ? 'Delete video' : 'Delete image'} className="pointer-events-auto absolute -right-2 -top-2 z-30 rounded-full bg-red-600 p-1 text-white shadow"><Trash2 size={12} /></button>}
               </div>)}
               {pictureMenu && createPortal(<>
@@ -2714,7 +3101,7 @@ export default function Presentation() {
               </>, document.body)}
 
               {(cur.shapes ?? []).map((shape, shapeIndex) => <div data-slide-object key={shape.id} onPointerDown={startShapeDrag(shape)} onClick={(event) => { event.stopPropagation(); setSelectedShapeId(shape.id); setSelectedPictureId(null); setSelectedCountdown(false); setSelectedBoxId(null); setIsBoxSelected(false); }} className={`absolute z-10 cursor-move ${selectedShapeId === shape.id ? 'border border-cyan-300' : 'border border-transparent'}`} style={{ left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + shapeIndex, touchAction: 'none' }}>
-                {selectedShapeId === shape.id && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((handle) => <span key={handle} onPointerDown={startShapeResize(shape, handle)} className={`absolute z-20 h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[handle]}`} />)}
+                {selectedShapeId === shape.id && (Object.keys(HANDLES) as (keyof typeof HANDLES)[]).map((handle) => <span key={handle} onPointerDown={startShapeResize(shape, handle)} className={`absolute z-20 h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[handle]}`} />)}
                 {selectedShapeId === shape.id && <button onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); updateSlide({ shapes: (cur.shapes ?? []).filter((item) => item.id !== shape.id) }); setSelectedShapeId(null); }} aria-label="Delete shape" className="absolute -right-2 -top-2 z-30 rounded-full bg-red-600 p-1 text-white shadow"><Trash2 size={12} /></button>}
               </div>)}
 
@@ -2726,7 +3113,7 @@ export default function Presentation() {
                 style={{ left: `${cur.countdown.x ?? 10}%`, top: `${cur.countdown.y ?? 30}%`, width: `${cur.countdown.w ?? 80}%`, height: `${cur.countdown.h ?? 40}%`, touchAction: 'none' }}
                 aria-label="Countdown text box. Drag to move, drag a corner to resize, or press Backspace to remove."
               >
-                {selectedCountdown && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((handle) => <span key={handle} onPointerDown={startCountdownInteraction(handle)} className={`absolute z-20 h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[handle]}`} />)}
+                {selectedCountdown && (Object.keys(HANDLES) as (keyof typeof HANDLES)[]).map((handle) => <span key={handle} onPointerDown={startCountdownInteraction(handle)} className={`absolute z-20 h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[handle]}`} />)}
                 {selectedCountdown && <div onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} className={`absolute left-1/2 z-30 flex -translate-x-1/2 cursor-default items-center gap-0.5 rounded-lg border border-white/10 bg-navy/95 p-1 shadow-xl ${toolbarBelow ? 'top-full mt-3' : 'bottom-full mb-3'}`}>
                   <IconBtn label="Add text box" onClick={addText}><Plus size={15} /></IconBtn>
                   <IconBtn label="Align left" active={(cur.countdown.align ?? 'center') === 'left'} onClick={() => updateCountdown({ align: 'left' })}><AlignLeft size={15} /></IconBtn>
@@ -2738,21 +3125,25 @@ export default function Presentation() {
 
               {allBoxes.map(({ id, box: textBox }) => {
                 const selected = isBoxSelected && id === selectedBoxId;
-                const align = (value: Align) => updateBoxById(id, { align: value });
+                const align = (value: Align) => applyAlign(id, textBox, value);
+                const currentAlign = shownAlign(id, textBox);
+                const valign = (value: VAlign) => updateBoxById(id, { valign: value });
+                const boxValign = textBox.valign ?? 'middle';
                 return <div data-slide-object key={id ?? 'main'} onPointerDown={startDrag('move', id, textBox)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); if (cur.locked) return; setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); setPictureMenu({ kind: 'text', id, x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 220) }); }} className={`absolute z-10 cursor-move ${selected ? 'border border-white' : 'border border-transparent'}`} onClick={(e) => { e.stopPropagation(); setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); }} style={{ left: `${textBox.x}%`, top: `${textBox.y}%`, width: `${textBox.w}%`, height: `${textBox.h}%`, zIndex: typeof textBox.layerOrder === 'number' ? textBox.layerOrder : textBox.layerOrder === 'front' ? 5000 : textBox.layerOrder === 'back' ? 0 : id === null ? 3000 : 3001 + (cur.extraBoxes ?? []).findIndex((item) => item.id === id), touchAction: 'none' }}>
-                  {selected && <div className="absolute inset-0 z-0 overflow-hidden px-1" style={{ background: textBox.boxBgOn ? textBox.boxBg : undefined }}>
-                    <div ref={canvasTextMeasureRef} aria-hidden className="pointer-events-none invisible absolute left-0 top-0 w-full whitespace-pre-wrap px-1" style={{ overflowWrap: 'anywhere', fontFamily: FONTS[textBox.font] ?? `"${textBox.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(textBox.size / 1280) * 100}cqw`, fontWeight: textBox.bold ? 800 : 500, fontStyle: textBox.italic ? 'italic' : 'normal', textTransform: textBox.uppercase ? 'uppercase' : undefined, lineHeight: textBox.lineHeight, letterSpacing: `${(textBox.letterSpacing / 1280) * 100}cqw` }}>{textBox.text || ' '}</div>
-                    <textarea
-                      ref={canvasTextRef}
-                      aria-label="Edit text on slide"
-                      rows={1}
-                      value={textBox.text}
-                      onChange={(event) => updateBoxById(id, { text: event.target.value })}
+                  {selected && <div className="absolute inset-0 z-0 overflow-hidden" style={{ background: textBox.boxBgOn ? textBox.boxBg : undefined }}>
+                    <div ref={canvasTextMeasureRef} aria-hidden className="pointer-events-none invisible absolute left-0 top-0 w-full whitespace-pre-wrap" style={{ overflowWrap: 'anywhere', fontFamily: FONTS[textBox.font] ?? `"${textBox.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(textBox.size / 1280) * 100}cqw`, fontWeight: textBox.bold ? 800 : 500, fontStyle: textBox.italic ? 'italic' : 'normal', textTransform: textBox.uppercase ? 'uppercase' : undefined, lineHeight: textBox.lineHeight, letterSpacing: `${(textBox.letterSpacing / 1280) * 100}cqw` }}>{textBox.text || ' '}</div>
+                    <SlideTextEditor
+                      editorRef={canvasTextRef}
+                      label="Edit text on slide"
+                      text={textBox.text}
+                      align={textBox.align}
+                      lineAligns={textBox.lineAligns}
+                      onChange={(text) => updateBoxById(id, { text })}
+                      onSelectionChange={(start, end) => rememberSelection(id, start, end)}
                       onPointerDown={(event) => event.stopPropagation()}
                       onClick={(event) => event.stopPropagation()}
-                      className="absolute inset-0 h-full w-full resize-none overflow-hidden border-0 bg-transparent px-1 py-1 outline-none"
+                      className="absolute inset-0 h-full w-full cursor-text overflow-hidden border-0 bg-transparent p-0 outline-none"
                       style={{
-                        textAlign: textBox.align,
                         whiteSpace: 'pre-wrap',
                         overflowWrap: 'anywhere',
                         fontFamily: FONTS[textBox.font] ?? `"${textBox.font.replaceAll('"', '')}", sans-serif`,
@@ -2765,17 +3156,24 @@ export default function Presentation() {
                         letterSpacing: `${(textBox.letterSpacing / 1280) * 100}cqw`,
                         color: textBox.color,
                         textShadow: textBox.shadow ? '0 0 1.2cqw rgba(0,0,0,0.65)' : undefined,
-                        paddingTop: 4,
+                        paddingTop: 0,
                         background: textBox.boxBgOn ? textBox.boxBg : undefined,
                       }}
                     />
                   </div>}
-                  {selected && (Object.keys(HANDLES) as Exclude<Mode, 'move'>[]).map((h) => <span key={h} onPointerDown={startDrag(h, id, textBox)} className={`absolute z-20 h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[h]}`} />)}
+                  {selected && (Object.keys(HANDLES) as (keyof typeof HANDLES)[]).map((h) => <span key={h} onPointerDown={startDrag(h, id, textBox)} className={`absolute z-20 h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[h]}`} />)}
+                  {selected && (Object.keys(TEXT_SIDE_HANDLES) as (keyof typeof TEXT_SIDE_HANDLES)[]).map((h) => <span key={h} onPointerDown={startDrag(h, id, textBox)} className={`absolute z-20 rounded-full border border-slate-400 bg-white ${TEXT_SIDE_HANDLES[h]}`} />)}
                   {selected && <div onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} className={`absolute left-1/2 z-20 flex -translate-x-1/2 cursor-default items-center gap-0.5 rounded-lg border border-white/10 bg-navy/95 p-1 shadow-xl ${toolbarBelow ? 'top-full mt-3' : 'bottom-full mb-3'}`}>
                     <IconBtn label="Add text box" onClick={addText}><Plus size={15} /></IconBtn>
-                    <IconBtn label="Align left" active={textBox.align === 'left'} onClick={() => align('left')}><AlignLeft size={15} /></IconBtn>
-                    <IconBtn label="Align center" active={textBox.align === 'center'} onClick={() => align('center')}><AlignCenter size={15} /></IconBtn>
-                    <IconBtn label="Align right" active={textBox.align === 'right'} onClick={() => align('right')}><AlignRight size={15} /></IconBtn>
+                    <IconBtn label="Align left" active={currentAlign === 'left'} onClick={() => align('left')}><AlignLeft size={15} /></IconBtn>
+                    <IconBtn label="Align center" active={currentAlign === 'center'} onClick={() => align('center')}><AlignCenter size={15} /></IconBtn>
+                    <IconBtn label="Align right" active={currentAlign === 'right'} onClick={() => align('right')}><AlignRight size={15} /></IconBtn>
+                    <IconBtn label="Justify" active={currentAlign === 'justify'} onClick={() => align('justify')}><AlignJustify size={15} /></IconBtn>
+                    <span className="mx-0.5 h-4 w-px bg-white/10" />
+                    <IconBtn label="Text at top" active={boxValign === 'top'} onClick={() => valign('top')}><AlignVerticalJustifyStart size={15} /></IconBtn>
+                    <IconBtn label="Text in middle" active={boxValign === 'middle'} onClick={() => valign('middle')}><AlignVerticalJustifyCenter size={15} /></IconBtn>
+                    <IconBtn label="Text at bottom" active={boxValign === 'bottom'} onClick={() => valign('bottom')}><AlignVerticalJustifyEnd size={15} /></IconBtn>
+                    <span className="mx-0.5 h-4 w-px bg-white/10" />
                     <IconBtn label="Delete text box" onClick={() => deleteTextBox(id)}><Trash2 size={15} /></IconBtn>
                   </div>}
                 </div>;
@@ -2831,7 +3229,7 @@ export default function Presentation() {
         {/* Properties */}
         <section className="relative flex min-h-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-panel">
           <div className="flex shrink-0 border-b border-white/10 text-sm">
-            {(['Content', 'Style', 'Background'] as const).map((t) => (
+            {(['Format', 'Media', 'Background'] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -2847,7 +3245,7 @@ export default function Presentation() {
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
-            {tab === 'Content' && <div className="mb-5">
+            {tab === 'Media' && <div className="mb-5">
               <button type="button" disabled={mediaImporting !== null || cur.locked} onClick={() => contentInput.current?.click()} className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2.5 text-xs font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:cursor-wait disabled:opacity-50"><Plus size={15} /> Add image or video</button>
               <p className="mt-2 text-[10px] leading-relaxed text-warm-white/50">Images and videos you add here can also be reused as backgrounds.</p>
               {mediaImporting && <div role="status" aria-live="polite" className="mt-2 flex items-center gap-2 rounded-lg border border-brand/20 bg-brand/5 px-3 py-2 text-[11px] text-warm-white/75"><Loader2 size={14} className="animate-spin text-brand" /> Adding {mediaImporting}…</div>}
@@ -2864,33 +3262,102 @@ export default function Presentation() {
                 </div>}
               </div>
             </div>}
-            {tab === 'Content' && cur.countdown && <div className="mb-5 flex flex-col gap-3 rounded-xl border border-brand/25 bg-brand/5 p-3">
+            {tab === 'Format' && cur.countdown && <div className="mb-5 flex flex-col gap-3 rounded-xl border border-brand/25 bg-brand/5 p-3">
               <div className="flex items-center justify-between gap-2">
                 <SectionTitle>Countdown timer</SectionTitle>
                 <button type="button" onClick={() => updateSlide({ countdown: undefined })} className="rounded-md px-2 py-1 text-[11px] font-semibold text-red-300 hover:bg-red-500/10">Remove</button>
               </div>
-              <p className="text-[11px] text-warm-white/55">Select the timer on the slide to move or resize its area. Change the number size below.</p>
-              <label className="block text-xs text-warm-white/70">Label
-                <input value={cur.countdown.label} onChange={(event) => updateCountdown({ label: event.target.value })} className={`${fieldClass} mt-1`} placeholder="Event starts in" />
-              </label>
-              <label className="block text-xs text-warm-white/70">Event date and time
-                <input type="datetime-local" value={toLocalDateTimeInput(cur.countdown.targetAt)} onChange={(event) => {
-                  const target = new Date(event.target.value);
-                  if (!Number.isNaN(target.getTime())) updateCountdown({ targetAt: target.toISOString() });
-                }} className={`${fieldClass} mt-1`} />
-              </label>
-              <label className="block text-xs text-warm-white/70">Number size
-                <div className="mt-1 flex items-center gap-2"><input type="range" min="32" max="240" step="4" value={cur.countdown.size ?? 112} onChange={(event) => updateCountdown({ size: Number(event.target.value) })} className="w-full accent-brand" /><span className="w-12 text-right tabular-nums">{cur.countdown.size ?? 112}px</span></div>
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                {([['x', 'Left'], ['y', 'Top'], ['w', 'Width'], ['h', 'Height']] as const).map(([key, label]) => <label key={key} className="block text-xs text-warm-white/70">{label} (%)
-                  <input type="number" min="0" max="100" value={Math.round(cur.countdown?.[key] ?? ({ x: 10, y: 30, w: 80, h: 40 }[key]))} onChange={(event) => updateCountdown({ [key]: clamp(Number(event.target.value) || 0, 0, 100) })} className={`${fieldClass} mt-1`} />
-                </label>)}
-              </div>
-              <div className="flex items-center justify-between text-xs text-warm-white/75">Timer color<ColorField label="Countdown color" value={cur.countdown.color} onChange={(color) => updateCountdown({ color })} /></div>
-              <p className="text-[11px] text-warm-white/50">This slide counts down in real time to the event.</p>
+              {(() => {
+                const countdown = cur.countdown;
+                if (!countdown) return null;
+                const units = { ...DEFAULT_COUNTDOWN_UNITS, ...countdown.units };
+                const setFromNow = (minutes: number) => updateCountdown({ targetAt: new Date(Date.now() + minutes * 60_000).toISOString() });
+                const formats: { value: CountdownFormat; label: string; hint: string }[] = [
+                  { value: 'auto', label: 'Auto', hint: '01:05:09, or 2d 03h 15m when days are left' },
+                  { value: 'clock', label: '00:00:00', hint: 'Hours, minutes and seconds' },
+                  { value: 'minutes', label: '00:00', hint: 'Minutes and seconds (good for short timers)' },
+                  { value: 'words', label: 'Words', hint: '2 Days 3 Hours 15 Minutes' },
+                  { value: 'boxes', label: 'Boxes', hint: 'Big numbers with the unit under each' },
+                ];
+                const chip = (active: boolean) => `rounded-md border px-2 py-1 text-[11px] font-semibold transition ${active ? 'border-brand bg-brand/15 text-brand' : 'border-white/10 text-warm-white/70 hover:border-white/25 hover:text-white'}`;
+                return <>
+                  <p className="text-[11px] text-warm-white/55">Select the timer on the slide to move or resize it.</p>
+
+                  <p className="-mb-1 text-[11px] font-semibold uppercase tracking-wider text-warm-white/45">Counts down to</p>
+                  <input type="datetime-local" aria-label="Event date and time" value={toLocalDateTimeInput(countdown.targetAt)} onChange={(event) => {
+                    const target = new Date(event.target.value);
+                    if (!Number.isNaN(target.getTime())) updateCountdown({ targetAt: target.toISOString() });
+                  }} className={fieldClass} />
+                  <div className="flex flex-wrap items-center gap-1 text-[11px] text-warm-white/55">From now:
+                    {[5, 10, 15, 30, 60].map((minutes) => <button key={minutes} type="button" onClick={() => setFromNow(minutes)} className={chip(false)}>{minutes < 60 ? `${minutes} min` : '1 hour'}</button>)}
+                  </div>
+
+                  <p className="-mb-1 text-[11px] font-semibold uppercase tracking-wider text-warm-white/45">Timer style</p>
+                  <div className="flex flex-wrap gap-1">
+                    {formats.map((option) => <button key={option.value} type="button" title={option.hint} onClick={() => updateCountdown({ format: option.value })} className={chip((countdown.format ?? 'auto') === option.value)}>{option.label}</button>)}
+                  </div>
+                  <label className="flex cursor-pointer items-center gap-2 text-xs text-warm-white/75"><input type="checkbox" checked={countdown.showSeconds ?? true} onChange={(event) => updateCountdown({ showSeconds: event.target.checked })} className="h-3.5 w-3.5 accent-brand" /> Show seconds</label>
+                  {(countdown.format === 'words' || countdown.format === 'boxes') && <div className="grid grid-cols-2 gap-2">
+                    {(['days', 'hours', 'minutes', 'seconds'] as const).map((key) => <label key={key} className="block text-[11px] text-warm-white/60">{DEFAULT_COUNTDOWN_UNITS[key]} word
+                      <input value={countdown.units?.[key] ?? ''} placeholder={DEFAULT_COUNTDOWN_UNITS[key]} maxLength={20} onChange={(event) => updateCountdown({ units: { ...countdown.units, [key]: event.target.value } })} className={`${fieldClass} mt-1`} />
+                    </label>)}
+                    <p className="col-span-2 -mt-1 text-[10px] text-warm-white/45">Type your own words, in any language (e.g. Araw, Oras, Minuto, Segundo). Shown: {units.days} · {units.hours} · {units.minutes} · {units.seconds}</p>
+                  </div>}
+
+                  <p className="-mb-1 text-[11px] font-semibold uppercase tracking-wider text-warm-white/45">Numbers</p>
+                  <div className="grid grid-cols-[1fr_auto] gap-2">
+                    <select aria-label="Countdown font" value={countdown.font ?? 'Montserrat'} onChange={(event) => updateCountdown({ font: event.target.value })} className={fieldClass} style={{ fontFamily: `"${countdown.font ?? 'Montserrat'}", sans-serif` }}>
+                      {[...new Set([countdown.font ?? 'Montserrat', ...COUNTDOWN_FONTS])].map((font) => <option key={font} value={font} style={{ fontFamily: `"${font}", sans-serif` }}>{font}</option>)}
+                    </select>
+                    <div className="flex items-center gap-0.5">
+                      <IconBtn label="Bold numbers" active={countdown.bold ?? true} onClick={() => updateCountdown({ bold: !(countdown.bold ?? true) })}><Bold size={15} /></IconBtn>
+                      <ColorField label="Countdown color" value={countdown.color} onChange={(color) => updateCountdown({ color })} />
+                    </div>
+                  </div>
+                  <label className="block text-xs text-warm-white/70">Size
+                    <div className="mt-1 flex items-center gap-2"><input type="range" min="32" max="240" step="4" value={countdown.size ?? 112} onChange={(event) => updateCountdown({ size: Number(event.target.value) })} className="w-full accent-brand" /><span className="w-12 text-right tabular-nums">{countdown.size ?? 112}px</span></div>
+                  </label>
+                  <div className="flex items-center justify-between text-xs text-warm-white/75">
+                    <span className="flex items-center gap-0.5">
+                      <IconBtn label="Align left" active={(countdown.align ?? 'center') === 'left'} onClick={() => updateCountdown({ align: 'left' })}><AlignLeft size={15} /></IconBtn>
+                      <IconBtn label="Align center" active={(countdown.align ?? 'center') === 'center'} onClick={() => updateCountdown({ align: 'center' })}><AlignCenter size={15} /></IconBtn>
+                      <IconBtn label="Align right" active={(countdown.align ?? 'center') === 'right'} onClick={() => updateCountdown({ align: 'right' })}><AlignRight size={15} /></IconBtn>
+                    </span>
+                    <label className="flex cursor-pointer items-center gap-2"><input type="checkbox" checked={countdown.shadow ?? true} onChange={(event) => updateCountdown({ shadow: event.target.checked })} className="h-3.5 w-3.5 accent-brand" /> Shadow</label>
+                  </div>
+
+                  <p className="-mb-1 text-[11px] font-semibold uppercase tracking-wider text-warm-white/45">Label</p>
+                  <input aria-label="Countdown label" value={countdown.label} onChange={(event) => updateCountdown({ label: event.target.value })} className={fieldClass} placeholder="e.g. Service starts in (leave empty to hide)" maxLength={120} />
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-warm-white/60">
+                    <button type="button" onClick={() => updateCountdown({ labelPosition: 'above' })} className={chip((countdown.labelPosition ?? 'above') === 'above')}>Above timer</button>
+                    <button type="button" onClick={() => updateCountdown({ labelPosition: 'below' })} className={chip(countdown.labelPosition === 'below')}>Below timer</button>
+                    <span className="ml-auto flex items-center gap-0.5">
+                      <IconBtn label="Bold label" active={countdown.labelBold ?? true} onClick={() => updateCountdown({ labelBold: !(countdown.labelBold ?? true) })}><Bold size={15} /></IconBtn>
+                      <ColorField label="Label color" value={countdown.labelColor ?? countdown.color} onChange={(labelColor) => updateCountdown({ labelColor })} />
+                    </span>
+                  </div>
+                  <label className="block text-xs text-warm-white/70">Label size
+                    <div className="mt-1 flex items-center gap-2"><input type="range" min="16" max="96" step="2" value={countdown.labelSize ?? 34} onChange={(event) => updateCountdown({ labelSize: Number(event.target.value) })} className="w-full accent-brand" /><span className="w-12 text-right tabular-nums">{countdown.labelSize ?? 34}px</span></div>
+                  </label>
+
+                  <p className="-mb-1 text-[11px] font-semibold uppercase tracking-wider text-warm-white/45">When time is up</p>
+                  <input aria-label="Message when the countdown ends" value={countdown.endText ?? 'Starting now'} onChange={(event) => updateCountdown({ endText: event.target.value })} className={fieldClass} placeholder="Leave empty to show nothing" maxLength={120} />
+                  <div className="flex flex-wrap gap-1.5">
+                    <button type="button" onClick={() => updateCountdown({ endMode: 'below' })} className={chip((countdown.endMode ?? 'below') === 'below')}>Show under 00:00</button>
+                    <button type="button" onClick={() => updateCountdown({ endMode: 'replace' })} className={chip(countdown.endMode === 'replace')}>Replace the timer</button>
+                  </div>
+
+                  <p className="-mb-1 text-[11px] font-semibold uppercase tracking-wider text-warm-white/45">Area (% of the slide)</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {([['x', 'Left'], ['y', 'Top'], ['w', 'Width'], ['h', 'Height']] as const).map(([key, label]) => <label key={key} className="block text-xs text-warm-white/70">{label}
+                      <input type="number" min="0" max="100" value={Math.round(countdown[key] ?? ({ x: 10, y: 30, w: 80, h: 40 }[key]))} onChange={(event) => updateCountdown({ [key]: clamp(Number(event.target.value) || 0, 0, 100) })} className={`${fieldClass} mt-1`} />
+                    </label>)}
+                  </div>
+                  <p className="text-[11px] text-warm-white/50">The timer counts down live on the slide, in Studio, on the output screens and on the stream.</p>
+                </>;
+              })()}
             </div>}
-            {tab === 'Content' &&
+            {tab === 'Format' &&
               (selectedPicture?.mediaType === 'video' ? (
                 <div className="flex flex-col gap-3">
                   <SectionTitle>Slide video</SectionTitle>
@@ -2954,6 +3421,7 @@ export default function Presentation() {
                       rows={3}
                       value={box.text}
                       onChange={(e) => updateBox({ text: e.target.value })}
+                      onSelect={(e) => rememberSelection(selectedBoxId, e.currentTarget.selectionStart, e.currentTarget.selectionEnd)}
                       className={`${fieldClass} resize-none`}
                     />
                     <p className="mt-1 text-[11px] text-warm-white/50">
@@ -2961,7 +3429,7 @@ export default function Presentation() {
                     </p>
                   </div>
 
-                  <SectionTitle>Format</SectionTitle>
+                  <SectionTitle>Text style</SectionTitle>
                   <div className="-mt-1 flex items-center gap-0.5">
                     <IconBtn label="Bold" active={box.bold} onClick={() => updateBox({ bold: !box.bold })}>
                       <Bold size={15} />
@@ -2976,14 +3444,29 @@ export default function Presentation() {
                       <span className="text-[12px] font-bold leading-none tracking-tight">{box.uppercase ? 'AA' : 'Aa'}</span>
                     </IconBtn>
                     <span className="mx-1 h-5 w-px bg-white/10" />
-                    <IconBtn label="Align left" active={box.align === 'left'} onClick={() => updateBox({ align: 'left' })}>
+                    <IconBtn label="Align left" active={shownAlign(selectedBoxId, box) === 'left'} onClick={() => applyAlign(selectedBoxId, box, 'left')}>
                       <AlignLeft size={15} />
                     </IconBtn>
-                    <IconBtn label="Align center" active={box.align === 'center'} onClick={() => updateBox({ align: 'center' })}>
+                    <IconBtn label="Align center" active={shownAlign(selectedBoxId, box) === 'center'} onClick={() => applyAlign(selectedBoxId, box, 'center')}>
                       <AlignCenter size={15} />
                     </IconBtn>
-                    <IconBtn label="Align right" active={box.align === 'right'} onClick={() => updateBox({ align: 'right' })}>
+                    <IconBtn label="Align right" active={shownAlign(selectedBoxId, box) === 'right'} onClick={() => applyAlign(selectedBoxId, box, 'right')}>
                       <AlignRight size={15} />
+                    </IconBtn>
+                    <IconBtn label="Justify" active={shownAlign(selectedBoxId, box) === 'justify'} onClick={() => applyAlign(selectedBoxId, box, 'justify')}>
+                      <AlignJustify size={15} />
+                    </IconBtn>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1">
+                    <span className="mr-1 text-[11px] text-warm-white/50">Position in box</span>
+                    <IconBtn label="Text at top" active={(box.valign ?? 'middle') === 'top'} onClick={() => updateBox({ valign: 'top' })}>
+                      <AlignVerticalJustifyStart size={15} />
+                    </IconBtn>
+                    <IconBtn label="Text in middle" active={(box.valign ?? 'middle') === 'middle'} onClick={() => updateBox({ valign: 'middle' })}>
+                      <AlignVerticalJustifyCenter size={15} />
+                    </IconBtn>
+                    <IconBtn label="Text at bottom" active={(box.valign ?? 'middle') === 'bottom'} onClick={() => updateBox({ valign: 'bottom' })}>
+                      <AlignVerticalJustifyEnd size={15} />
                     </IconBtn>
                   </div>
 
@@ -3032,6 +3515,36 @@ export default function Presentation() {
                         ))}
                     </select>
                   </div>
+
+                  <SectionTitle>Spacing</SectionTitle>
+                    <label className="block">
+                      <span className="flex justify-between text-xs text-warm-white/70">
+                        Line spacing <span>{box.lineHeight.toFixed(2)}</span>
+                      </span>
+                      <input
+                        type="range"
+                        min={0.9}
+                        max={1.8}
+                        step={0.05}
+                        value={box.lineHeight}
+                        onChange={(e) => updateBox({ lineHeight: Number(e.target.value) })}
+                        className="mt-1 w-full accent-brand"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="flex justify-between text-xs text-warm-white/70">
+                        Letter spacing <span>{box.letterSpacing}px</span>
+                      </span>
+                      <input
+                        type="range"
+                        min={-4}
+                        max={20}
+                        step={1}
+                        value={box.letterSpacing}
+                        onChange={(e) => updateBox({ letterSpacing: Number(e.target.value) })}
+                        className="mt-1 w-full accent-brand"
+                      />
+                    </label>
 
                   <SectionTitle>Look</SectionTitle>
                   <div className="flex items-center justify-between text-sm text-warm-white">
@@ -3086,50 +3599,6 @@ export default function Presentation() {
                 </div>
               ))}
 
-            {tab === 'Style' && (
-              <div className="flex flex-col gap-4 text-sm text-warm-white">
-                {selectedShape ? (
-                  <div className="flex items-center justify-between">
-                    Shape fill
-                    <ColorField label="Shape fill color" value={selectedShape.fill} onChange={(value) => updateShape(selectedShape.id, { fill: value })} />
-                  </div>
-                ) : !box ? (
-                  <p className="text-warm-white/60">Add a text box to change its style.</p>
-                ) : (
-                  <>
-                    <label className="block">
-                      <span className="flex justify-between text-xs text-warm-white/70">
-                        Line height <span>{box.lineHeight.toFixed(2)}</span>
-                      </span>
-                      <input
-                        type="range"
-                        min={0.9}
-                        max={1.8}
-                        step={0.05}
-                        value={box.lineHeight}
-                        onChange={(e) => updateBox({ lineHeight: Number(e.target.value) })}
-                        className="mt-1 w-full accent-brand"
-                      />
-                    </label>
-                    <label className="block">
-                      <span className="flex justify-between text-xs text-warm-white/70">
-                        Letter spacing <span>{box.letterSpacing}px</span>
-                      </span>
-                      <input
-                        type="range"
-                        min={-4}
-                        max={20}
-                        step={1}
-                        value={box.letterSpacing}
-                        onChange={(e) => updateBox({ letterSpacing: Number(e.target.value) })}
-                        className="mt-1 w-full accent-brand"
-                      />
-                    </label>
-                  </>
-                )}
-              </div>
-            )}
-
             {tab === 'Background' && (
               <div className="flex flex-col gap-4">
                 <div>
@@ -3147,6 +3616,44 @@ export default function Presentation() {
                     ))}
                   </div>
                 </div>
+                {(() => {
+                  const custom = parseCustomBackground(cur.bg);
+                  const from = custom?.from ?? '#1E293B';
+                  const applyColor = (bg: string) => updateSlide({ bg, bgImage: undefined, bgVideo: undefined, bgVideoMuted: undefined, bgAssetId: undefined, bgPosition: undefined, bgPictureRestore: undefined });
+                  return (
+                    <div>
+                      <p className="mb-2 text-xs text-warm-white/70">Your own color</p>
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-warm-white/70">
+                        <label className="flex items-center gap-1.5">Color
+                          <input type="color" aria-label="Background color" value={from} onChange={(event) => applyColor(customBackground(event.target.value, custom?.to))} className={`h-8 w-11 cursor-pointer rounded border bg-transparent ${custom && !cur.bgImage && !cur.bgVideo ? 'border-brand' : 'border-white/15'}`} />
+                        </label>
+                        <label className="flex cursor-pointer items-center gap-1.5">
+                          <input type="checkbox" checked={!!custom?.to} onChange={(event) => applyColor(customBackground(from, event.target.checked ? custom?.to ?? '#000000' : undefined))} className="h-3.5 w-3.5 accent-brand" /> Blend to
+                        </label>
+                        {custom?.to && <input type="color" aria-label="Second background color" value={custom.to} onChange={(event) => applyColor(customBackground(from, event.target.value))} className="h-8 w-11 cursor-pointer rounded border border-white/15 bg-transparent" />}
+                      </div>
+                      {(cur.bgImage || cur.bgVideo) && <p className="mt-1 text-[10px] text-warm-white/45">Picking a color replaces the background picture or video.</p>}
+                      <div className="mt-3 rounded-lg border border-white/10 bg-black/15 p-2.5">
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <p className="text-xs text-warm-white/70">Presentation colors</p>
+                          <button type="button" disabled={projectLocked || !!cur.bgImage || !!cur.bgVideo || deckColors.includes(cur.bg)} onClick={() => addDeckColor(cur.bg)} title="Save this slide's background color for this presentation" className="flex items-center gap-1 rounded-md border border-white/15 px-2 py-1 text-[11px] font-semibold text-warm-white/80 hover:border-brand hover:text-white disabled:opacity-35">
+                            <Plus size={12} /> Add color
+                          </button>
+                        </div>
+                        {deckColors.length ? (
+                          <div className="grid grid-cols-6 gap-1.5">
+                            {deckColors.map((color) => (
+                              <div key={color} className="group relative">
+                                <button type="button" aria-label="Use this saved color" title="Use this color on this slide" onClick={() => applyColor(color)} className={`block aspect-square w-full rounded-md border-2 bg-linear-to-br ${backgroundClasses(color)} ${cur.bg === color && !cur.bgImage && !cur.bgVideo ? 'border-brand' : 'border-white/15'}`} style={backgroundStyle(color)} />
+                                {!projectLocked && <button type="button" aria-label="Remove this saved color" title="Remove from this presentation" onClick={() => removeDeckColor(color)} className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-black/85 text-warm-white/85 ring-1 ring-white/20 hover:text-red-300 group-hover:flex"><X size={10} /></button>}
+                              </div>
+                            ))}
+                          </div>
+                        ) : <p className="text-[10px] leading-snug text-warm-white/45">Pick a color or gradient, then click Add color to keep it for this presentation only.</p>}
+                      </div>
+                    </div>
+                  );
+                })()}
                 {(cur.bgImage || cur.bgVideo) && <button type="button" onClick={() => removeBackgroundMedia(false)} className="rounded-lg border border-white/10 px-3 py-2 text-left text-xs text-red-200 hover:bg-red-500/10">Remove background {cur.bgVideo ? 'video' : 'image'}</button>}
                 {cur.bgImage && <p className="text-[11px] text-warm-white/50">Double-click the background on the slide, then drag it to reposition.</p>}
                 <button type="button" disabled={projectLocked || slides.length < 2} onClick={applyBackgroundToAllSlides} title="Copy this slide's background and darkening to every unlocked slide" className="flex items-center justify-center gap-2 rounded-lg border border-brand/40 bg-brand/10 px-3 py-2 text-xs font-semibold text-warm-white transition hover:bg-brand/20 disabled:cursor-not-allowed disabled:opacity-40"><Check size={14} className="text-brand" /> Use this background on all slides</button>
@@ -3167,8 +3674,8 @@ export default function Presentation() {
                     <span className="text-[10px] text-warm-white/45">{backgroundAssets.length} saved</span>
                   </div>
                   <div className="mb-2 grid grid-cols-2 gap-1.5">
-                    <button type="button" disabled={backgroundImportProgress !== null} onClick={() => backgroundFolderInput.current?.click()} className="flex items-center justify-center gap-1.5 rounded-lg border border-white/15 px-2 py-2 text-[11px] font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><FolderPlus size={14} /> Import folder</button>
-                    <button type="button" disabled={backgroundImportProgress !== null} onClick={() => backgroundFilesInput.current?.click()} className="flex items-center justify-center gap-1.5 rounded-lg border border-white/15 px-2 py-2 text-[11px] font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><Upload size={14} /> Add files</button>
+                    <button type="button" disabled={backgroundImportProgress !== null} title="Add every picture and video in a folder (its subfolders become collections)" onClick={() => backgroundFolderInput.current?.click()} className="flex items-center justify-center gap-1.5 rounded-lg border border-white/15 px-2 py-2 text-[11px] font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><FolderPlus size={14} /> Import folder</button>
+                    <button type="button" disabled={backgroundImportProgress !== null} title="Pick one picture or video, or select several (Ctrl+click)" onClick={() => backgroundFilesInput.current?.click()} className="flex items-center justify-center gap-1.5 rounded-lg border border-white/15 px-2 py-2 text-[11px] font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><Upload size={14} /> Add files</button>
                   </div>
                   {backgroundImportProgress && <div role="status" aria-live="polite" className="mb-2 rounded-lg border border-brand/20 bg-brand/5 px-3 py-2 text-[11px] text-warm-white/75">
                     <div className="flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-2"><Loader2 size={13} className="shrink-0 animate-spin text-brand" /><span className="truncate">{backgroundImportProgress.message}</span></span><span className="shrink-0 tabular-nums text-warm-white/50">{backgroundImportProgress.current}/{backgroundImportProgress.total}</span></div>
@@ -3292,19 +3799,38 @@ export default function Presentation() {
         </div>
 
         <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3">
-          {dock === 'Templates' &&
-            TEMPLATES.map((t) => (
-              <button
-                key={t.label}
-                onClick={() => insertSlide(makeSlide(t))}
-                className="w-37.5 shrink-0 text-left"
-              >
-                <span className="relative block aspect-video overflow-hidden rounded-lg border border-white/10 hover:border-brand">
-                  <SlideRender slide={makeSlide(t)} />
+          {dock === 'Templates' && (openTemplate ? <>
+            <button type="button" onClick={() => setOpenTemplateId(null)} className="flex h-full w-28 shrink-0 flex-col items-center justify-center gap-1 rounded-lg border border-white/10 text-xs text-warm-white/70 transition hover:border-brand hover:text-white">
+              <ChevronLeft size={18} /> All templates
+            </button>
+            {openTemplate.mine && <button type="button" onClick={() => deleteMyTemplate(openTemplate.id)} className="flex h-full w-28 shrink-0 flex-col items-center justify-center gap-1 rounded-lg border border-white/10 text-xs text-red-200/80 transition hover:border-red-400/60 hover:bg-red-500/10"><Trash2 size={16} /> Delete template</button>}
+            <ActionCard icon={Plus} label={onlyStarterSlide ? 'Use this template' : `Add all ${openTemplate.slides.length} slides`} hint={onlyStarterSlide ? `Start with all ${openTemplate.slides.length} slides` : `“${openTemplate.label}”`} onClick={() => addTemplateSlides(openTemplate.slides, openTemplate.label, openTemplate.colors)} />
+            {openTemplate.slides.map((source, slideIndex) => (
+              <button key={slideIndex} type="button" title="Add this slide" onClick={() => addTemplateSlides([source], openTemplate.label, openTemplate.colors)} className="w-37.5 shrink-0 text-left">
+                <span className="relative block aspect-video overflow-hidden rounded-lg border border-white/10 transition hover:border-brand">
+                  <SlideRender slide={withTemplateMedia(slideFromTemplate(source))} />
                 </span>
-                <span className="mt-1 block truncate text-xs text-warm-white/80">{t.label}</span>
+                <span className="mt-1 block truncate text-xs text-warm-white/80">{source.title || `Slide ${slideIndex + 1}`}</span>
               </button>
             ))}
+          </> : <>
+            <ActionCard icon={Save} label="Save as template" hint="Keep this presentation's design" onClick={saveDeckAsTemplate} />
+            {allTemplates.map((t) => (
+              <div key={t.id} className="group relative w-37.5 shrink-0">
+              {t.mine && <button type="button" aria-label={`Delete template ${t.label}`} title="Delete this template" onClick={() => deleteMyTemplate(t.id)} className="absolute right-1 top-1 z-10 rounded-md bg-black/75 p-1.5 text-warm-white/85 ring-1 ring-white/15 transition hover:bg-red-500/80 hover:text-white"><Trash2 size={13} /></button>}
+              <button type="button" onClick={() => setOpenTemplateId(t.id)} className="w-full text-left">
+                <span className="relative block">
+                  <span className="absolute inset-x-2 -top-1 h-full rounded-lg border border-white/10 bg-white/5" />
+                  <span className="relative block aspect-video overflow-hidden rounded-lg border border-white/10 transition group-hover:border-brand">
+                    <SlideRender slide={withTemplateMedia(slideFromTemplate(t.slides[0]))} />
+                    <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1.5 py-0.5 text-[9px] font-semibold text-white">{t.slides.length} slide{t.slides.length === 1 ? '' : 's'}</span>
+                  </span>
+                </span>
+                <span className="mt-1 flex items-center gap-1 truncate text-xs text-warm-white/80">{t.mine && <span className="rounded bg-brand/20 px-1 text-[9px] font-bold text-brand">MINE</span>}{t.label}</span>
+              </button>
+              </div>
+            ))}
+          </>)}
 
           {dock === 'Text' && (
             <>
@@ -3390,14 +3916,14 @@ export default function Presentation() {
 
       <input ref={contentInput} type="file" accept="image/*,video/*" hidden onChange={(event) => { addContentMedia(event.target.files?.[0]); event.target.value = ''; }} />
 
-      {videoPreviewAsset && <div className="fixed inset-0 z-130 flex items-center justify-center bg-black/85 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoPreviewAsset(null); }}>
+      {videoPreviewAsset && <BodyPortal><div className="fixed inset-0 z-130 flex items-center justify-center bg-black/85 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoPreviewAsset(null); }}>
         <section role="dialog" aria-modal="true" aria-label={`Preview ${videoPreviewAsset.name}`} className="w-full max-w-4xl rounded-2xl border border-white/10 bg-[#101d2a] p-4 shadow-2xl">
           <div className="mb-3 flex items-center justify-between gap-3"><h2 className="truncate text-sm font-semibold text-warm-white">{videoPreviewAsset.name}</h2><button type="button" onClick={() => setVideoPreviewAsset(null)} aria-label="Close video preview" className="rounded-lg p-2 text-warm-white/60 hover:bg-white/10 hover:text-white"><X size={17} /></button></div>
           <video src={videoPreviewAsset.url} controls autoPlay playsInline className="max-h-[70vh] w-full rounded-lg bg-black" />
           <p className="mt-3 text-xs text-warm-white/55">This upload is from the background library. Add videos that need player controls from the Content tab.</p>
           <div className="mt-2 flex justify-end"><button type="button" onClick={() => { applyMediaAsset(videoPreviewAsset); setVideoPreviewAsset(null); }} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy">Use as background</button></div>
         </section>
-      </div>}
+      </div></BodyPortal>}
       {previewing && <PreviewOverlay slides={slides} start={index} onClose={() => setPreviewing(false)} />}
       <ScripturePickerModal
         open={scripturePickerOpen}
@@ -3418,7 +3944,7 @@ export default function Presentation() {
           updateSlide({ extraBoxes: [...(cur.extraBoxes ?? []), verseBox] });
           setSelectedBoxId(id);
           setIsBoxSelected(true);
-          setTab('Content');
+          setTab('Format');
           setScripturePickerOpen(false);
         }}
       />
@@ -3437,7 +3963,7 @@ export default function Presentation() {
         onCancel={() => setDeleteConfirmation(null)}
         onConfirm={() => deleteConfirmation?.onConfirm()}
       />
-      {leaveConfirmationOpen && <div className="fixed inset-0 z-90 flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) { setLeaveConfirmationOpen(false); setPendingNavigation(null); } }}>
+      {leaveConfirmationOpen && <BodyPortal><div className="fixed inset-0 z-90 flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) { setLeaveConfirmationOpen(false); setPendingNavigation(null); } }}>
         <section role="alertdialog" aria-modal="true" aria-labelledby="leave-presentation-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
           <h2 id="leave-presentation-title" className="text-base font-bold text-warm-white">You have unsaved changes</h2>
           <p className="mt-2 text-sm leading-relaxed text-warm-white/60">Save your slide changes before leaving this presentation, or discard them?</p>
@@ -3447,7 +3973,7 @@ export default function Presentation() {
             <button type="button" disabled={saving} onClick={() => { void keepChangesAndContinue(); }} className="flex items-center gap-2 rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy hover:brightness-110 disabled:cursor-wait disabled:opacity-70">{saving && <Loader2 size={15} className="animate-spin" />}{saving ? 'Saving…' : 'Keep changes'}</button>
           </div>
         </section>
-      </div>}
+      </div></BodyPortal>}
     </div>
   );
 }

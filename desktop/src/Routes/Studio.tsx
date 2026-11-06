@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
   ArrowRight,
@@ -31,11 +31,13 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import ConfirmationModal from '../components/modal/ConfirmationModal';
-import ScripturePickerModal, { type SelectedScriptureVerse } from '../components/modal/ScripturePickerModal';
-import CountdownDisplay, { type CountdownSettings } from '../components/CountdownDisplay';
+import ScripturePickerModal, { preloadBible, type SelectedScriptureVerse } from '../components/modal/ScripturePickerModal';
+import CountdownDisplay, { paintCountdown, type CountdownSettings } from '../components/CountdownDisplay';
 import StudioSongsPanel from '../components/StudioSongsPanel';
 import SongDesignPanel from '../components/SongDesignPanel';
-import { DEFAULT_SONG_STYLE, SHOW_SONG_EVENT, SONG_SAVED_EVENT, SONG_SLIDE_SETTINGS_EVENT, compareSongs, firstLine, loadLibrary, searchSongs, songSlideLayouts, type Song, type SongStyle, type SongTextLayout } from '../utils/songbooks';
+import { hasLineAligns, lineAlignAt } from '../utils/lineAlign';
+import { backgroundClasses, backgroundStyle, customBackgroundStops } from '../utils/slideBackground';
+import { DEFAULT_SONG_STYLE, SHOW_SONG_EVENT, SONG_SAVED_EVENT, SONG_SLIDE_SETTINGS_EVENT, compareSongs, firstLine, loadLibrary, searchSongs, songLineKey, songSlideLayouts, type Song, type SongStyle, type SongTextLayout } from '../utils/songbooks';
 import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimization';
 import { getAccountDatabaseName, getAccountStorageKey } from '../utils/accountStorage';
 
@@ -45,11 +47,15 @@ type Slide = { text: string; ref?: string; bg?: string; bgImage?: string; bgPosi
 
 type PresentationTextBox = {
   text: string; font: string; size: number; color: string; bold: boolean; italic: boolean;
-  underline: boolean; align: 'left' | 'center' | 'right'; shadow: boolean; boxBg: string;
+  underline: boolean; align: 'left' | 'center' | 'right' | 'justify'; shadow: boolean; boxBg: string;
   boxBgOn: boolean; autoSize: boolean; lineHeight: number; letterSpacing: number;
   x: number; y: number; w: number; h: number; layerOrder?: number | 'back' | 'front';
   /** Show the text in capital letters (the stored text keeps its normal case). */
   uppercase?: boolean;
+  /** Where the text sits in its box, top to bottom (missing = middle). */
+  valign?: 'top' | 'middle' | 'bottom';
+  /** Single lines aligned differently from the box (index = line number; null = follow the box). */
+  lineAligns?: ('left' | 'center' | 'right' | 'justify' | null)[];
 };
 type PresentationPicture = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; layerOrder?: number | 'back' | 'front' };
 type PresentationShape = { id: number; kind: string; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number };
@@ -87,8 +93,8 @@ const songTextBox = (text: string, size = 64, uppercase = false): PresentationTe
 /** A song text area as a Studio text box. */
 const songLayoutBox = (layout: SongTextLayout): PresentationTextBox => ({
   text: layout.text, font: layout.font, size: layout.size, color: layout.color, bold: layout.bold, italic: layout.italic,
-  underline: layout.underline, align: layout.align, shadow: layout.shadow, boxBg: '#000000', boxBgOn: false, autoSize: true,
-  lineHeight: layout.lineHeight, letterSpacing: 0, x: layout.x, y: layout.y, w: layout.w, h: layout.h, uppercase: layout.uppercase,
+  underline: layout.underline, align: layout.align, valign: layout.valign, lineAligns: layout.lineAligns, shadow: layout.shadow, boxBg: layout.boxBg, boxBgOn: layout.boxBgOn, autoSize: true,
+  lineHeight: layout.lineHeight, letterSpacing: layout.letterSpacing, x: layout.x, y: layout.y, w: layout.w, h: layout.h, uppercase: layout.uppercase,
 });
 /**
  * Builds a song's Studio slides from its style (its own design, or the default song style):
@@ -491,9 +497,14 @@ function ProgramTextBox({ box, defaultLayerOrder = 3000 }: { box: PresentationTe
     return () => observer.disconnect();
   }, [box]);
   return (
-    <div ref={wrap} className="absolute flex items-center overflow-hidden" style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`, zIndex: typeof box.layerOrder === 'number' ? box.layerOrder : box.layerOrder === 'front' ? 5000 : box.layerOrder === 'back' ? 0 : defaultLayerOrder, background: box.boxBgOn ? box.boxBg : undefined, borderRadius: '1cqw' }}>
-      <div ref={inner} className="w-full whitespace-pre-wrap break-words" style={{ textAlign: box.align, transform: `scale(${fitScale})`, transformOrigin: 'center', lineHeight: box.lineHeight, letterSpacing: `${(box.letterSpacing / 1280) * 100}cqw` }}>
-        <div className="whitespace-pre-wrap" style={{ fontFamily: `"${box.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(box.size / 1280) * 100}cqw`, fontWeight: box.bold ? 800 : 500, fontStyle: box.italic ? 'italic' : 'normal', textDecoration: box.underline ? 'underline' : 'none', textTransform: box.uppercase ? 'uppercase' : undefined, color: box.color, textShadow: box.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : undefined }}>{box.text}</div>
+    <div ref={wrap} className={`absolute flex ${box.valign === 'top' ? 'items-start' : box.valign === 'bottom' ? 'items-end' : 'items-center'} overflow-hidden`} style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`, zIndex: typeof box.layerOrder === 'number' ? box.layerOrder : box.layerOrder === 'front' ? 5000 : box.layerOrder === 'back' ? 0 : defaultLayerOrder, background: box.boxBgOn ? box.boxBg : undefined, borderRadius: '1cqw' }}>
+      <div ref={inner} className="w-full whitespace-pre-wrap break-words" style={{ textAlign: box.align, textAlignLast: box.align === 'justify' ? 'left' : undefined, transform: `scale(${fitScale})`, transformOrigin: box.valign === 'top' ? 'top center' : box.valign === 'bottom' ? 'bottom center' : 'center', lineHeight: box.lineHeight, letterSpacing: `${(box.letterSpacing / 1280) * 100}cqw` }}>
+        <div className="whitespace-pre-wrap" style={{ fontFamily: `"${box.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(box.size / 1280) * 100}cqw`, fontWeight: box.bold ? 800 : 500, fontStyle: box.italic ? 'italic' : 'normal', textDecoration: box.underline ? 'underline' : 'none', textTransform: box.uppercase ? 'uppercase' : undefined, color: box.color, textShadow: box.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : undefined }}>{hasLineAligns(box.lineAligns)
+          ? box.text.split('\n').map((line, lineIndex) => {
+            const lineAlign = lineAlignAt(box.align, box.lineAligns, lineIndex);
+            return <div key={lineIndex} style={{ textAlign: lineAlign, textAlignLast: lineAlign === 'justify' ? 'left' : undefined }}>{line || ' '}</div>;
+          })
+          : box.text}</div>
       </div>
     </div>
   );
@@ -517,7 +528,7 @@ function SlideView({
     const boxes = [slide.design.box, ...(slide.design.extraBoxes ?? []).map((item) => item.box)]
       .filter((box): box is PresentationTextBox => !!box);
     return (
-      <div className={`relative isolate h-full w-full overflow-hidden bg-gradient-to-br ${slide.bg ?? bg}`} style={{ containerType: 'inline-size' }}>
+      <div className={`relative isolate h-full w-full overflow-hidden bg-gradient-to-br ${backgroundClasses(slide.bg ?? bg)}`} style={{ containerType: 'inline-size', ...backgroundStyle(slide.bg ?? bg) }}>
         {slide.bgImage && <img src={slide.bgImage} alt="" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />}
         {slide.bgVideo && <video src={slide.bgVideo} autoPlay muted={slide.bgVideoMuted ?? true} loop playsInline className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />}
         <div className="absolute inset-0 bg-black" style={{ opacity: (slide.dim ?? 0) / 100 }} />
@@ -536,8 +547,8 @@ function SlideView({
   }
   return (
     <div
-      className={`relative isolate flex h-full w-full flex-col items-center justify-center overflow-hidden bg-gradient-to-br p-2 text-center text-white ${slide?.bg ?? bg}`}
-      style={slide?.bgImage ? { backgroundImage: `linear-gradient(rgba(0,0,0,${(slide.dim ?? 20) / 100}), rgba(0,0,0,${(slide.dim ?? 20) / 100})), url("${slide.bgImage}")`, backgroundSize: 'cover', backgroundPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` } : undefined}
+      className={`relative isolate flex h-full w-full flex-col items-center justify-center overflow-hidden bg-gradient-to-br p-2 text-center text-white ${backgroundClasses(slide?.bg ?? bg)}`}
+      style={slide?.bgImage ? { backgroundImage: `linear-gradient(rgba(0,0,0,${(slide.dim ?? 20) / 100}), rgba(0,0,0,${(slide.dim ?? 20) / 100})), url("${slide.bgImage}")`, backgroundSize: 'cover', backgroundPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` } : backgroundStyle(slide?.bg ?? bg)}
     >
       {slide?.bgVideo && <video src={slide.bgVideo} autoPlay muted={slide.bgVideoMuted ?? true} loop playsInline className="absolute inset-0 h-full w-full object-cover" />}
       {slide?.bgVideo && <div className="absolute inset-0 bg-black/20" />}
@@ -1005,20 +1016,33 @@ const loadSafeStreamVideo = (url: string) => {
 };
 const streamPalette: Record<string, string> = { black: '#000', white: '#fff', slate: '#475569', gray: '#6b7280', zinc: '#71717a', blue: '#2563eb', indigo: '#4f46e5', sky: '#0284c7', cyan: '#0891b2', teal: '#0f766e', emerald: '#059669', green: '#16a34a', red: '#dc2626', rose: '#e11d48', orange: '#ea580c', amber: '#d97706', yellow: '#ca8a04', purple: '#9333ea', violet: '#7c3aed', pink: '#db2777' };
 const streamGradientColor = (bg: string, from: boolean) => {
+  const custom = customBackgroundStops(bg);
+  if (custom) return from ? custom[0] : custom[1];
   const token = bg.split(/\s+/).find((part) => part.startsWith(from ? 'from-' : 'to-')) ?? '';
   return streamPalette[token.slice(from ? 5 : 3).split('-')[0]] ?? '#111827';
 };
-const streamTextLines = (context: CanvasRenderingContext2D, text: string, maxWidth: number) => {
-  const lines: string[] = [];
-  for (const paragraph of text.split('\n')) {
+const streamTextLines = (context: CanvasRenderingContext2D, text: string, maxWidth: number) => streamTextRows(context, text, maxWidth).map((row) => row.text);
+/** Wraps text into lines; `last` marks the final line of a paragraph (justify leaves that one unstretched). */
+const streamTextRows = (context: CanvasRenderingContext2D, text: string, maxWidth: number) => {
+  const rows: { text: string; last: boolean; paragraph: number }[] = [];
+  for (const [paragraphIndex, paragraph] of text.split('\n').entries()) {
     let line = '';
     for (const word of paragraph.split(/\s+/)) {
       const next = line ? `${line} ${word}` : word;
-      if (line && context.measureText(next).width > maxWidth) { lines.push(line); line = word; } else line = next;
+      if (line && context.measureText(next).width > maxWidth) { rows.push({ text: line, last: false, paragraph: paragraphIndex }); line = word; } else line = next;
     }
-    lines.push(line);
+    rows.push({ text: line, last: true, paragraph: paragraphIndex });
   }
-  return lines;
+  return rows;
+};
+/** Draws one line stretched to the full width by spreading the gaps between words. */
+const fillJustifiedLine = (context: CanvasRenderingContext2D, line: string, x: number, y: number, width: number) => {
+  const words = line.split(' ').filter(Boolean);
+  const wordsWidth = words.reduce((total, word) => total + context.measureText(word).width, 0);
+  if (words.length < 2 || wordsWidth >= width) { context.fillText(line, x, y, width); return; }
+  const gap = (width - wordsWidth) / (words.length - 1);
+  let cursor = x;
+  for (const word of words) { context.fillText(word, cursor, y); cursor += context.measureText(word).width + gap; }
 };
 const paintProgramSlide = async (ctx: CanvasRenderingContext2D, slide: StudioSlide, bg: string, w: number, h: number, assets: ProgramMediaUrls, fontScale: number) => {
   const gradient = ctx.createLinearGradient(0, 0, w, h);
@@ -1068,18 +1092,28 @@ const paintProgramSlide = async (ctx: CanvasRenderingContext2D, slide: StudioSli
         if (box.boxBgOn) { ctx.fillStyle = box.boxBg; ctx.fillRect(x, y, bw, bh); }
         let size = box.size / 1280 * w; const font = () => `${box.italic ? 'italic ' : ''}${box.bold ? '800' : '500'} ${size}px "${box.font.replaceAll('"', '')}", sans-serif`;
         const boxText = box.uppercase ? box.text.toLocaleUpperCase() : box.text;
-        ctx.font = font(); let lines = streamTextLines(ctx, boxText, bw); let lineHeight = box.lineHeight * size;
-        if (box.autoSize && lines.length * lineHeight > bh) {
-          size *= bh / (lines.length * lineHeight);
+        ctx.font = font(); let rows = streamTextRows(ctx, boxText, bw); let lineHeight = box.lineHeight * size;
+        if (box.autoSize && rows.length * lineHeight > bh) {
+          size *= bh / (rows.length * lineHeight);
           ctx.font = font();
-          lines = streamTextLines(ctx, boxText, bw);
+          rows = streamTextRows(ctx, boxText, bw);
           lineHeight = box.lineHeight * size;
         }
-        ctx.textAlign = box.align; ctx.textBaseline = 'middle'; ctx.fillStyle = box.color; ctx.shadowColor = box.shadow ? 'rgba(0,0,0,.65)' : 'transparent'; ctx.shadowBlur = box.shadow ? size * .12 : 0;
-        const tx = box.align === 'left' ? x : box.align === 'right' ? x + bw : x + bw / 2; const totalHeight = lines.length * lineHeight;
-        lines.forEach((line, index) => ctx.fillText(line, tx, y + (bh - totalHeight) / 2 + (index + .5) * lineHeight, bw)); ctx.shadowBlur = 0;
+        ctx.textBaseline = 'middle'; ctx.fillStyle = box.color; ctx.shadowColor = box.shadow ? 'rgba(0,0,0,.65)' : 'transparent'; ctx.shadowBlur = box.shadow ? size * .12 : 0;
+        const totalHeight = rows.length * lineHeight;
+        const top = box.valign === 'top' ? y : box.valign === 'bottom' ? y + bh - totalHeight : y + (bh - totalHeight) / 2;
+        rows.forEach((row, index) => {
+          const ly = top + (index + .5) * lineHeight;
+          const rowAlign = lineAlignAt(box.align, box.lineAligns, row.paragraph);
+          const justify = rowAlign === 'justify';
+          ctx.textAlign = justify ? 'left' : rowAlign;
+          const tx = rowAlign === 'left' || justify ? x : rowAlign === 'right' ? x + bw : x + bw / 2;
+          if (justify && !row.last) fillJustifiedLine(ctx, row.text, x, ly, bw); else ctx.fillText(row.text, tx, ly, bw);
+        }); ctx.shadowBlur = 0;
       }
     }
+    const countdown = slide.countdown ?? slide.design.countdown;
+    if (countdown) paintCountdown(ctx, countdown, w, h);
   } else {
     const text = slide.text || slide.title || '';
     ctx.fillStyle = slide.textColor ?? '#fff'; ctx.font = `800 ${Math.max(24, 36 * fontScale)}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.shadowColor = 'rgba(0,0,0,.65)'; ctx.shadowBlur = w * .01;
@@ -1375,6 +1409,28 @@ export default function Studio() {
   useEffect(() => {
     try { localStorage.setItem(STUDIO_PREVIEW_MODE_KEY, String(previewMode)); } catch { /* Keep the current Studio mode if storage is unavailable. */ }
   }, [previewMode]);
+  // Studio stays loaded in the background, so pick up changes made on the Settings page right away.
+  // Stream quality is fixed while live (the encoder was started with it); a change made during a
+  // stream is picked up when the stream ends, for the next one.
+  const liveRef = useRef(live);
+  const syncFromSettings = useCallback(() => {
+    try {
+      setPreviewMode(localStorage.getItem(STUDIO_PREVIEW_MODE_KEY) !== 'false');
+      setConfirmEndStream(localStorage.getItem('faithstream.studio-confirm-end') !== 'false');
+      if (liveRef.current) return;
+      setStreamResolution(localStorage.getItem(STUDIO_RESOLUTION_KEY) || '720p');
+      setStreamFrameRate(localStorage.getItem(STUDIO_FRAME_RATE_KEY) || '30');
+      setStreamBitrate(localStorage.getItem(STUDIO_BITRATE_KEY) || '4500');
+    } catch { /* Keep Studio's current settings. */ }
+  }, []);
+  useEffect(() => {
+    liveRef.current = live;
+    if (!live) syncFromSettings();
+  }, [live, syncFromSettings]);
+  useEffect(() => {
+    window.addEventListener('faithstream:studio-settings', syncFromSettings);
+    return () => window.removeEventListener('faithstream:studio-settings', syncFromSettings);
+  }, [syncFromSettings]);
   useEffect(() => {
     try {
       localStorage.setItem(STUDIO_RESOLUTION_KEY, streamResolution);
@@ -2058,7 +2114,7 @@ export default function Studio() {
         bgImage: asset?.type === 'image' ? asset.url : undefined,
         bgVideo: asset?.type === 'video' ? asset.url : undefined,
         bgVideoMuted: asset?.type === 'video' ? true : undefined,
-        design: { box: { ...songLayoutBox(layout.box), text } },
+        design: { box: { ...songLayoutBox(layout.box), text, lineAligns: style.lineAligns?.[songLineKey(text)] } },
       };
     });
     const bg = slides[0]?.bg ?? style.background;
@@ -2993,6 +3049,34 @@ export default function Studio() {
     }
   };
 
+  /**
+   * The Output display bar: monitor checklist, Close all and Show slides. The Streaming and
+   * Slideshow tabs use this same bar, so they always look and work alike.
+   */
+  const outputDisplayBar = (mode: 'stream' | 'slideshow') => (
+    <div className={`flex shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-black/20 p-2 ${mode === 'stream' ? 'mb-2' : ''}`}>
+      <span className="flex shrink-0 items-center gap-1.5 rounded-md bg-sky-500/15 px-2 py-1.5 text-[11px] font-semibold text-sky-200"><Monitor size={13} /> Output display</span>
+      <MonitorPicker
+        displays={studioDisplays}
+        selectedIds={selectedStreamDisplayIds}
+        liveIds={openDisplayIds}
+        onToggle={toggleStreamDisplay}
+        onSetAll={(ids) => setStreamDisplayIds(ids)}
+      />
+      {openDisplayIds.length > 0 && <button type="button" title="Close the output on every monitor" onClick={() => { void closeAllStreamDisplays(); }} className="flex h-8 shrink-0 items-center rounded-md border border-white/15 px-2.5 text-[11px] font-semibold text-warm-white/80 hover:bg-white/5">Close all</button>}
+      <button
+        type="button"
+        aria-label="Show slides on selected monitors"
+        title={mode === 'stream' ? 'Show the on-air slide on every selected monitor' : 'Show the slideshow on every selected monitor'}
+        onClick={() => { void (mode === 'stream' ? openStreamDisplay() : openOfflineDisplay()); }}
+        disabled={!selectedStreamDisplayIds.length}
+        className="flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-brand px-2.5 text-[11px] font-bold text-white shadow-lg shadow-brand/15 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <Monitor size={13} /> Show slides{selectedStreamDisplayIds.length > 1 ? ` (${selectedStreamDisplayIds.length})` : ''}
+      </button>
+    </div>
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
       <div role="tablist" aria-label="Studio output" className="flex shrink-0 items-end gap-1 border-b border-white/10">
@@ -3083,18 +3167,7 @@ export default function Studio() {
           className="min-w-0 overflow-hidden"
           action={<span className="rounded bg-sky-500/15 px-2 py-1 text-[10px] font-bold text-sky-200">STAGE &amp; TAKE</span>}
         >
-          <div className="mb-2 flex shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-black/20 p-2">
-            <span className="flex shrink-0 items-center gap-1.5 rounded-md bg-sky-500/15 px-2 py-1.5 text-[11px] font-semibold text-sky-200"><Monitor size={13} /> Output display</span>
-            <MonitorPicker
-              displays={studioDisplays}
-              selectedIds={selectedStreamDisplayIds}
-              liveIds={openDisplayIds}
-              onToggle={toggleStreamDisplay}
-              onSetAll={(ids) => setStreamDisplayIds(ids)}
-            />
-            {openDisplayIds.length > 0 && <button type="button" title="Close the output on every monitor" onClick={() => { void closeAllStreamDisplays(); }} className="flex h-8 shrink-0 items-center rounded-md border border-white/15 px-2.5 text-[11px] font-semibold text-warm-white/80 hover:bg-white/5">Close all</button>}
-            <button type="button" aria-label="Show slides on selected monitors" title="Show the on-air slide on every selected monitor" onClick={() => { void openStreamDisplay(); }} disabled={!selectedStreamDisplayIds.length} className="flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-brand px-2.5 text-[11px] font-bold text-white shadow-lg shadow-brand/15 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"><Monitor size={13} /> Show slides{selectedStreamDisplayIds.length > 1 ? ` (${selectedStreamDisplayIds.length})` : ''}</button>
-          </div>
+          {outputDisplayBar('stream')}
           {displayError && studioOutputTab === 'stream' && <p role="alert" className="mb-2 shrink-0 text-[11px] text-amber-200">{displayError}</p>}
           <div data-program-control className="mb-2 flex shrink-0 items-center justify-between gap-2">
             <p className="min-w-0 text-[10px] text-warm-white/50">Choose and arrange sources for the on-air output.</p>
@@ -3217,7 +3290,7 @@ export default function Studio() {
             sidebarPanel === 'scenes' ? (
               <div className="flex items-center gap-1">
                 <button type="button" onClick={() => setClearScenesTab('stream')} disabled={!scenes.length} title="Remove all scenes" className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-semibold text-red-300/80 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 size={12} />Clear all</button>
-                <button type="button" aria-label="Add scripture scene" title="Add a Scripture scene" onClick={() => setScripturePickerOpen(true)} className="rounded p-1 text-warm-white/70 hover:bg-white/5 hover:text-brand"><BookOpen size={17} /></button>
+                <button type="button" aria-label="Add scripture scene" title="Add a Scripture scene" onPointerEnter={() => preloadBible()} onFocus={() => preloadBible()} onClick={() => setScripturePickerOpen(true)} className="rounded p-1 text-warm-white/70 hover:bg-white/5 hover:text-brand"><BookOpen size={17} /></button>
                 <button aria-label="Add scene" onClick={beginAddScene} className="rounded p-1 text-warm-white/70 hover:bg-white/5 hover:text-brand"><Plus size={18} /></button>
               </div>
             ) : musicView === 'songs' ? null : (
@@ -3535,18 +3608,8 @@ export default function Studio() {
               <h2 className="text-base font-semibold text-white">Offline slideshow</h2>
               <p className="mt-1 text-xs text-warm-white/50">Choose a scene, then send its slides to a connected projector or monitor.</p>
             </div>
-            <div className="flex flex-wrap items-end gap-2">
-              <MonitorPicker
-                displays={studioDisplays}
-                selectedIds={selectedStreamDisplayIds}
-                liveIds={openDisplayIds}
-                onToggle={toggleStreamDisplay}
-                onSetAll={(ids) => setStreamDisplayIds(ids)}
-              />
-              {openDisplayIds.length > 0 && <button type="button" title="Close the output on every monitor" onClick={() => { void closeAllStreamDisplays(); }} className="rounded-lg border border-white/15 px-2.5 py-2 text-[11px] font-semibold text-warm-white/80 hover:bg-white/5">Close all</button>}
-              <button type="button" onClick={() => { void openOfflineDisplay(); }} disabled={!selectedStreamDisplayIds.length} className="rounded-lg bg-brand px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40">Show slides{selectedStreamDisplayIds.length > 1 ? ` (${selectedStreamDisplayIds.length})` : ''}</button>
-            </div>
-            <p className="basis-full text-right text-[10px] text-warm-white/40">Choose one or more displays for the slideshow output. Press Esc on a display to close it.</p>
+            {/* Same length as the bar in the Streaming tab's Program panel (1.4 of the 4.25 grid columns, less gaps and padding). */}
+            <div className="w-full min-w-0 shrink-0 md:w-[calc((100%-2px)*0.3294-26px)]">{outputDisplayBar('slideshow')}</div>
           </div>
           {displayError && <p role="alert" className="shrink-0 text-xs text-amber-200">{displayError}</p>}
           <div className="grid min-h-0 flex-1 gap-3 md:grid-cols-[minmax(0,1fr)_280px_280px]">
@@ -3567,7 +3630,7 @@ export default function Studio() {
                   <h3 className="text-sm font-semibold text-white">Scenes</h3>
                   <div className="flex items-center gap-1">
                     <button type="button" onClick={() => setClearScenesTab('slideshow')} disabled={!slideshowScenes.length} title="Remove all scenes" className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-semibold text-red-300/80 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 size={12} />Clear all</button>
-                    <button type="button" aria-label="Add scripture scene" title="Add a Scripture scene" onClick={() => setScripturePickerOpen(true)} className="rounded p-1 text-warm-white/60 hover:bg-white/10 hover:text-white"><BookOpen size={14} /></button>
+                    <button type="button" aria-label="Add scripture scene" title="Add a Scripture scene" onPointerEnter={() => preloadBible()} onFocus={() => preloadBible()} onClick={() => setScripturePickerOpen(true)} className="rounded p-1 text-warm-white/60 hover:bg-white/10 hover:text-white"><BookOpen size={14} /></button>
                     <button type="button" aria-label="Add scene" title="Add scene" onClick={beginAddScene} className="rounded p-1 text-warm-white/60 hover:bg-white/10 hover:text-white"><Plus size={15} /></button>
                   </div>
                 </div>
@@ -3714,19 +3777,19 @@ export default function Studio() {
                   <h3 className="text-sm font-semibold text-warm-white">Video quality</h3>
                   <div className="mt-3 grid grid-cols-2 gap-3">
                     <label className="text-xs text-warm-white/60">Resolution
-                      <select value={streamResolution} onChange={(event) => setStreamResolution(event.target.value)} className={`${selectClass} mt-1.5 w-full`}>
+                      <select value={streamResolution} disabled={live} onChange={(event) => setStreamResolution(event.target.value)} className={`${selectClass} mt-1.5 w-full disabled:opacity-50`}>
                         <option value="720p">720p · 1280 × 720</option>
                         <option value="1080p">1080p · 1920 × 1080</option>
                       </select>
                     </label>
                     <label className="text-xs text-warm-white/60">Frame rate
-                      <select value={streamFrameRate} onChange={(event) => setStreamFrameRate(event.target.value)} className={`${selectClass} mt-1.5 w-full`}>
+                      <select value={streamFrameRate} disabled={live} onChange={(event) => setStreamFrameRate(event.target.value)} className={`${selectClass} mt-1.5 w-full disabled:opacity-50`}>
                         <option value="30">30 fps</option>
                         <option value="60">60 fps</option>
                       </select>
                     </label>
                     <label className="col-span-2 text-xs text-warm-white/60">Video bitrate
-                      <select value={streamBitrate} onChange={(event) => setStreamBitrate(event.target.value)} className={`${selectClass} mt-1.5 w-full`}>
+                      <select value={streamBitrate} disabled={live} onChange={(event) => setStreamBitrate(event.target.value)} className={`${selectClass} mt-1.5 w-full disabled:opacity-50`}>
                         <option value="2500">2,500 kbps · Lower bandwidth</option>
                         <option value="4500">4,500 kbps · Balanced</option>
                         <option value="6000">6,000 kbps · Higher quality</option>
@@ -3734,7 +3797,7 @@ export default function Studio() {
                       </select>
                     </label>
                   </div>
-                  <p className="mt-3 text-[11px] leading-relaxed text-warm-white/40">These are the requested output settings. They take effect when a streaming encoder and destination are connected.</p>
+                  <p className="mt-3 text-[11px] leading-relaxed text-warm-white/40">{live ? 'These are locked while you are live. End the stream to change them for the next one.' : 'Used when you go live. You can also set your defaults in Settings → Default stream quality.'}</p>
                 </div>
                 <div className="rounded-xl border border-white/10 p-4">
                   <div className="flex items-center justify-between gap-3">
