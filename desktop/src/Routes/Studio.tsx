@@ -479,7 +479,7 @@ function ProgramTextBox({ box, defaultLayerOrder = 3000 }: { box: PresentationTe
   }, [box]);
   return (
     <div ref={wrap} className={`absolute flex ${box.valign === 'top' ? 'items-start' : box.valign === 'bottom' ? 'items-end' : 'items-center'} overflow-hidden`} style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`, zIndex: typeof box.layerOrder === 'number' ? box.layerOrder : box.layerOrder === 'front' ? 5000 : box.layerOrder === 'back' ? 0 : defaultLayerOrder, background: box.boxBgOn ? box.boxBg : undefined, borderRadius: '1cqw' }}>
-      <div ref={inner} className="w-full whitespace-pre-wrap break-words" style={{ textAlign: box.align, textAlignLast: box.align === 'justify' ? 'left' : undefined, transform: `scale(${fitScale})`, transformOrigin: box.valign === 'top' ? 'top center' : box.valign === 'bottom' ? 'bottom center' : 'center', lineHeight: box.lineHeight, letterSpacing: `${(box.letterSpacing / 1280) * 100}cqw` }}>
+      <div ref={inner} className="w-full whitespace-pre-wrap wrap-break-word" style={{ textAlign: box.align, textAlignLast: box.align === 'justify' ? 'left' : undefined, transform: `scale(${fitScale})`, transformOrigin: box.valign === 'top' ? 'top center' : box.valign === 'bottom' ? 'bottom center' : 'center', lineHeight: box.lineHeight, letterSpacing: `${(box.letterSpacing / 1280) * 100}cqw` }}>
         <div className="whitespace-pre-wrap" style={{ fontFamily: `"${box.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(box.size / 1280) * 100}cqw`, fontWeight: box.bold ? 800 : 500, fontStyle: box.italic ? 'italic' : 'normal', textDecoration: box.underline ? 'underline' : 'none', textTransform: box.uppercase ? 'uppercase' : undefined, color: box.color, textShadow: box.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : undefined }}>{hasLineAligns(box.lineAligns)
           ? box.text.split('\n').map((line, lineIndex) => {
             const lineAlign = lineAlignAt(box.align, box.lineAligns, lineIndex);
@@ -509,7 +509,7 @@ function SlideView({
     const boxes = [slide.design.box, ...(slide.design.extraBoxes ?? []).map((item) => item.box)]
       .filter((box): box is PresentationTextBox => !!box);
     return (
-      <div className={`relative isolate h-full w-full overflow-hidden bg-gradient-to-br ${backgroundClasses(slide.bg ?? bg)}`} style={{ containerType: 'inline-size', ...backgroundStyle(slide.bg ?? bg) }}>
+       <div className={`relative isolate h-full w-full overflow-hidden bg-linear-to-br ${backgroundClasses(slide.bg ?? bg)}`} style={{ containerType: 'inline-size', ...backgroundStyle(slide.bg ?? bg) }}>
         {slide.bgImage && <img src={slide.bgImage} alt="" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />}
         {slide.bgVideo && <video src={slide.bgVideo} autoPlay muted={slide.bgVideoMuted ?? true} loop playsInline className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />}
         <div className="absolute inset-0 bg-black" style={{ opacity: (slide.dim ?? 0) / 100 }} />
@@ -528,7 +528,7 @@ function SlideView({
   }
   return (
     <div
-      className={`relative isolate flex h-full w-full flex-col items-center justify-center overflow-hidden bg-gradient-to-br p-2 text-center text-white ${backgroundClasses(slide?.bg ?? bg)}`}
+       className={`relative isolate flex h-full w-full flex-col items-center justify-center overflow-hidden bg-linear-to-br p-2 text-center text-white ${backgroundClasses(slide?.bg ?? bg)}`}
       style={slide?.bgImage ? { backgroundImage: `linear-gradient(rgba(0,0,0,${(slide.dim ?? 20) / 100}), rgba(0,0,0,${(slide.dim ?? 20) / 100})), url("${slide.bgImage}")`, backgroundSize: 'cover', backgroundPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` } : backgroundStyle(slide?.bg ?? bg)}
     >
       {slide?.bgVideo && <video src={slide.bgVideo} autoPlay muted={slide.bgVideoMuted ?? true} loop playsInline className="absolute inset-0 h-full w-full object-cover" />}
@@ -565,7 +565,7 @@ function ScriptureDesignModal({
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/75 p-3 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+     <div className="fixed inset-0 z-1100 flex items-center justify-center bg-black/75 p-3 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section role="dialog" aria-modal="true" aria-labelledby="scripture-design-title" className="flex h-[min(900px,94vh)] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101d2a] shadow-2xl">
         <header className="flex shrink-0 items-center justify-between border-b border-white/10 px-5 py-3.5">
           <div><h2 id="scripture-design-title" className="text-base font-bold text-white">Design Scripture slides</h2><p className="mt-0.5 text-xs text-warm-white/50">{reference} · {verses.length} verses, one slide per verse</p></div>
@@ -650,9 +650,9 @@ function SourcePreview({
       ) : source.kind === 'presentation' ? (
         <div data-program-slide-view className="h-full w-full"><SlideView bg={bg} slide={slide} scale={8} minRem={0.5} /></div>
       ) : source.kind === 'text' ? (
-        <div className="flex h-full items-center justify-center bg-gradient-to-br from-slate-800 to-slate-950 p-3 text-center text-sm font-semibold text-white">{source.text || 'Text overlay'}</div>
+         <div className="flex h-full items-center justify-center bg-linear-to-br from-slate-800 to-slate-950 p-3 text-center text-sm font-semibold text-white">{source.text || 'Text overlay'}</div>
       ) : (
-        <div className="flex h-full flex-col items-center justify-center gap-1 bg-gradient-to-br from-slate-800 to-slate-950 text-xs text-warm-white/65">
+         <div className="flex h-full flex-col items-center justify-center gap-1 bg-linear-to-br from-slate-800 to-slate-950 text-xs text-warm-white/65">
           {source.kind === 'media' ? <Image size={18} /> : source.kind === 'camera' || source.kind === 'mobile-camera' ? <Camera size={18} /> : <Monitor size={18} />}
           <span>{source.kind === 'media' ? 'Media unavailable' : 'Reconnect this source'}</span>
         </div>
@@ -760,7 +760,7 @@ function AudioChannelMeter({
   const dbLevel = level > 0 ? Math.max(0, Math.min(100, ((20 * Math.log10(level) + 60) / 60) * 100)) : 0;
   return (
     <button type="button" disabled={!stream || contextState !== 'suspended'} onClick={() => { void contextRef.current?.resume().then(() => setContextState(contextRef.current?.state ?? 'running')); }} className="mt-1 flex w-full items-center gap-1.5 text-left disabled:cursor-default" title="Live input level after the volume control">
-      <span className="w-[4.5rem] shrink-0 truncate text-[9px] text-warm-white/50">{status}</span>
+       <span className="w-18 shrink-0 truncate text-[9px] text-warm-white/50">{status}</span>
       <span className="flex h-2 flex-1 gap-px overflow-hidden rounded-sm bg-white/5" aria-label={`${status}, ${dbLevel.toFixed(0)} percent`}>
         {Array.from({ length: 18 }, (_, index) => {
           const lit = dbLevel >= ((index + 1) / 18) * 100;
@@ -894,7 +894,7 @@ function MonitorPicker({ displays, selectedIds, liveIds, onToggle, onSetAll }: {
           aria-multiselectable="true"
           aria-label="Output monitors"
           style={{ position: 'fixed', top: position.top, left: position.left, width: position.width }}
-          className="z-[200] overflow-hidden rounded-xl border border-white/10 bg-panel shadow-2xl shadow-black/50"
+           className="z-200 overflow-hidden rounded-xl border border-white/10 bg-panel shadow-2xl shadow-black/50"
         >
           <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
             <span className="text-[10px] font-bold uppercase tracking-wider text-warm-white/50">Show output on</span>
@@ -3253,7 +3253,7 @@ export default function Studio() {
               <div className="absolute inset-0 bg-black" />
               <div aria-label={`On-air preview: ${live ? streamStatus === 'live' ? 'Live' : 'Connecting' : 'Standby'}`} className="pointer-events-none absolute left-2 top-2 z-30 flex items-center gap-1.5 rounded-md border border-white/20 bg-slate-950/90 px-2 py-1.5 text-white shadow-lg shadow-black/40 backdrop-blur-sm">
                 <span className={`h-1.5 w-1.5 rounded-full ${live ? streamStatus === 'live' ? 'animate-pulse bg-red-400 shadow-[0_0_10px_rgba(248,113,113,.8)]' : 'animate-pulse bg-amber-300' : 'bg-slate-300'}`} />
-                <span className="text-[8px] font-extrabold uppercase tracking-[0.1em]">On Air</span>
+                 <span className="text-[8px] font-extrabold uppercase tracking-widest">On Air</span>
                 <span className={`rounded px-1 py-0.5 text-[7px] font-bold uppercase tracking-wider ${live && streamStatus === 'live' ? 'bg-red-500 text-white' : live ? 'bg-amber-400/20 text-amber-100' : 'bg-white/15 text-white/90'}`}>
                   {live ? streamStatus === 'live' ? 'Live' : 'Connecting' : 'Standby'}
                 </span>
@@ -3317,7 +3317,7 @@ export default function Studio() {
                     ? { ...source, cameraRotation: value === 'auto' ? undefined : value, cameraOrientation: undefined }
                     : source));
                 }}
-                className="max-w-[130px] rounded border border-white/10 bg-slate-950 px-1.5 py-1 text-[10px] text-warm-white/75 outline-none focus:border-brand"
+                 className="max-w-32.5 rounded border border-white/10 bg-slate-950 px-1.5 py-1 text-[10px] text-warm-white/75 outline-none focus:border-brand"
               >
                 <option value="auto">Rotation: Auto</option>
                 <option value="0">Upright · 0°</option>
@@ -3349,7 +3349,7 @@ export default function Studio() {
                 onPointerDown={(event) => beginProgramSourceDrag(event, source, 'move')}
                 onClick={() => setSelectedProgramSource(source.id)}
                 onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelectedProgramSource(source.id); }}
-                className={`absolute cursor-move touch-none ${selectedLayer ? 'outline outline-2 outline-sky-400' : 'hover:outline hover:outline-1 hover:outline-white/60'}`}
+                 className={`absolute cursor-move touch-none ${selectedLayer ? 'outline-2 outline-solid outline-sky-400' : 'hover:outline-1 hover:outline-solid hover:outline-white/60'}`}
                 style={{ left: `${layout.x}%`, top: `${layout.y}%`, width: `${layout.width}%`, height: `${layout.height}%`, zIndex }}>
                 <SourcePreview source={source} media={source.mediaAssetId ? mediaUrls[source.mediaAssetId] : undefined} slide={previewSlide} bg={previewSetupSlide.bg} showLabel={false} rounded={false} />
                 {selectedLayer && <button type="button" aria-label={`Resize ${source.name}`} title="Drag to resize" onPointerDown={(event) => beginProgramSourceDrag(event, source, 'resize')} className="absolute -bottom-1.5 -right-1.5 z-30 h-3.5 w-3.5 cursor-nwse-resize rounded-sm border border-white bg-sky-500 shadow" />}
@@ -3555,7 +3555,7 @@ export default function Studio() {
                       onDragStart={(event) => { event.dataTransfer.setData('text/source-id', String(id)); event.dataTransfer.effectAllowed = 'move'; }}
                       onDragOver={(event) => event.preventDefault()}
                       onDrop={(event) => { event.preventDefault(); reorderSources(Number(event.dataTransfer.getData('text/source-id')), id); }}
-                      className={`group flex items-center gap-2 rounded-lg border px-2 py-1.5 text-sm text-warm-white ${selectedProgramSource === id ? 'border-sky-400/50 bg-sky-400/5' : 'border-white/5 bg-white/[0.02]'}`}
+                       className={`group flex items-center gap-2 rounded-lg border px-2 py-1.5 text-sm text-warm-white ${selectedProgramSource === id ? 'border-sky-400/50 bg-sky-400/5' : 'border-white/5 bg-white/2'}`}
                     >
                       {kind === 'music' && musicAsset?.available !== false && musicAsset?.url && <audio
                         ref={(element) => { if (element) musicElements.current.set(id, element); else musicElements.current.delete(id); }}
@@ -3616,7 +3616,7 @@ export default function Studio() {
             {mixerChannels.map(({ id, name, icon: Icon, db, muted }) => {
               const source = sources.find((item) => item.id === id);
               return (
-                <li key={id} className="rounded-lg border border-white/5 bg-white/[0.02] px-2 py-1.5">
+                 <li key={id} className="rounded-lg border border-white/5 bg-white/2 px-2 py-1.5">
                   <div className="flex items-center gap-2">
                     <Icon size={15} className="shrink-0 text-warm-white/70" />
                     <div className="min-w-0 flex-1">
@@ -3777,7 +3777,7 @@ export default function Studio() {
         </section>
       )}
       {addSceneOpen && (
-        createPortal(<div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setAddSceneOpen(false); }}>
+         createPortal(<div className="fixed inset-0 z-1000 flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setAddSceneOpen(false); }}>
           <section role="dialog" aria-modal="true" aria-labelledby="add-scene-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -3816,7 +3816,7 @@ export default function Studio() {
               <>
                 <div role="radiogroup" aria-label="Saved presentations" className="mt-5 max-h-72 space-y-2 overflow-y-auto pr-1">
                   {savedPresentations.filter((presentation) => presentation.slides.length > 0).map((presentation) => (
-                    <button key={presentation.id} type="button" role="radio" aria-checked={selectedPresentationId === presentation.id} onClick={() => setSelectedPresentationId(presentation.id)} className={`flex w-full items-center justify-between gap-3 rounded-xl border p-3 text-left transition ${selectedPresentationId === presentation.id ? 'border-brand bg-brand/10' : 'border-white/10 hover:border-white/25 hover:bg-white/[0.03]'}`}>
+                     <button key={presentation.id} type="button" role="radio" aria-checked={selectedPresentationId === presentation.id} onClick={() => setSelectedPresentationId(presentation.id)} className={`flex w-full items-center justify-between gap-3 rounded-xl border p-3 text-left transition ${selectedPresentationId === presentation.id ? 'border-brand bg-brand/10' : 'border-white/10 hover:border-white/25 hover:bg-white/3'}`}>
                       <span className="min-w-0"><span className="block truncate text-sm font-medium text-warm-white">{presentation.name}</span><span className="mt-1 block text-xs text-warm-white/45">{presentation.slides.length} {presentation.slides.length === 1 ? 'slide' : 'slides'}</span></span>
                       <span aria-hidden="true" className={`grid h-4 w-4 shrink-0 place-items-center rounded-full border ${selectedPresentationId === presentation.id ? 'border-brand' : 'border-white/30'}`}>{selectedPresentationId === presentation.id && <span className="h-2 w-2 rounded-full bg-brand" />}</span>
                     </button>
@@ -3829,14 +3829,14 @@ export default function Studio() {
                 </div>
               </>
             ) : (
-              <div className="mt-5 rounded-xl border border-dashed border-white/15 bg-white/[0.03] p-4 text-sm text-warm-white/60">No saved presentations with slides yet. Create and save a presentation first, then return here to add it as a scene.</div>
+               <div className="mt-5 rounded-xl border border-dashed border-white/15 bg-white/3 p-4 text-sm text-warm-white/60">No saved presentations with slides yet. Create and save a presentation first, then return here to add it as a scene.</div>
             )}
             </>)}
           </section>
         </div>, document.body)
       )}
       {goLiveSetupOpen && createPortal(
-        <div className="fixed inset-0 z-[200] flex items-center justify-center overflow-y-auto bg-black/80 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (!startingStream && event.target === event.currentTarget) setGoLiveSetupOpen(false); }}>
+         <div className="fixed inset-0 z-200 flex items-center justify-center overflow-y-auto bg-black/80 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (!startingStream && event.target === event.currentTarget) setGoLiveSetupOpen(false); }}>
           <section role="dialog" aria-modal="true" aria-labelledby="go-live-setup-title" className="my-auto w-full max-w-5xl rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -3949,7 +3949,7 @@ export default function Studio() {
         document.body,
       )}
       {settingsOpen && (
-        createPortal(<div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
+         createPortal(<div className="fixed inset-0 z-1000 flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
           <section role="dialog" aria-modal="true" aria-labelledby="studio-settings-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -3979,7 +3979,7 @@ export default function Studio() {
         </div>, document.body)
       )}
       {sourceEditor && (
-        createPortal(<div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setSourceEditor(null); }}>
+         createPortal(<div className="fixed inset-0 z-1000 flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setSourceEditor(null); }}>
           <section role="dialog" aria-modal="true" aria-labelledby="source-editor-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -3997,7 +3997,7 @@ export default function Studio() {
         </div>, document.body)
       )}
       {mobileCamPairing && (
-        createPortal(<div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+         createPortal(<div className="fixed inset-0 z-1000 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
           <section role="dialog" aria-modal="true" aria-labelledby="mobile-cam-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div><h2 id="mobile-cam-title" className="text-lg font-bold text-warm-white">{mobileCamPairing.reconnecting ? `Reconnect Cam ${mobileCamPairing.slot}` : `Connect Cam ${mobileCamPairing.slot}`}</h2><p className="mt-1 text-sm text-warm-white/55">{mobileCamPairing.reconnecting ? 'Tap Reconnect camera on your phone and use the current code below.' : 'Install and open FaithStream Cam on your phone. Both devices must use the same Wi-Fi.'}</p></div>

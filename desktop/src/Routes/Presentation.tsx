@@ -3767,7 +3767,7 @@ export default function Presentation() {
                     const active = chips.includes(backgroundCollection) ? backgroundCollection : 'All';
                     return (
                       <>
-                        <div role="tablist" aria-label="Background collections" className="mb-2 flex max-h-[4.5rem] flex-wrap gap-1 overflow-y-auto">
+                        <div role="tablist" aria-label="Background collections" className="mb-2 flex max-h-18 flex-wrap gap-1 overflow-y-auto">
                           {chips.map((name) => (
                             <button key={name} role="tab" aria-selected={active === name} onClick={() => { setBackgroundCollection(name); setRenamingCollection(null); }} className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold transition ${active === name ? 'border-brand bg-brand/15 text-white' : 'border-white/10 text-warm-white/55 hover:text-warm-white'}`}>
                               {name} <span className={active === name ? 'text-brand' : 'text-warm-white/35'}>{name === 'All' ? backgroundAssets.length : backgroundAssets.filter((asset) => collectionOf(asset) === name).length}</span>
