@@ -1,5 +1,10 @@
-import type { ReactNode } from 'react';
+import type { ReactNode } from 'react'
 
 export default function PageFooter({ children = 'Private operational data' }: { children?: ReactNode }) {
-  return <footer className="page-footer"><span>FaithStream Studio Admin</span><span>{children}</span></footer>;
+  return (
+    <footer className="page-footer">
+      <span>FaithStream Studio Admin</span>
+      <span>{children}</span>
+    </footer>
+  )
 }
