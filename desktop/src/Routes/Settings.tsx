@@ -439,7 +439,7 @@ export default function Settings() {
         </div>
       </div>
     </main>
-    {deletionDialogOpen && <BodyPortal><div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !deletionBusy) setDeletionDialogOpen(false); }}>
+    {deletionDialogOpen && <BodyPortal><div className="fixed inset-0 z-120 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !deletionBusy) setDeletionDialogOpen(false); }}>
       <section role="dialog" aria-modal="true" aria-labelledby="account-deletion-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 text-white shadow-2xl">
         <div className="flex items-start gap-3">
           <span className="mt-0.5 rounded-lg bg-red-400/10 p-2 text-red-200"><AlertTriangle size={18} /></span>
@@ -460,7 +460,7 @@ export default function Settings() {
         </form>
       </section>
     </div></BodyPortal>}
-    {cropOpen && profile.photoUrl && <BodyPortal><div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !cropSaving) setCropOpen(false); }}>
+    {cropOpen && profile.photoUrl && <BodyPortal><div className="fixed inset-0 z-100 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !cropSaving) setCropOpen(false); }}>
       <section role="dialog" aria-modal="true" aria-labelledby="profile-photo-crop-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 text-white shadow-2xl">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -481,10 +481,10 @@ export default function Settings() {
         </div>
         <div className="mt-5 grid gap-4">
           <label className="text-xs text-white/65">Horizontal framing
-            <input type="range" min="0" max="100" value={cropPosition.x} onChange={(event) => setCropPosition((current) => ({ ...current, x: Number(event.target.value) }))} className="mt-2 block w-full accent-[var(--color-brand)]" />
+            <input type="range" min="0" max="100" value={cropPosition.x} onChange={(event) => setCropPosition((current) => ({ ...current, x: Number(event.target.value) }))} className="mt-2 block w-full accent-brand" />
           </label>
           <label className="text-xs text-white/65">Vertical framing
-            <input type="range" min="0" max="100" value={cropPosition.y} onChange={(event) => setCropPosition((current) => ({ ...current, y: Number(event.target.value) }))} className="mt-2 block w-full accent-[var(--color-brand)]" />
+            <input type="range" min="0" max="100" value={cropPosition.y} onChange={(event) => setCropPosition((current) => ({ ...current, y: Number(event.target.value) }))} className="mt-2 block w-full accent-brand" />
           </label>
         </div>
         <div className="mt-5 flex justify-end gap-2 border-t border-white/10 pt-4">
