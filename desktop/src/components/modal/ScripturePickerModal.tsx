@@ -88,10 +88,12 @@ export default function ScripturePickerModal({
   open,
   onClose,
   onAdd,
+  onPresent,
 }: {
   open: boolean;
   onClose: () => void;
   onAdd: (reference: string, text: string, verses?: SelectedScriptureVerse[]) => void;
+  onPresent?: (reference: string, text: string, verses?: SelectedScriptureVerse[]) => void;
 }) {
   const [language, setLanguage] = useState<BibleLanguage>('en');
   const [bible, setBible] = useState<BibleIndex | null>(() => readyBibles.get('en') ?? null);
@@ -184,6 +186,10 @@ export default function ScripturePickerModal({
   const addSelected = () => {
     if (!selectedForAdd.length) return;
     onAdd(selectionReference(selectedForAdd), selectedForAdd.map((verse) => verse.text).join('\n'), selectedForAdd);
+  };
+  const presentSelected = () => {
+    if (!selectedForAdd.length || !onPresent) return;
+    onPresent(selectionReference(selectedForAdd), selectedForAdd.map((verse) => verse.text).join('\n'), selectedForAdd);
   };
 
   useEffect(() => {
@@ -311,9 +317,16 @@ export default function ScripturePickerModal({
               </div>}
         </div>
 
-        <footer className="flex items-center justify-between border-t border-white/10 px-5 py-3">
+        <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 px-5 py-3">
           <span className="text-xs text-warm-white/45">{query.trim() && !loading ? `${results.length}${results.length === 100 ? '+' : ''} results` : language === 'en' ? 'Full KJV text is available offline' : 'Full Cebuano text is available offline'}</span>
-          <div className="flex items-center gap-2"><span className="text-[11px] text-white/45">{selectedForAdd.length > 1 ? `${selectedForAdd.length} verses selected` : ''}</span><button disabled={!selectedForAdd.length} onClick={addSelected} className="rounded-lg bg-brand px-4 py-2 text-sm font-bold text-navy hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40">{selectedForAdd.length > 1 ? 'Add verses to slide' : 'Add to slide'}</button><button onClick={onClose} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-warm-white/75 hover:bg-white/5">Cancel</button></div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <span className="text-[11px] text-white/45">{selectedForAdd.length > 1 ? `${selectedForAdd.length} verses selected` : ''}</span>
+            {onPresent ? <>
+              <button type="button" disabled={!selectedForAdd.length} onClick={addSelected} title="Review and design the selected verse slides before adding them" className="rounded-lg bg-brand px-4 py-2 text-sm font-bold text-navy hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40">Review / design</button>
+              <button type="button" disabled={!selectedForAdd.length} onClick={presentSelected} title="Add these verses as slides and send the first one to the current Studio output" className="rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-4 py-2 text-sm font-semibold text-emerald-200 hover:bg-emerald-400/15 disabled:cursor-not-allowed disabled:opacity-40">Present now</button>
+            </> : <button type="button" disabled={!selectedForAdd.length} onClick={addSelected} className="rounded-lg bg-brand px-4 py-2 text-sm font-bold text-navy hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40">{selectedForAdd.length > 1 ? 'Add verses to slide' : 'Add to slide'}</button>}
+            <button type="button" onClick={onClose} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-warm-white/75 hover:bg-white/5">Cancel</button>
+          </div>
         </footer>
       </section>
     </div></BodyPortal>

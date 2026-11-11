@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 
 # Electron-Forge
 out/
+
+# Large source archive downloaded for the offline Bible database.
+src/data/bibles-source.zip

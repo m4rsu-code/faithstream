@@ -1,13 +1,16 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, safeStorage, screen, session } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, protocol, safeStorage, screen, session } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { createReadStream } from 'node:fs';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Writable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
-import { randomInt } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import started from 'electron-squirrel-startup';
 import ffmpegStaticPath from 'ffmpeg-static';
+import type { RecordingStatusEvent, StreamStatus } from './shared/streamContracts';
+protocol.registerSchemesAsPrivileged([{ scheme: 'faithstream-local', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } }]);
 // In a packaged app the binary is unpacked next to app.asar (see forge.config.mts).
 // The OS cannot execute a file from inside the archive, so point spawn() at the unpacked copy.
 const ffmpegPath = ffmpegStaticPath ? ffmpegStaticPath.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1') : null;
@@ -51,10 +54,13 @@ type RecordingSession = {
 let streamSession: StreamSession | null = null;
 let recordingSession: RecordingSession | null = null;
 const studioDisplayWindows = new Map<number, BrowserWindow>();
+const STUDIO_AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac', '.wma', '.webm']);
 let authWindow: BrowserWindow | null = null;
-let mobileCamServer: any = null;
 const MOBILE_CAM_PAIRING_LIFETIME_MS = 3 * 60 * 1000;
-let mobileCamRoom: { code: string; expiresAt: number; studio: any | null; phone: any | null; phoneAddress: string | null } | null = null;
+const MAX_MOBILE_CAMERAS = 3;
+type MobileCamRoom = { sourceId: number; code: string; expiresAt: number; studio: any | null; phone: any | null; phoneAddress: string | null; invalidAttempts: number };
+const mobileCamRooms = new Map<number, { server: any; room: MobileCamRoom }>();
+const studioMusicPaths = new Map<string, string>();
 const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const normalizeAddress = (address: string | undefined) => (address ?? '').replace(/^::ffff:/, '');
 const authTokenPath = () => path.join(app.getPath('userData'), 'auth-token.bin');
@@ -115,7 +121,7 @@ const configureSessionSecurity = () => {
         const { response } = await dialog.showMessageBox(authWindow, {
           type: 'question',
           title: 'Share a screen',
-          message: 'Which screen should FaithStream capture?',
+          message: 'Which screen should FaithStream Studio capture?',
           buttons: [...sources.map((source, index) => source.name || `Screen ${index + 1}`), 'Cancel'],
           cancelId: sources.length,
           defaultId: 0,
@@ -134,57 +140,66 @@ const configureSessionSecurity = () => {
   });
 };
 
-const startMobileCamPairing = async (sender: Electron.WebContents) => {
+const closeMobileCamRoom = (sourceId: number) => {
+  const entry = mobileCamRooms.get(sourceId);
+  if (!entry) return false;
+  mobileCamRooms.delete(sourceId);
+  entry.room.studio?.close(1000, 'Camera source removed');
+  entry.room.phone?.close(1000, 'Camera source removed');
+  entry.server.close();
+  return true;
+};
+
+const closeAllMobileCamRooms = () => {
+  for (const sourceId of [...mobileCamRooms.keys()]) closeMobileCamRoom(sourceId);
+};
+
+const startMobileCamPairing = async (sender: Electron.WebContents, sourceId: unknown) => {
   if (!isAuthWindow(sender)) return { ok: false, message: 'Open Studio to pair a phone camera.' };
-  if (mobileCamServer) {
-    mobileCamRoom?.studio?.close();
-    mobileCamRoom?.phone?.close();
-    mobileCamRoom = null;
-    await new Promise<void>((resolve) => mobileCamServer.close(() => resolve()));
-    mobileCamServer = null;
+  if (!Number.isSafeInteger(sourceId) || Number(sourceId) < 1) return { ok: false, message: 'Invalid camera source.' };
+  const id = Number(sourceId);
+  if (!mobileCamRooms.has(id) && mobileCamRooms.size >= MAX_MOBILE_CAMERAS) {
+    return { ok: false, message: 'Up to three FaithStream Cam phones can be connected at once.' };
   }
+  closeMobileCamRoom(id);
   const server = new WebSocketServer({ host: '0.0.0.0', port: 0, maxPayload: 64 * 1024 });
-  mobileCamServer = server;
   try {
     await new Promise<void>((resolve, reject) => {
       server.once('listening', resolve);
       server.once('error', reject);
     });
   } catch {
-    // Without this reset a failed listen left a dead server behind and blocked later pairing attempts.
-    if (mobileCamServer === server) mobileCamServer = null;
     try { server.close(); } catch { /* already closed */ }
-    return { ok: false, message: 'Could not start local camera pairing. Check that your firewall allows FaithStream.' };
+    return { ok: false, message: 'Could not start local camera pairing. Check that your firewall allows FaithStream Studio.' };
   }
   server.on('error', () => { /* keep a socket error from crashing the main process */ });
   const address = server.address();
   if (!address || typeof address === 'string') return { ok: false, message: 'Could not start local camera pairing.' };
-  const code = String(randomInt(100000, 1000000));
-  const room = { code, expiresAt: Date.now() + MOBILE_CAM_PAIRING_LIFETIME_MS, studio: null as any, phone: null as any, phoneAddress: null as string | null };
-  let invalidAttempts = 0;
-  mobileCamRoom = room;
+  const room: MobileCamRoom = {
+    sourceId: id,
+    code: String(randomInt(100000, 1000000)),
+    expiresAt: Date.now() + MOBILE_CAM_PAIRING_LIFETIME_MS,
+    studio: null,
+    phone: null,
+    phoneAddress: null,
+    invalidAttempts: 0,
+  };
+  mobileCamRooms.set(id, { server, room });
   server.on('connection', (socket: any, request: { url?: string; socket?: { remoteAddress?: string } }) => {
-    // An unhandled 'error' event (e.g. a malformed frame from the network) would crash the app.
     socket.on('error', () => socket.terminate?.());
     const url = new URL(request.url ?? '/', 'http://localhost');
     const role = url.searchParams.get('role');
     const remoteAddress = request.socket?.remoteAddress ?? '';
-    // The Studio side always runs on this computer. Refusing "studio" connections from the
-    // network stops someone on the Wi-Fi from posing as Studio and receiving the phone's video.
     const studioFromNetwork = role === 'studio' && !LOOPBACK_ADDRESSES.has(remoteAddress);
-    // Once a phone has paired, the code only works again for that same phone (so it can
-    // reconnect after a Wi-Fi blip). A code someone overheard is useless to anyone else.
     const phoneNotBound = role === 'phone' && room.phoneAddress !== null && normalizeAddress(remoteAddress) !== room.phoneAddress;
-    if (Date.now() >= room.expiresAt || url.searchParams.get('code') !== room.code || (role !== 'studio' && role !== 'phone') || studioFromNetwork || phoneNotBound) {
-      invalidAttempts += 1;
+    const expiredPairingCode = Date.now() >= room.expiresAt && room.phoneAddress === null;
+    if (expiredPairingCode || url.searchParams.get('code') !== room.code || (role !== 'studio' && role !== 'phone') || studioFromNetwork || phoneNotBound) {
+      room.invalidAttempts += 1;
       socket.close(1008, 'Invalid pairing code');
-      if (invalidAttempts >= 12) {
-        // Too many wrong codes: treat it as a guessing attempt and end the pairing session.
+      if (room.invalidAttempts >= 12) {
         room.studio?.close(1008, 'Pairing locked');
         room.phone?.close(1008, 'Pairing locked');
-        if (mobileCamRoom === room) mobileCamRoom = null;
-        if (mobileCamServer === server) mobileCamServer = null;
-        server.close();
+        closeMobileCamRoom(id);
       }
       return;
     }
@@ -206,29 +221,22 @@ const startMobileCamPairing = async (sender: Electron.WebContents) => {
     socket.on('close', () => {
       if (room[key] !== socket) return;
       room[key] = null;
-      // The studio's signaling socket stays open when the phone disconnects,
-      // so explicitly report the phone leaving instead of waiting for WebRTC
-      // timeouts to infer it.
-      if (key === 'phone' && room.studio?.readyState === 1) {
-        room.studio.send(JSON.stringify({ type: 'phone-disconnected' }));
-      }
+      if (key === 'phone' && room.studio?.readyState === 1) room.studio.send(JSON.stringify({ type: 'phone-disconnected' }));
     });
   });
   const addresses = Object.values(os.networkInterfaces()).flat().filter((item): item is NonNullable<typeof item> => !!item && item.family === 'IPv4' && !item.internal).map((item) => item.address);
-  return { ok: true, port: address.port, code: room.code, expiresAt: room.expiresAt, addresses };
+  return { ok: true, sourceId: id, port: address.port, code: room.code, expiresAt: room.expiresAt, addresses };
 };
 
-const renewMobileCamPairingCode = (sender: Electron.WebContents) => {
-  if (!isAuthWindow(sender) || !mobileCamServer || !mobileCamRoom) {
-    return { ok: false, message: 'The FaithStream Cam pairing session has ended.' };
-  }
-  mobileCamRoom.code = String(randomInt(100000, 1000000));
-  mobileCamRoom.expiresAt = Date.now() + MOBILE_CAM_PAIRING_LIFETIME_MS;
-  // A fresh code may be used by a different phone.
-  if (!mobileCamRoom.phone) mobileCamRoom.phoneAddress = null;
-  return { ok: true, code: mobileCamRoom.code, expiresAt: mobileCamRoom.expiresAt };
+const renewMobileCamPairingCode = (sender: Electron.WebContents, sourceId: unknown) => {
+  if (!isAuthWindow(sender) || !Number.isSafeInteger(sourceId)) return { ok: false, message: 'The FaithStream Cam pairing session has ended.' };
+  const entry = mobileCamRooms.get(Number(sourceId));
+  if (!entry) return { ok: false, message: 'The FaithStream Cam pairing session has ended.' };
+  entry.room.code = String(randomInt(100000, 1000000));
+  entry.room.expiresAt = Date.now() + MOBILE_CAM_PAIRING_LIFETIME_MS;
+  if (!entry.room.phone) entry.room.phoneAddress = null;
+  return { ok: true, sourceId: entry.room.sourceId, code: entry.room.code, expiresAt: entry.room.expiresAt };
 };
-
 const protectWindowNavigation = (window: BrowserWindow) => {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', (event, nextUrl) => {
@@ -337,8 +345,11 @@ const ipcAudioBuffer = (payload: unknown) => {
   return null;
 };
 
-const sendStreamStatus = (window: BrowserWindow, status: string, message?: string) => {
+const sendStreamStatus = (window: BrowserWindow, status: StreamStatus, message?: string) => {
   if (!window.isDestroyed()) window.webContents.send('stream:status', { status, message });
+};
+const sendRecordingStatus = (window: BrowserWindow, event: RecordingStatusEvent) => {
+  if (!window.isDestroyed()) window.webContents.send('recording:status', event);
 };
 
 const stopStream = () => {
@@ -379,8 +390,8 @@ const startRecording = async (window: BrowserWindow, capture: CaptureRect) => {
     return { ok: false, message: 'The on-air preview is not ready to record.' };
   }
   const chosen = await dialog.showSaveDialog(window, {
-    title: 'Save FaithStream recording',
-    defaultPath: path.join(app.getPath('videos'), `FaithStream-${new Date().toISOString().replace(/[:.]/g, '-')}.mp4`),
+    title: 'Save FaithStream Studio recording',
+    defaultPath: path.join(app.getPath('videos'), `FaithStream Studio-${new Date().toISOString().replace(/[:.]/g, '-')}.mp4`),
     filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
   });
   if (chosen.canceled || !chosen.filePath) return { ok: false, canceled: true };
@@ -409,14 +420,13 @@ const startRecording = async (window: BrowserWindow, capture: CaptureRect) => {
     session.failed = true;
     session.active = false;
     if (recordingSession === session) recordingSession = null;
-    if (!window.isDestroyed()) window.webContents.send('recording:status', { status: 'error', message: 'The video encoder could not start.' });
+    sendRecordingStatus(window, { status: 'error', message: 'The video encoder could not start.' });
   });
   child.once('close', (code) => {
     session.active = false;
     if (recordingSession === session) recordingSession = null;
-    if (window.isDestroyed()) return;
     const detail = encoderError.trim().slice(-700);
-    window.webContents.send('recording:status', !session.failed && code === 0
+    sendRecordingStatus(window, !session.failed && code === 0
       ? { status: 'saved', filePath }
       : { status: 'error', message: detail ? `Recording could not be finalized: ${detail}` : 'The recording encoder stopped before it could finalize the MP4.' });
   });
@@ -638,7 +648,7 @@ const createWindow = () => {
     minWidth: 920,
     minHeight: 620,
     autoHideMenuBar: true,
-    title: 'FaithStream',
+    title: 'FaithStream Studio',
 
     // Use your custom icon during development.
     // The packaged app uses the icon configured in forge.config.mts.
@@ -692,6 +702,37 @@ const createWindow = () => {
 };
 
 app.whenReady().then(() => {
+  protocol.handle('faithstream-local', async (request) => {
+    const id = new URL(request.url).pathname.replace(/^\//, '');
+    const filePath = studioMusicPaths.get(id);
+    if (!filePath || (request.method !== 'GET' && request.method !== 'HEAD')) return new Response('Not found', { status: 404 });
+    try {
+      const info = await stat(filePath);
+      if (!info.isFile()) return new Response('Not found', { status: 404 });
+      const range = request.headers.get('range');
+      const rangeMatch = range && /^bytes=(\d*)-(\d*)$/.exec(range);
+      let start = 0;
+      let end = info.size - 1;
+      let status = 200;
+      if (rangeMatch) {
+        if (!rangeMatch[1] && rangeMatch[2]) start = Math.max(0, info.size - Number(rangeMatch[2]));
+        else if (rangeMatch[1]) start = Number(rangeMatch[1]);
+        if (rangeMatch[1] && rangeMatch[2]) end = Number(rangeMatch[2]);
+        if (start > end || start >= info.size) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${info.size}` } });
+        end = Math.min(end, info.size - 1);
+        status = 206;
+      }
+      const ext = path.extname(filePath).toLowerCase();
+      const contentType: Record<string, string> = { '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.flac': 'audio/flac', '.wma': 'audio/x-ms-wma', '.webm': 'audio/webm' };
+      const headers = new Headers({ 'Accept-Ranges': 'bytes', 'Content-Type': contentType[ext] ?? 'application/octet-stream', 'Content-Length': String(Math.max(0, end - start + 1)), 'Access-Control-Allow-Origin': '*' });
+      if (status === 206) headers.set('Content-Range', `bytes ${start}-${end}/${info.size}`);
+      if (request.method === 'HEAD') return new Response(null, { status, headers });
+      return new Response(Readable.toWeb(createReadStream(filePath, { start, end })) as ReadableStream<Uint8Array>, { status, headers });
+    } catch {
+      return new Response('Music file is unavailable', { status: 404 });
+    }
+  });
+
   ipcMain.handle('auth:token:get', async (event) => {
     if (!isTrustedMainSender(event) || !safeStorage.isEncryptionAvailable()) return null;
     try {
@@ -737,18 +778,47 @@ app.whenReady().then(() => {
       return false;
     }
   });
-  ipcMain.handle('mobile-cam:start-pairing', (event) => (isTrustedMainSender(event) ? startMobileCamPairing(event.sender) : { ok: false, message: 'Open Studio to pair a phone camera.' }));
-  ipcMain.handle('mobile-cam:renew-code', (event) => renewMobileCamPairingCode(event.sender));
-  ipcMain.handle('mobile-cam:stop-pairing', (event) => {
-    if (!isAuthWindow(event.sender) || !mobileCamServer) return false;
-    mobileCamRoom?.studio?.close();
-    mobileCamRoom?.phone?.close();
-    mobileCamRoom = null;
-    mobileCamServer.close();
-    mobileCamServer = null;
-    return true;
+  ipcMain.handle('mobile-cam:start-pairing', (event, sourceId: unknown) => (isTrustedMainSender(event) ? startMobileCamPairing(event.sender, sourceId) : { ok: false, message: 'Open Studio to pair a phone camera.' }));
+  ipcMain.handle('mobile-cam:renew-code', (event, sourceId: unknown) => renewMobileCamPairingCode(event.sender, sourceId));
+  ipcMain.handle('mobile-cam:stop-pairing', (event, sourceId: unknown) => {
+    if (!isAuthWindow(event.sender) || !Number.isSafeInteger(sourceId)) return false;
+    return closeMobileCamRoom(Number(sourceId));
   });
 
+  ipcMain.handle('studio:music:register', async (event, sourcePath: unknown, name: unknown) => {
+    if (!isTrustedMainSender(event) || typeof sourcePath !== 'string' || sourcePath.length > 32_768 || typeof name !== 'string' || name.length > 255) return { ok: false, message: 'Choose an audio file from this computer.' };
+    try {
+      const info = await stat(sourcePath);
+      if (!info.isFile() || info.size <= 0 || !STUDIO_AUDIO_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) return { ok: false, message: 'Choose a supported audio file.' };
+      const id = randomUUID();
+      studioMusicPaths.set(id, sourcePath);
+      return { ok: true, asset: { id, name: path.basename(name), path: sourcePath, url: `faithstream-local://music/${id}` } };
+    } catch {
+      return { ok: false, message: 'Could not access that audio file. Check that it still exists.' };
+    }
+  });
+  ipcMain.handle('studio:music:resolve', async (event, assets: unknown) => {
+    if (!isTrustedMainSender(event) || !Array.isArray(assets) || assets.length > 1000) return [];
+    const resolved = [];
+    for (const item of assets) {
+      if (!item || typeof item.id !== 'string' || typeof item.path !== 'string' || item.path.length > 32_768 || typeof item.name !== 'string') continue;
+      try {
+        if (!(await stat(item.path)).isFile() || !STUDIO_AUDIO_EXTENSIONS.has(path.extname(item.path).toLowerCase())) {
+          resolved.push({ id: item.id, name: item.name.slice(0, 255), path: item.path, createdAt: Number.isFinite(item.createdAt) ? item.createdAt : 0, url: '', available: false });
+          continue;
+        }
+        studioMusicPaths.set(item.id, item.path);
+        resolved.push({ id: item.id, name: item.name.slice(0, 255), path: item.path, createdAt: Number.isFinite(item.createdAt) ? item.createdAt : 0, url: `faithstream-local://music/${item.id}`, available: true });
+      } catch {
+        resolved.push({ id: item.id, name: item.name.slice(0, 255), path: item.path, createdAt: Number.isFinite(item.createdAt) ? item.createdAt : 0, url: '', available: false });
+      }
+    }
+    return resolved;
+  });
+  ipcMain.handle('studio:music:remove', (event, id: unknown) => {
+    if (!isTrustedMainSender(event) || typeof id !== 'string') return false;
+    return studioMusicPaths.delete(id);
+  });
   ipcMain.handle('presentation:render-pptx', async (event, sourcePath: unknown) => {
     if (!isTrustedMainSender(event) || typeof sourcePath !== 'string' || sourcePath.length > 32_768) {
       return { ok: false, message: 'Choose a PowerPoint file to import.' };
@@ -765,10 +835,10 @@ app.whenReady().then(() => {
     if (!isTrustedMainSender(event) || typeof content !== 'string' || content.length > 200 * 1024 * 1024) return { ok: false, message: 'Nothing to save.' };
     const window = BrowserWindow.fromWebContents(event.sender);
     const filter = kind === 'backup'
-      ? { name: 'FaithStream backup', extensions: ['fsbackup'] }
-      : { name: 'FaithStream songbook', extensions: ['fssongbook'] };
-    const baseName = (typeof suggestedName === 'string' ? path.basename(suggestedName) : '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').slice(0, 120) || `FaithStream.${filter.extensions[0]}`;
-    const options = { title: kind === 'backup' ? 'Save FaithStream backup' : 'Export songbook', defaultPath: path.join(app.getPath('documents'), baseName), filters: [filter] };
+      ? { name: 'FaithStream Studio backup', extensions: ['fsbackup'] }
+      : { name: 'FaithStream Studio songbook', extensions: ['fssongbook'] };
+    const baseName = (typeof suggestedName === 'string' ? path.basename(suggestedName) : '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').slice(0, 120) || `FaithStream Studio.${filter.extensions[0]}`;
+    const options = { title: kind === 'backup' ? 'Save FaithStream Studio backup' : 'Export songbook', defaultPath: path.join(app.getPath('documents'), baseName), filters: [filter] };
     const chosen = window ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
     if (chosen.canceled || !chosen.filePath) return { ok: true, canceled: true };
     try {
@@ -994,10 +1064,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   stopStream();
-  mobileCamRoom?.studio?.close();
-  mobileCamRoom?.phone?.close();
-  mobileCamServer?.close();
-  mobileCamServer = null;
+  closeAllMobileCamRooms();
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -1005,8 +1072,5 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopStream();
-  mobileCamRoom?.studio?.close();
-  mobileCamRoom?.phone?.close();
-  mobileCamServer?.close();
-  mobileCamServer = null;
+  closeAllMobileCamRooms();
 });

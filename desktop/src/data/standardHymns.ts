@@ -1,5 +1,5 @@
 /**
- * Standard songbooks that ship with FaithStream. They are read-only in the app: imports never
+ * Standard songbooks that ship with FaithStream Studio. They are read-only in the app: imports never
  * go here, and a user's correction is stored separately so the original can be restored.
  *
  * Only texts first published before 1929 (public domain) are included.

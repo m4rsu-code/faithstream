@@ -26,6 +26,7 @@ import {
   saveTextFile,
   searchSongs,
   showSongInStudio,
+  synchronizeAccountSongbooks,
   type Song,
   type Songbook,
 } from '../utils/songbooks';
@@ -83,6 +84,7 @@ export default function Songbooks({ embedded = false, onMakePresentation }: { em
 
   useEffect(() => {
     void reload();
+    void synchronizeAccountSongbooks().then(reload).catch(() => undefined);
     const onChanged = () => { void reload(); };
     window.addEventListener(SONGS_CHANGED_EVENT, onChanged);
     return () => window.removeEventListener(SONGS_CHANGED_EVENT, onChanged);
@@ -113,7 +115,7 @@ export default function Songbooks({ embedded = false, onMakePresentation }: { em
   const importTarget = async () => {
     if (current?.kind === 'personal') return current;
     if (personalBooks[0]) return personalBooks[0];
-    return createSongbook('Imported songs');
+    return createSongbook('Imported songs', { deviceOnly: true });
   };
 
   const runImport = async (files: File[]) => {
@@ -244,7 +246,7 @@ export default function Songbooks({ embedded = false, onMakePresentation }: { em
       <div key={id} className={`group relative flex items-center rounded-lg ${active ? 'bg-brand/15' : 'hover:bg-white/5'}`}>
         <button onClick={() => { setActiveBook(id); setQuery(''); }} className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left text-sm">
           {book ? (book.kind === 'standard' ? <Lock size={14} className="shrink-0 text-warm-white/40" /> : <BookOpen size={14} className={`shrink-0 ${active ? 'text-brand' : 'text-warm-white/50'}`} />) : <Library size={14} className={`shrink-0 ${active ? 'text-brand' : 'text-warm-white/50'}`} />}
-          <span className={`min-w-0 flex-1 truncate ${active ? 'font-semibold text-white' : 'text-warm-white/80'}`}>{book?.name ?? 'All songs'}</span>
+          <span className={`min-w-0 flex-1 truncate ${active ? 'font-semibold text-white' : 'text-warm-white/80'}`}>{book?.name ?? 'All songs'}{book?.deviceOnly && <span className="ml-1 text-[10px] font-normal text-warm-white/40">· This device</span>}</span>
           <span className="shrink-0 text-xs tabular-nums text-warm-white/40">{book ? countIn(book.id) : songs.length}</span>
         </button>
         {book?.kind === 'personal' && <>
@@ -278,7 +280,7 @@ export default function Songbooks({ embedded = false, onMakePresentation }: { em
             {importMenu && <>
               <div className="fixed inset-0 z-20" onClick={() => setImportMenu(false)} />
               <div role="menu" className="absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-white/10 bg-navy p-1.5 text-sm text-warm-white shadow-xl">
-                <button role="menuitem" onClick={() => { setImportMenu(false); filesInput.current?.click(); }} className="flex w-full items-start gap-3 rounded-lg px-3 py-2.5 text-left hover:bg-white/10"><Upload size={16} className="mt-0.5 shrink-0 text-brand" /><span><span className="block font-semibold">One or more song files</span><span className="block text-xs text-warm-white/50">Pick a single song, or Ctrl+click to choose several. Text (.txt), ChordPro, OpenLyrics (.xml) or FaithStream songbook files</span></span></button>
+                <button role="menuitem" onClick={() => { setImportMenu(false); filesInput.current?.click(); }} className="flex w-full items-start gap-3 rounded-lg px-3 py-2.5 text-left hover:bg-white/10"><Upload size={16} className="mt-0.5 shrink-0 text-brand" /><span><span className="block font-semibold">One or more song files</span><span className="block text-xs text-warm-white/50">Pick a single song, or Ctrl+click to choose several. Text (.txt), ChordPro, OpenLyrics (.xml) or FaithStream Studio songbook files</span></span></button>
                 <button role="menuitem" onClick={() => { setImportMenu(false); folderInput.current?.click(); }} className="flex w-full items-start gap-3 rounded-lg px-3 py-2.5 text-left hover:bg-white/10"><FolderPlus size={16} className="mt-0.5 shrink-0 text-brand" /><span><span className="block font-semibold">A whole folder of songs</span><span className="block text-xs text-warm-white/50">For example, a folder on a USB flash drive</span></span></button>
                 <p className="px-3 pb-1 pt-2 text-[11px] text-warm-white/40">Songs go into {current?.kind === 'personal' ? `“${current.name}”` : personalBooks[0] ? `“${personalBooks[0].name}”` : 'a new “Imported songs” songbook'}. Standard songbooks are never changed.</p>
               </div>
@@ -301,7 +303,7 @@ export default function Songbooks({ embedded = false, onMakePresentation }: { em
           <>To change how a song looks, click it and open the <b>Design</b> tab. <b>Default look</b> sets the look for every song.</>,
         ]}
       />
-      {restoredSettings && <div className="flex shrink-0 items-center justify-between gap-3 rounded-xl border border-brand/30 bg-brand/5 px-4 py-2.5 text-sm text-warm-white/80">Settings were restored. Reload FaithStream to apply them everywhere.<button onClick={() => window.location.reload()} className="rounded-lg bg-brand px-3 py-1.5 text-xs font-bold text-navy">Reload now</button></div>}
+      {restoredSettings && <div className="flex shrink-0 items-center justify-between gap-3 rounded-xl border border-brand/30 bg-brand/5 px-4 py-2.5 text-sm text-warm-white/80">Settings were restored. Reload FaithStream Studio to apply them everywhere.<button onClick={() => window.location.reload()} className="rounded-lg bg-brand px-3 py-1.5 text-xs font-bold text-navy">Reload now</button></div>}
 
       <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-[250px_minmax(0,1fr)]">
         <aside className="flex min-h-0 flex-col overflow-y-auto rounded-2xl border border-white/10 bg-panel p-2">

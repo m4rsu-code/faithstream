@@ -140,7 +140,7 @@ const Header: React.FC<HeaderProps> = ({
       if (next.live && next.streamStatus === 'live' && previous.streamStatus !== 'live') {
         addNotification('You are live', 'Your stream is connected and on air.');
       }
-      if (next.recording && !previous.recording) addNotification('Recording started', 'FaithStream is recording your program.');
+      if (next.recording && !previous.recording) addNotification('Recording started', 'FaithStream Studio is recording your program.');
       if (!next.recording && previous.recording) addNotification('Recording stopped', 'Your recording has finished.');
       previousSession.current = next;
       setStudioSession(next);
@@ -262,12 +262,12 @@ const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center gap-2">
           <img
             src={Logo}
-            alt="FaithStream"
+            alt="FaithStream Studio"
             className="h-15 w-15 object-contain"
             draggable={false}
           />
           <span className="select-none text-sm font-semibold tracking-wide text-white">
-            FaithStream
+            FaithStream Studio
           </span>
         </div>
         <div className="flex h-full" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
@@ -335,7 +335,7 @@ const Header: React.FC<HeaderProps> = ({
                 <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
                   <div>
                     <h2 className="text-sm font-semibold text-white">Notifications</h2>
-                    <p className="mt-0.5 text-[11px] text-white/45">FaithStream and studio updates</p>
+                    <p className="mt-0.5 text-[11px] text-white/45">FaithStream Studio and studio updates</p>
                   </div>
                   {notifications.length > 0 && <button type="button" onClick={() => setNotifications([])} className="flex items-center gap-1 rounded-md px-2 py-1.5 text-[11px] text-white/55 hover:bg-white/5 hover:text-white"><Trash2 size={12} /> Clear all</button>}
                 </div>

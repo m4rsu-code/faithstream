@@ -16,6 +16,7 @@ import {
   searchSongs,
   songScreens,
   songStyleFor,
+  synchronizeAccountSongbooks,
   type Song,
   type Songbook,
 } from '../utils/songbooks';
@@ -128,6 +129,7 @@ export default function StudioSongsPanel({
   }, []);
   useEffect(() => {
     reload();
+    void synchronizeAccountSongbooks().then(reload).catch(() => undefined);
     window.addEventListener(SONGS_CHANGED_EVENT, reload);
     return () => window.removeEventListener(SONGS_CHANGED_EVENT, reload);
   }, [reload]);
@@ -181,7 +183,7 @@ export default function StudioSongsPanel({
                 <button type="button" onClick={() => { if (!searching) toggleBook(book.id); }} title={book.kind === 'standard' ? 'Standard songbook (read-only)' : 'Your songbook'} className="flex w-full items-center gap-1 px-1.5 py-1 text-left hover:bg-white/5">
                   {open ? <ChevronDown size={12} className="shrink-0 text-warm-white/50" /> : <ChevronRight size={12} className="shrink-0 text-warm-white/50" />}
                   <BookOpen size={13} className={`shrink-0 ${book.kind === 'standard' ? 'text-amber-300/90' : 'text-sky-300/90'}`} />
-                  <span className="min-w-0 truncate text-[11px] font-semibold text-warm-white/90">{book.name}</span>
+                  <span className="min-w-0 truncate text-[11px] font-semibold text-warm-white/90">{book.name}{book.deviceOnly && <span className="ml-1 font-normal text-warm-white/40">· This device</span>}</span>
                   <span className="shrink-0 text-[10px] text-warm-white/40">({searching ? `${bookSongs.length} of ${total}` : `${total} ${total === 1 ? 'song' : 'songs'}`})</span>
                 </button>
                 {open && <ul role="group">

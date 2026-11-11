@@ -7,11 +7,12 @@
  * - Everything is stored on this computer in IndexedDB, per signed-in account.
  */
 import { getAccountDatabaseName, getAccountStorageKey } from './accountStorage';
+import { API_BASE_URL } from './apiConfig';
 import { STANDARD_SONGBOOKS } from '../data/standardHymns';
 import { splitLyrics } from './slideLibrary';
 import { isCustomBackground } from './slideBackground';
 
-export type Songbook = { id: string; name: string; kind: 'standard' | 'personal'; createdAt: number };
+export type Songbook = { id: string; name: string; kind: 'standard' | 'personal'; createdAt: number; updatedAt?: number; /** Imported or restored on this computer; excluded from account sync. */ deviceOnly?: boolean };
 export type Song = {
   id: string;
   bookId: string;
@@ -25,6 +26,8 @@ export type Song = {
   updatedAt: number;
   /** True when a standard song has been corrected on this computer. */
   edited?: boolean;
+  /** Imported or restored on this computer; excluded from account sync. */
+  deviceOnly?: boolean;
   /** This song's own slide design. Without it, the song follows the default song style. */
   style?: SongStyle;
 };
@@ -76,6 +79,116 @@ const write = async (changes: { store: string; put?: unknown[]; remove?: string[
   window.dispatchEvent(new CustomEvent(SONGS_CHANGED_EVENT));
 };
 
+type SyncedSongbook = { id: string; name: string; createdAt: number; updatedAt: number; songs: Song[]; deleted?: boolean };
+const accountSyncFlights = new Map<string, Promise<void>>();
+const DELETED_SONGBOOKS_KEY = 'faithstream.deleted-songbooks';
+
+const deletedSongbookIds = () => {
+  try {
+    const ids: unknown = JSON.parse(localStorage.getItem(getAccountStorageKey(DELETED_SONGBOOKS_KEY)) ?? '[]');
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [];
+  } catch { return []; }
+};
+
+const saveDeletedSongbookIds = (ids: string[]) => {
+  try { localStorage.setItem(getAccountStorageKey(DELETED_SONGBOOKS_KEY), JSON.stringify([...new Set(ids)])); } catch { /* Retry deletions at next sync when storage is available. */ }
+};
+
+const accountSongbookRequest = async (token: string, path: string, init: RequestInit = {}) => {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...init,
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...init.headers },
+  });
+  const data = await response.json().catch(() => ({})) as { message?: string; songbooks?: SyncedSongbook[]; songbook?: SyncedSongbook };
+  if (!response.ok) throw new Error(data.message ?? `Songbook sync failed (${response.status}).`);
+  return data;
+};
+
+const accountToken = async () => window.faithstreamWindow?.getAuthToken() ?? null;
+
+const localSongbookPayload = (book: Songbook, songs: Song[]): SyncedSongbook => {
+  const sharedSongs = songs.filter((song) => song.bookId === book.id && !song.deviceOnly).map(({ edited: _edited, deviceOnly: _deviceOnly, ...song }) => song);
+  const updatedAt = Math.max(book.updatedAt ?? book.createdAt, ...sharedSongs.map((song) => song.updatedAt));
+  return { id: book.id, name: book.name, createdAt: book.createdAt, updatedAt, songs: sharedSongs };
+};
+
+const storeSyncedSongbookLocally = async (remote: SyncedSongbook, currentBooks?: Songbook[], currentSongs?: Song[]) => {
+  if (remote.deleted) { await removeSyncedSongbookLocally(remote.id); return; }
+  const books = currentBooks ?? await readAll<Songbook>(BOOKS);
+  const songs = currentSongs ?? await readAll<Song>(SONGS);
+  const local = books.find((book) => book.id === remote.id);
+  if (local?.deviceOnly) return;
+  const keptDeviceSongs = songs.filter((song) => song.bookId === remote.id && song.deviceOnly);
+  const sharedSongs = remote.songs.map((song) => ({ ...song, bookId: remote.id, deviceOnly: false }));
+  const nextBook: Songbook = { id: remote.id, name: remote.name, kind: 'personal', createdAt: remote.createdAt, updatedAt: remote.updatedAt };
+  await write([
+    { store: BOOKS, put: [nextBook] },
+    { store: SONGS, put: [...sharedSongs, ...keptDeviceSongs], remove: songs.filter((song) => song.bookId === remote.id && !song.deviceOnly && !sharedSongs.some((shared) => shared.id === song.id)).map((song) => song.id) },
+  ]);
+};
+
+const removeSyncedSongbookLocally = async (bookId: string) => {
+  const [books, songs] = await Promise.all([readAll<Songbook>(BOOKS), readAll<Song>(SONGS)]);
+  const book = books.find((item) => item.id === bookId);
+  if (book?.deviceOnly) return;
+  const localSongs = songs.filter((song) => song.bookId === bookId && song.deviceOnly);
+  await write([
+    { store: BOOKS, ...(localSongs.length && book ? { put: [{ ...book, deviceOnly: true }] } : { remove: [bookId] }) },
+    { store: SONGS, remove: songs.filter((song) => song.bookId === bookId && !song.deviceOnly).map((song) => song.id) },
+  ]);
+};
+
+const syncOneSongbook = async (bookId: string) => {
+  try {
+    const token = await accountToken();
+    if (!token) return;
+    const [books, songs] = await Promise.all([readAll<Songbook>(BOOKS), readAll<Song>(SONGS)]);
+    const book = books.find((item) => item.id === bookId);
+    if (!book || book.deviceOnly || book.kind !== 'personal') return;
+    const payload = localSongbookPayload(book, songs);
+    const result = await accountSongbookRequest(token, `/songbooks/${encodeURIComponent(book.id)}`, { method: 'PUT', body: JSON.stringify(payload) });
+    if (result.songbook?.deleted) await removeSyncedSongbookLocally(book.id);
+    else if (result.songbook && result.songbook.updatedAt > payload.updatedAt) await storeSyncedSongbookLocally(result.songbook, books, songs);
+  } catch { /* Keep the library usable offline; it will be reconciled on the next signed-in sync. */ }
+};
+
+export const synchronizeAccountSongbooks = async () => {
+  const token = await accountToken();
+  if (!token) return;
+  const flight = accountSyncFlights.get(token);
+  if (flight) return flight;
+  const sync = (async () => {
+    const deletedIds = deletedSongbookIds();
+    for (const id of deletedIds) {
+      await accountSongbookRequest(token, `/songbooks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      saveDeletedSongbookIds(deletedSongbookIds().filter((savedId) => savedId !== id));
+    }
+    const data = await accountSongbookRequest(token, '/songbooks');
+    const remoteBooks = data.songbooks ?? [];
+    const [books, songs] = await Promise.all([readAll<Songbook>(BOOKS), readAll<Song>(SONGS)]);
+    const remoteById = new Map(remoteBooks.map((book) => [book.id, book]));
+    const received: SyncedSongbook[] = [];
+    for (const remote of remoteBooks) {
+      const local = books.find((book) => book.id === remote.id);
+      if (local?.deviceOnly) continue;
+      if (remote.deleted) { await removeSyncedSongbookLocally(remote.id); continue; }
+      const localSongs = songs.filter((song) => song.bookId === remote.id && !song.deviceOnly);
+      const localTime = local ? Math.max(local.updatedAt ?? local.createdAt, ...localSongs.map((song) => song.updatedAt)) : -1;
+      if (local && localTime > remote.updatedAt) {
+        const result = await accountSongbookRequest(token, `/songbooks/${encodeURIComponent(local.id)}`, { method: 'PUT', body: JSON.stringify(localSongbookPayload(local, songs)) });
+        if (result.songbook) received.push(result.songbook);
+      } else received.push(remote);
+    }
+    for (const local of books.filter((book) => book.kind === 'personal' && !book.deviceOnly && !remoteById.has(book.id))) {
+      const result = await accountSongbookRequest(token, `/songbooks/${encodeURIComponent(local.id)}`, { method: 'PUT', body: JSON.stringify(localSongbookPayload(local, songs)) });
+      if (result.songbook) received.push(result.songbook);
+    }
+    for (const remote of received) await storeSyncedSongbookLocally(remote, books, songs);
+  })();
+  accountSyncFlights.set(token, sync);
+  try { await sync; } finally { accountSyncFlights.delete(token); }
+};
+
 const now = () => Date.now();
 export const newId = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 export const isStandardBook = (bookId: string) => STANDARD_SONGBOOKS.some((book) => book.id === bookId);
@@ -98,20 +211,34 @@ export const loadLibrary = async (): Promise<{ books: Songbook[]; songs: Song[] 
   };
 };
 
-export const createSongbook = async (name: string): Promise<Songbook> => {
-  const book: Songbook = { id: newId('book'), name: cleanName(name) || 'My songs', kind: 'personal', createdAt: now() };
+export const createSongbook = async (name: string, options: { deviceOnly?: boolean } = {}): Promise<Songbook> => {
+  const createdAt = now();
+  const book: Songbook = { id: newId('book'), name: cleanName(name) || 'My songs', kind: 'personal', createdAt, updatedAt: createdAt, ...(options.deviceOnly ? { deviceOnly: true } : {}) };
   await write([{ store: BOOKS, put: [book] }]);
+  if (!book.deviceOnly) void syncOneSongbook(book.id);
   return book;
 };
 
 export const renameSongbook = async (book: Songbook, name: string) => {
   if (book.kind !== 'personal') throw new Error('Standard songbooks cannot be renamed.');
-  await write([{ store: BOOKS, put: [{ ...book, name: cleanName(name) || book.name }] }]);
+  const updated = { ...book, name: cleanName(name) || book.name, updatedAt: now() };
+  await write([{ store: BOOKS, put: [updated] }]);
+  if (!updated.deviceOnly) void syncOneSongbook(updated.id);
 };
 
 export const deleteSongbook = async (book: Songbook, songs: Song[]) => {
   if (book.kind !== 'personal') throw new Error('Standard songbooks cannot be deleted.');
   await write([{ store: SONGS, remove: songs.filter((song) => song.bookId === book.id).map((song) => song.id) }, { store: BOOKS, remove: [book.id] }]);
+  if (!book.deviceOnly) {
+    saveDeletedSongbookIds([...deletedSongbookIds(), book.id]);
+    try {
+      const token = await accountToken();
+      if (token) {
+        await accountSongbookRequest(token, `/songbooks/${encodeURIComponent(book.id)}`, { method: 'DELETE' });
+        saveDeletedSongbookIds(deletedSongbookIds().filter((id) => id !== book.id));
+      }
+    } catch { /* The tombstone removes it from the account on the next successful sync. */ }
+  }
 };
 
 /** Saves a song. Standard songs are saved as a correction, leaving the original untouched. */
@@ -124,6 +251,7 @@ export const saveSong = async (song: Song): Promise<Song> => {
   } else {
     const { edited: _edited, ...stored } = clean;
     await write([{ store: SONGS, put: [stored] }]);
+    if (!clean.deviceOnly) void syncOneSongbook(clean.bookId);
   }
   window.dispatchEvent(new CustomEvent(SONG_SAVED_EVENT, { detail: clean }));
   return clean;
@@ -137,13 +265,22 @@ export const restoreStandardSong = async (songId: string) => {
 
 export const deleteSongs = async (ids: string[]) => {
   const personal = ids.filter((id) => !STANDARD_SONGBOOKS.some((book) => book.songs.some((song) => song.id === id)));
-  if (personal.length) await write([{ store: SONGS, remove: personal }]);
+  if (personal.length) {
+    const [songs, books] = await Promise.all([readAll<Song>(SONGS), readAll<Songbook>(BOOKS)]);
+    const syncableBooks = [...new Set(songs.filter((song) => personal.includes(song.id) && !song.deviceOnly).map((song) => song.bookId))];
+    const touchedBooks = books.filter((book) => syncableBooks.includes(book.id)).map((book) => ({ ...book, updatedAt: now() }));
+    await write([{ store: SONGS, remove: personal }, { store: BOOKS, put: touchedBooks }]);
+    syncableBooks.forEach((bookId) => { void syncOneSongbook(bookId); });
+  }
 };
 
 export const copySongsTo = async (songs: Song[], bookId: string) => {
   if (isStandardBook(bookId)) throw new Error('Songs can only be added to your own songbooks.');
-  const copies = songs.map((song) => ({ ...song, id: newId('song'), bookId, createdAt: now(), updatedAt: now(), edited: undefined }));
+  const books = await readAll<Songbook>(BOOKS);
+  const targetIsDeviceOnly = books.find((book) => book.id === bookId)?.deviceOnly ?? false;
+  const copies = songs.map((song) => ({ ...song, id: newId('song'), bookId, createdAt: now(), updatedAt: now(), edited: undefined, ...(targetIsDeviceOnly || song.deviceOnly ? { deviceOnly: true } : { deviceOnly: undefined }) }));
   await write([{ store: SONGS, put: copies.map(({ edited: _edited, ...stored }) => stored) }]);
+  if (!targetIsDeviceOnly && copies.some((song) => !song.deviceOnly)) void syncOneSongbook(bookId);
   return copies.length;
 };
 
@@ -264,7 +401,7 @@ const BACKUP_FORMAT = 'faithstream-backup';
 export type ImportReport = { added: number; skipped: string[]; booksCreated: string[] };
 
 /**
- * Imports song files into a personal songbook. FaithStream songbook files keep their own
+ * Imports song files into a personal songbook. FaithStream Studio songbook files keep their own
  * book names (a new personal book is created for each). Standard songbooks are never touched.
  */
 export const importSongFiles = async (files: File[], targetBookId: string, existing: Song[]): Promise<ImportReport> => {
@@ -277,7 +414,7 @@ export const importSongFiles = async (files: File[], targetBookId: string, exist
     const key = `${foldText(item.title)}|${foldText(item.lyrics.split('\n').find((line) => line.trim()) ?? '')}`;
     if (bookId === targetBookId && known.has(key)) return false;
     known.add(key);
-    toSave.push({ id: newId('song'), bookId, title: cleanName(item.title) || 'Untitled song', number: item.number?.trim() || undefined, author: item.author?.trim() || undefined, copyright: item.copyright?.trim() || undefined, lyrics: normalizeLyrics(item.lyrics), createdAt: now(), updatedAt: now(), ...(item.style ? { style: cleanSongStyle(item.style) } : {}) });
+    toSave.push({ id: newId('song'), bookId, title: cleanName(item.title) || 'Untitled song', number: item.number?.trim() || undefined, author: item.author?.trim() || undefined, copyright: item.copyright?.trim() || undefined, lyrics: normalizeLyrics(item.lyrics), createdAt: now(), updatedAt: now(), deviceOnly: true, ...(item.style ? { style: cleanSongStyle(item.style) } : {}) });
     return true;
   };
   for (const file of files) {
@@ -287,10 +424,10 @@ export const importSongFiles = async (files: File[], targetBookId: string, exist
       const text = await file.text();
       if (lower.endsWith('.fssongbook') || lower.endsWith('.json')) {
         const data = JSON.parse(text) as { format?: string; books?: { id: string; name: string }[]; songs?: (ImportedSong & { bookId?: string })[] };
-        if (data.format !== FAITHSTREAM_FORMAT || !Array.isArray(data.songs)) throw new Error('not a FaithStream songbook file');
+        if (data.format !== FAITHSTREAM_FORMAT || !Array.isArray(data.songs)) throw new Error('not a FaithStream Studio songbook file');
         const bookIds = new Map<string, string>();
         for (const book of (data.books ?? []).filter((item) => typeof item?.id === 'string' && typeof item.name === 'string')) {
-          const created = await createSongbook(book.name);
+          const created = await createSongbook(book.name, { deviceOnly: true });
           bookIds.set(book.id, created.id);
           report.booksCreated.push(created.name);
         }
@@ -317,7 +454,7 @@ export const importSongFiles = async (files: File[], targetBookId: string, exist
 
 export const SONG_FILE_ACCEPT = '.txt,.cho,.chordpro,.chopro,.crd,.pro,.xml,.fssongbook,.json,text/plain';
 
-/** A FaithStream songbook file for sharing a book with another computer (USB, email…). */
+/** A FaithStream Studio songbook file for sharing a book with another computer (USB, email…). */
 export const exportSongbooks = (books: Songbook[], songs: Song[]) => JSON.stringify({
   format: FAITHSTREAM_FORMAT,
   version: 1,
@@ -355,9 +492,9 @@ export const createBackup = async () => {
 /** Restores songbooks (merged with what is here) and settings. Returns counts for the summary. */
 export const restoreBackup = async (text: string) => {
   const data = JSON.parse(text) as { format?: string; songbooks?: { books?: Songbook[]; songs?: Song[]; overrides?: SongOverride[] }; settings?: Record<string, string>; accountSettings?: Record<string, string> };
-  if (data.format !== BACKUP_FORMAT) throw new Error('This is not a FaithStream backup file.');
-  const books = (data.songbooks?.books ?? []).filter((book) => typeof book?.id === 'string' && typeof book.name === 'string' && !isStandardBook(book.id)).map((book) => ({ ...book, kind: 'personal' as const }));
-  const songs = (data.songbooks?.songs ?? []).filter((song) => typeof song?.id === 'string' && typeof song.lyrics === 'string' && !isStandardBook(song.bookId));
+  if (data.format !== BACKUP_FORMAT) throw new Error('This is not a FaithStream Studio backup file.');
+  const books = (data.songbooks?.books ?? []).filter((book) => typeof book?.id === 'string' && typeof book.name === 'string' && !isStandardBook(book.id)).map((book) => ({ ...book, kind: 'personal' as const, deviceOnly: true }));
+  const songs = (data.songbooks?.songs ?? []).filter((song) => typeof song?.id === 'string' && typeof song.lyrics === 'string' && !isStandardBook(song.bookId)).map((song) => ({ ...song, deviceOnly: true }));
   const overrides = (data.songbooks?.overrides ?? []).filter((item) => typeof item?.id === 'string' && typeof item.lyrics === 'string');
   await write([{ store: BOOKS, put: books }, { store: SONGS, put: songs }, { store: OVERRIDES, put: overrides }]);
   let settingsRestored = 0;
@@ -373,7 +510,7 @@ export const restoreBackup = async (text: string) => {
   return { books: books.length, songs: songs.length, corrections: overrides.length, settings: settingsRestored };
 };
 
-export const backupFileName = () => `FaithStream backup ${new Date().toISOString().slice(0, 10)}.fsbackup`;
+export const backupFileName = () => `FaithStream Studio backup ${new Date().toISOString().slice(0, 10)}.fsbackup`;
 
 /** Opens the system Save dialog (desktop app) or falls back to a browser download. */
 export const saveTextFile = async (suggestedName: string, content: string, kind: 'backup' | 'songbook'): Promise<{ ok: boolean; canceled?: boolean; filePath?: string; message?: string }> => {

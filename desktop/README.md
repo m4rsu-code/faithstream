@@ -1,4 +1,4 @@
-# FaithStream
+# FaithStream Studio
 
 A desktop app for churches to run slideshows and livestream services.
 

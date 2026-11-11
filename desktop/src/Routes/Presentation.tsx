@@ -126,7 +126,7 @@ const patchTextBox = (box: TextBox, patch: Partial<TextBox>): TextBox => {
   return next;
 };
 
-type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; aspectRatio?: number; layerOrder?: number | 'back' | 'front' };
+type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; aspectRatio?: number; lockAspectRatio?: boolean; layerOrder?: number | 'back' | 'front' };
 type ShapeT = { id: number; kind: 'rectangle' | 'circle' | 'triangle' | 'line' | 'star' | 'arrow'; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number };
 type MediaAsset = { id: string; name: string; type: 'image' | 'video'; category?: 'background' | 'slide'; collection?: string; blob: Blob; originalBlob?: Blob; optimized?: boolean; createdAt: number; url: string };
 type StoredMediaAsset = Omit<MediaAsset, 'url'>;
@@ -457,6 +457,7 @@ const loadSlides = (): SlideT[] => {
 };
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
+const mediaRatioOnSlide = (pixelRatio: number) => pixelRatio * 9 / 16;
 const getImageAspectRatio = (src: string) => new Promise<number>((resolve) => {
   const image = new Image();
   image.onload = () => resolve(image.naturalWidth > 0 && image.naturalHeight > 0 ? image.naturalWidth / image.naturalHeight : 32 / 44);
@@ -845,6 +846,12 @@ const TEXT_SIDE_HANDLES: Record<'n' | 's' | 'e' | 'w', string> = {
   s: 'left-1/2 -bottom-1 h-1.5 w-5 -translate-x-1/2 cursor-ns-resize',
   e: 'top-1/2 -right-1 h-5 w-1.5 -translate-y-1/2 cursor-ew-resize',
   w: 'top-1/2 -left-1 h-5 w-1.5 -translate-y-1/2 cursor-ew-resize',
+};
+const MEDIA_SIDE_HANDLES: Record<'n' | 's' | 'e' | 'w', string> = {
+  n: 'left-1/2 -top-1 h-2 w-6 -translate-x-1/2 cursor-ns-resize',
+  s: 'left-1/2 -bottom-1 h-2 w-6 -translate-x-1/2 cursor-ns-resize',
+  e: 'top-1/2 -right-1 h-6 w-2 -translate-y-1/2 cursor-ew-resize',
+  w: 'top-1/2 -left-1 h-6 w-2 -translate-y-1/2 cursor-ew-resize',
 };
 
 export default function Presentation() {
@@ -1296,10 +1303,20 @@ export default function Presentation() {
     }));
     setPictureMenu(null);
   };
+  const nextFrontLayerOrder = () => {
+    const orders = [
+      ...(cur.pictures ?? []).map((item, position) => typeof item.layerOrder === 'number' ? item.layerOrder : item.layerOrder === 'front' ? 5000 : item.layerOrder === 'back' ? 0 : 1000 + position),
+      ...(cur.shapes ?? []).map((item, position) => item.layerOrder ?? 2000 + position),
+      ...(cur.box ? [typeof cur.box.layerOrder === 'number' ? cur.box.layerOrder : cur.box.layerOrder === 'front' ? 5000 : cur.box.layerOrder === 'back' ? 0 : 3000] : []),
+      ...(cur.extraBoxes ?? []).map(({ box }, position) => typeof box.layerOrder === 'number' ? box.layerOrder : box.layerOrder === 'front' ? 5000 : box.layerOrder === 'back' ? 0 : 3001 + position),
+      ...(cur.countdown ? [20] : []),
+    ];
+    return Math.max(-10, ...orders) + 10;
+  };
   const duplicatePicture = (id: number) => {
     const picture = cur.pictures?.find((item) => item.id === id);
     if (!picture || cur.locked) return;
-    const duplicate = { ...picture, id: nextId++, x: clamp(picture.x + 4, 0, 100 - picture.w), y: clamp(picture.y + 4, 0, 100 - picture.h) };
+    const duplicate = { ...picture, id: nextId++, layerOrder: nextFrontLayerOrder(), x: clamp(picture.x + 4, 0, 100 - picture.w), y: clamp(picture.y + 4, 0, 100 - picture.h) };
     updateSlide({ pictures: [...(cur.pictures ?? []), duplicate] });
     setSelectedPictureId(duplicate.id);
     setPictureMenu(null);
@@ -1308,7 +1325,7 @@ export default function Presentation() {
     const source = id === null ? cur.box : cur.extraBoxes?.find((item) => item.id === id)?.box;
     if (!source || cur.locked) return;
     const duplicateId = nextId++;
-    const duplicate = { ...source, x: clamp(source.x + 4, 0, 100 - source.w), y: clamp(source.y + 4, 0, 100 - source.h) };
+    const duplicate = { ...source, layerOrder: nextFrontLayerOrder(), x: clamp(source.x + 4, 0, 100 - source.w), y: clamp(source.y + 4, 0, 100 - source.h) };
     updateSlide({ extraBoxes: [...(cur.extraBoxes ?? []), { id: duplicateId, box: duplicate }] });
     setSelectedBoxId(duplicateId);
     setIsBoxSelected(true);
@@ -1509,10 +1526,11 @@ export default function Presentation() {
       const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
       setMediaAssets((items) => [asset, ...items.filter((item) => item.id !== asset.id)]);
       const aspectRatio = await getImageAspectRatio(asset.url);
-      const width = Math.min(48, 65 * aspectRatio);
-      const height = width / aspectRatio;
+      const slideRatio = mediaRatioOnSlide(aspectRatio);
+      const width = Math.min(48, 65 * slideRatio);
+      const height = width / slideRatio;
       const id = nextId++;
-      updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'image', aspectRatio, x: (100 - width) / 2, y: (100 - height) / 2, w: width, h: height }] });
+      updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'image', aspectRatio, lockAspectRatio: true, layerOrder: nextFrontLayerOrder(), x: (100 - width) / 2, y: (100 - height) / 2, w: width, h: height }] });
       setSelectedPictureId(id);
       setSelectedBoxId(null);
       setIsBoxSelected(false);
@@ -1539,11 +1557,12 @@ export default function Presentation() {
         probe.onerror = () => { window.clearTimeout(fallback); resolve(16 / 9); };
         probe.src = asset.url;
       });
-      const maxWidth = Math.min(72, 70 * aspectRatio);
+      const slideRatio = mediaRatioOnSlide(aspectRatio);
+      const maxWidth = Math.min(72, 70 * slideRatio);
       const width = Math.min(56, maxWidth);
-      const height = width / aspectRatio;
+      const height = width / slideRatio;
       const id = nextId++;
-      updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'video', muted: false, aspectRatio, x: (100 - width) / 2, y: (100 - height) / 2, w: width, h: height }] });
+      updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'video', muted: false, aspectRatio, lockAspectRatio: true, layerOrder: nextFrontLayerOrder(), x: (100 - width) / 2, y: (100 - height) / 2, w: width, h: height }] });
       setSelectedPictureId(id);
       setSelectedBoxId(null);
       setIsBoxSelected(false);
@@ -1575,10 +1594,11 @@ export default function Presentation() {
           probe.onerror = () => { window.clearTimeout(fallback); resolve(16 / 9); };
           probe.src = asset.url;
         });
-        const width = Math.min(56, 70 * aspectRatio);
-        const height = width / aspectRatio;
+        const slideRatio = mediaRatioOnSlide(aspectRatio);
+        const width = Math.min(56, 70 * slideRatio);
+        const height = width / slideRatio;
         const id = nextId++;
-        updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'video', muted: false, aspectRatio, x: (100 - width) / 2, y: (100 - height) / 2, w: width, h: height }] });
+        updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'video', muted: false, aspectRatio, lockAspectRatio: true, layerOrder: nextFrontLayerOrder(), x: (100 - width) / 2, y: (100 - height) / 2, w: width, h: height }] });
         setSelectedPictureId(id);
         setSelectedBoxId(null);
         setIsBoxSelected(false);
@@ -1587,10 +1607,11 @@ export default function Presentation() {
       return;
     }
     void getImageAspectRatio(asset.url).then((aspectRatio) => {
-      const width = Math.min(48, 65 * aspectRatio);
-      const height = width / aspectRatio;
+      const slideRatio = mediaRatioOnSlide(aspectRatio);
+      const width = Math.min(48, 65 * slideRatio);
+      const height = width / slideRatio;
       const id = nextId++;
-      updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'image', aspectRatio, x: (100 - width) / 2, y: (100 - height) / 2, w: width, h: height }] });
+      updateSlide({ pictures: [...(cur.pictures ?? []), { id, src: asset.url, assetId: asset.id, mediaType: 'image', aspectRatio, lockAspectRatio: true, layerOrder: nextFrontLayerOrder(), x: (100 - width) / 2, y: (100 - height) / 2, w: width, h: height }] });
       setSelectedPictureId(id);
       setSelectedBoxId(null);
       setIsBoxSelected(false);
@@ -1646,7 +1667,10 @@ export default function Presentation() {
     const rect = stageRef.current.getBoundingClientRect();
     const startX = event.clientX;
     const startY = event.clientY;
-    const ratio = picture.aspectRatio ?? picture.w / Math.max(1, picture.h);
+    // Object dimensions are percentages of the slide's independent axes, so convert
+    // the media pixel ratio into the editor's percentage coordinate system.
+    const ratio = (picture.aspectRatio ?? picture.w / Math.max(1, picture.h)) * rect.height / rect.width;
+    const lockRatio = picture.lockAspectRatio !== false;
     const east = handle.includes('e');
     const west = handle.includes('w');
     const south = handle.includes('s');
@@ -1656,13 +1680,31 @@ export default function Presentation() {
     const resize = (pointer: PointerEvent) => {
       const dx = (pointer.clientX - startX) / rect.width * 100;
       const dy = (pointer.clientY - startY) / rect.height * 100;
-      const widthFromX = picture.w + (east ? dx : west ? -dx : 0);
-      const widthFromY = picture.w + (south ? dy * ratio : north ? -dy * ratio : 0);
-      const maxWidth = Math.min(east ? 100 - picture.x : right, (south ? 100 - picture.y : north ? bottom : 100) * ratio);
-      const width = clamp(Math.abs(dx) >= Math.abs(dy * ratio) ? widthFromX : widthFromY, 8, Math.max(8, maxWidth));
-      const height = width / ratio;
-      const x = west ? right - width : picture.x;
-      const y = north ? bottom - height : picture.y;
+      let width = picture.w;
+      let height = picture.h;
+      if (lockRatio && (east || west) && (north || south)) {
+        const widthFromX = picture.w + (east ? dx : -dx);
+        const widthFromY = picture.w + (south ? dy * ratio : -dy * ratio);
+        width = Math.max(8, Math.abs(dx) >= Math.abs(dy * ratio) ? widthFromX : widthFromY);
+        height = width / ratio;
+      } else if (lockRatio) {
+        if (east || west) {
+          width = clamp(picture.w + (east ? dx : -dx), 8, 100);
+          height = width / ratio;
+        } else {
+          height = clamp(picture.h + (south ? dy : -dy), 8, 100);
+          width = height * ratio;
+        }
+      } else {
+        if (east || west) width = clamp(picture.w + (east ? dx : -dx), 8, 100);
+        if (north || south) height = clamp(picture.h + (south ? dy : -dy), 8, 100);
+      }
+      width = Math.min(width, west ? right : 100 - picture.x);
+      height = Math.min(height, north ? bottom : 100 - picture.y);
+      let x = west ? right - width : picture.x;
+      let y = north ? bottom - height : picture.y;
+      if (lockRatio && !(north || south)) y = clamp(picture.y + (picture.h - height) / 2, 0, 100 - height);
+      if (lockRatio && !(east || west)) x = clamp(picture.x + (picture.w - width) / 2, 0, 100 - width);
       updatePicture(picture.id, { x, y, w: width, h: height });
     };
     const stop = () => {
@@ -1809,7 +1851,7 @@ export default function Presentation() {
   const addText = () => {
     if (cur.locked || projectLocked) return;
     const id = nextId++;
-    const newBox = { id, box: { ...defaultBox('Your text here'), x: 24, y: 34, w: 52, h: 30, size: 72 } };
+    const newBox = { id, box: { ...defaultBox('Your text here'), layerOrder: nextFrontLayerOrder(), x: 24, y: 34, w: 52, h: 30, size: 72 } };
     updateSlide({ extraBoxes: [...(cur.extraBoxes ?? []), newBox] });
     setSelectedBoxId(id);
     setIsBoxSelected(true);
@@ -1844,6 +1886,7 @@ export default function Presentation() {
       id,
       box: {
         ...defaultBox(p.text, p.size),
+        layerOrder: nextFrontLayerOrder(),
         x: 15 + offset * 4,
         y: 25 + offset * 4,
         w: 70,
@@ -3030,12 +3073,27 @@ export default function Presentation() {
           </p>
           <div
             className="flex min-h-0 flex-1 items-center justify-center"
+            onClick={() => {
+              setSelectedBoxId(null);
+              setIsBoxSelected(false);
+              setSelectedPictureId(null);
+              setSelectedShapeId(null);
+              setSelectedCountdown(false);
+              setPictureMenu(null);
+            }}
             style={{ containerType: 'size' }}
           >
             <div
               ref={stageRef}
               tabIndex={0}
-              onClick={() => { setIsBoxSelected(false); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); }}
+              onClick={() => {
+                setSelectedBoxId(null);
+                setIsBoxSelected(false);
+                setSelectedPictureId(null);
+                setSelectedShapeId(null);
+                setSelectedCountdown(false);
+                setPictureMenu(null);
+              }}
               onDoubleClick={(event) => {
                 if (cur.locked || !cur.bgImage || (event.target as HTMLElement).closest('[data-slide-object]')) return;
                 event.preventDefault();
@@ -3071,7 +3129,10 @@ export default function Presentation() {
 
               {(cur.pictures ?? []).map((picture, pictureIndex) => <div data-slide-object key={picture.id} onPointerDown={picture.mediaType === 'video' ? undefined : startPictureDrag(picture)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); if (cur.locked) return; selectPicture(picture.id); setPictureMenu({ kind: 'picture', id: picture.id, x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 220) }); }} onClick={(e) => { if (picture.mediaType === 'video') return; e.stopPropagation(); selectPicture(picture.id); }} className={`absolute z-10 ${picture.mediaType === 'video' ? 'pointer-events-none' : 'cursor-move'} ${selectedPictureId === picture.id ? 'border-2 border-cyan-300' : 'border border-transparent'}`} style={{ left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, zIndex: typeof picture.layerOrder === 'number' ? picture.layerOrder : picture.layerOrder === 'front' ? 5000 : picture.layerOrder === 'back' ? 0 : 1000 + pictureIndex, touchAction: 'none' }}>
                 {picture.mediaType === 'video' && <div onPointerDown={startPictureDrag(picture)} onClick={(event) => { event.stopPropagation(); setSelectedPictureId(picture.id); setSelectedCountdown(false); }} aria-label="Drag to move video" className="pointer-events-auto absolute inset-x-0 -top-3 h-3 cursor-move" />}
-                {selectedPictureId === picture.id && (Object.keys(HANDLES) as (keyof typeof HANDLES)[]).map((handle) => <span key={handle} onPointerDown={startPictureResize(picture, handle)} className={`pointer-events-auto absolute z-20 h-3.5 w-3.5 rounded-sm border-2 border-cyan-700 bg-white shadow ${HANDLES[handle]}`} />)}
+                {selectedPictureId === picture.id && <>
+                  {(Object.keys(HANDLES) as (keyof typeof HANDLES)[]).map((handle) => <span key={handle} onPointerDown={startPictureResize(picture, handle)} className={`pointer-events-auto absolute z-20 h-3.5 w-3.5 rounded-sm border-2 border-cyan-700 bg-white shadow ${HANDLES[handle]}`} />)}
+                  {(Object.keys(MEDIA_SIDE_HANDLES) as (keyof typeof MEDIA_SIDE_HANDLES)[]).map((handle) => <span key={handle} onPointerDown={startPictureResize(picture, handle)} className={`pointer-events-auto absolute z-20 rounded-full border-2 border-cyan-700 bg-white shadow ${MEDIA_SIDE_HANDLES[handle]}`} />)}
+                </>}
                 {selectedPictureId === picture.id && <button onPointerDown={(e) => e.stopPropagation()} onClick={() => { updateSlide({ pictures: (cur.pictures ?? []).filter((item) => item.id !== picture.id) }); setSelectedPictureId(null); }} aria-label={picture.mediaType === 'video' ? 'Delete video' : 'Delete image'} className="pointer-events-auto absolute -right-2 -top-2 z-30 rounded-full bg-red-600 p-1 text-white shadow"><Trash2 size={12} /></button>}
               </div>)}
               {pictureMenu && createPortal(<>
@@ -3358,32 +3419,51 @@ export default function Presentation() {
               })()}
             </div>}
             {tab === 'Format' &&
-              (selectedPicture?.mediaType === 'video' ? (
+              (selectedPicture ? (
                 <div className="flex flex-col gap-3">
-                  <SectionTitle>Slide video</SectionTitle>
-                  <p className="text-xs leading-relaxed text-warm-white/55">Select the video on the slide to show its resize handles. Use the player controls to play or pause. Resizing changes its display size without changing the uploaded file.</p>
-                  <button type="button" onClick={toggleSelectedVideoPlayback} className="flex items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-xs font-semibold text-warm-white hover:bg-white/5"><Play size={14} /> Play / pause video</button>
-                  <button type="button" aria-pressed={!(selectedPicture.muted ?? false)} onClick={() => updatePicture(selectedPicture.id, { muted: !(selectedPicture.muted ?? false) })} className="flex items-center justify-between rounded-lg border border-white/15 px-3 py-2 text-xs text-warm-white hover:bg-white/5"><span>Video audio</span><span className="font-semibold text-brand">{selectedPicture.muted ? 'Muted' : 'On'}</span></button>
+                  <SectionTitle>{selectedPicture.mediaType === 'video' ? 'Slide video' : 'Slide image'}</SectionTitle>
+                  <p className="text-xs leading-relaxed text-warm-white/55">Drag the media on the slide to move it. Use the corner and side handles or the controls below to size it. The original upload stays unchanged.</p>
+                  {selectedPicture.mediaType === 'video' && <>
+                    <button type="button" onClick={toggleSelectedVideoPlayback} className="flex items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-xs font-semibold text-warm-white hover:bg-white/5"><Play size={14} /> Play / pause video</button>
+                    <button type="button" aria-pressed={!(selectedPicture.muted ?? false)} onClick={() => updatePicture(selectedPicture.id, { muted: !(selectedPicture.muted ?? false) })} className="flex items-center justify-between rounded-lg border border-white/15 px-3 py-2 text-xs text-warm-white hover:bg-white/5"><span>Video audio</span><span className="font-semibold text-brand">{selectedPicture.muted ? 'Muted' : 'On'}</span></button>
+                  </>}
+                  <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs text-warm-white/75"><input type="checkbox" checked={selectedPicture.lockAspectRatio !== false} onChange={(event) => updatePicture(selectedPicture.id, { lockAspectRatio: event.target.checked })} className="h-3.5 w-3.5 accent-brand" /> Keep proportions</label>
                   <div className="grid grid-cols-2 gap-2">
                     <label className="text-xs text-warm-white/70">Width (%)
                       <input type="number" min="8" max="100" value={Math.round(selectedPicture.w)} onChange={(event) => {
-                        const ratio = selectedPicture.aspectRatio ?? 16 / 9;
+                        const ratio = (selectedPicture.aspectRatio ?? 16 / 9) * 9 / 16;
                         let width = clamp(Number(event.target.value) || 8, 8, 100);
-                        let height = width / ratio;
-                        if (height > 100) { height = 100; width = height * ratio; }
+                        let height = selectedPicture.lockAspectRatio === false ? selectedPicture.h : width / ratio;
+                        if (height > 100) { height = 100; if (selectedPicture.lockAspectRatio !== false) width = height * ratio; }
                         updatePicture(selectedPicture.id, { w: width, h: height, x: clamp(selectedPicture.x, 0, 100 - width), y: clamp(selectedPicture.y, 0, 100 - height) });
                       }} className={`${fieldClass} mt-1`} />
                     </label>
                     <label className="text-xs text-warm-white/70">Height (%)
                       <input type="number" min="8" max="100" value={Math.round(selectedPicture.h)} onChange={(event) => {
-                        const ratio = selectedPicture.aspectRatio ?? 16 / 9;
+                        const ratio = (selectedPicture.aspectRatio ?? 16 / 9) * 9 / 16;
                         let height = clamp(Number(event.target.value) || 8, 8, 100);
-                        let width = height * ratio;
-                        if (width > 100) { width = 100; height = width / ratio; }
+                        let width = selectedPicture.lockAspectRatio === false ? selectedPicture.w : height * ratio;
+                        if (width > 100) { width = 100; if (selectedPicture.lockAspectRatio !== false) height = width / ratio; }
                         updatePicture(selectedPicture.id, { w: width, h: height, x: clamp(selectedPicture.x, 0, 100 - width), y: clamp(selectedPicture.y, 0, 100 - height) });
                       }} className={`${fieldClass} mt-1`} />
                     </label>
                   </div>
+                  <label className="text-xs text-warm-white/70">Width · {Math.round(selectedPicture.w)}%
+                    <input type="range" min="8" max="100" step="1" value={selectedPicture.w} onChange={(event) => {
+                      const w = Number(event.target.value);
+                      const ratio = (selectedPicture.aspectRatio ?? 16 / 9) * 9 / 16;
+                      const h = selectedPicture.lockAspectRatio === false ? selectedPicture.h : Math.min(100, w / ratio);
+                      updatePicture(selectedPicture.id, { w: selectedPicture.lockAspectRatio === false ? w : Math.min(w, h * ratio), h, x: clamp(selectedPicture.x, 0, 100 - w), y: clamp(selectedPicture.y, 0, 100 - h) });
+                    }} className="mt-1 w-full accent-brand" />
+                  </label>
+                  <label className="text-xs text-warm-white/70">Height · {Math.round(selectedPicture.h)}%
+                    <input type="range" min="8" max="100" step="1" value={selectedPicture.h} onChange={(event) => {
+                      const h = Number(event.target.value);
+                      const ratio = (selectedPicture.aspectRatio ?? 16 / 9) * 9 / 16;
+                      const w = selectedPicture.lockAspectRatio === false ? selectedPicture.w : Math.min(100, h * ratio);
+                      updatePicture(selectedPicture.id, { w, h: selectedPicture.lockAspectRatio === false ? h : Math.min(h, w / ratio), x: clamp(selectedPicture.x, 0, 100 - w), y: clamp(selectedPicture.y, 0, 100 - h) });
+                    }} className="mt-1 w-full accent-brand" />
+                  </label>
                   <div className="grid grid-cols-2 gap-2">
                     <label className="text-xs text-warm-white/70">Left (%)<input type="number" min="0" max={Math.floor(100 - selectedPicture.w)} value={Math.round(selectedPicture.x)} onChange={(event) => updatePicture(selectedPicture.id, { x: clamp(Number(event.target.value) || 0, 0, 100 - selectedPicture.w) })} className={`${fieldClass} mt-1`} /></label>
                     <label className="text-xs text-warm-white/70">Top (%)<input type="number" min="0" max={Math.floor(100 - selectedPicture.h)} value={Math.round(selectedPicture.y)} onChange={(event) => updatePicture(selectedPicture.id, { y: clamp(Number(event.target.value) || 0, 0, 100 - selectedPicture.h) })} className={`${fieldClass} mt-1`} /></label>
@@ -3935,6 +4015,7 @@ export default function Presentation() {
             id,
             box: {
               ...defaultBox(`${reference}\n${text}`, 56),
+              layerOrder: nextFrontLayerOrder(),
               x: 15 + offset * 4,
               y: 28 + offset * 4,
               w: 70,

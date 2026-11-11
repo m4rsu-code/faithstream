@@ -4,7 +4,7 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
 const env = (import.meta as ImportMeta & { env: { VITE_FAITHSTREAM_API_URL?: string } }).env;
 
 /**
- * The FaithStream API base URL, without a trailing slash.
+ * The FaithStream Studio API base URL, without a trailing slash.
  *
  * Passwords and sign-in tokens travel to this address, so plain http:// is only
  * accepted for a backend running on this same computer. Any other http:// address

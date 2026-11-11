@@ -9,6 +9,7 @@ import {
   Settings,
   type LucideIcon,
 } from 'lucide-react';
+import appPackage from '../../package.json';
 // import Tagline from '../assets/img/Tagline.png';
 
 type NavItem = {
@@ -47,8 +48,12 @@ export default function SidebarNav() {
         ))}
       </div>
 
-      <div className="flex justify-center pb-4">
-        {/* <img src={Tagline} alt="Together in His Mission" className="w-40 object-contain" /> */}
+      <div className="border-t border-white/10 px-2 pb-2 pt-3">
+        <div className="flex items-center justify-between gap-2">
+          <span className="rounded border border-sky-300/25 bg-sky-300/10 px-1.5 py-0.5 text-[9px] font-bold tracking-[0.14em] text-sky-200">BETA</span>
+          <span className="text-[11px] font-medium tabular-nums text-slate-400">v{appPackage.version}</span>
+        </div>
+        <p className="mt-1.5 text-[10px] text-slate-500">Early access</p>
       </div>
     </nav>
   );

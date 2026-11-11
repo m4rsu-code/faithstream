@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import type { RecordingStatusEvent, StreamStatusEvent } from './shared/streamContracts';
 
 contextBridge.exposeInMainWorld('faithstreamWindow', {
   getAuthToken: () => ipcRenderer.invoke('auth:token:get') as Promise<string | null>,
@@ -7,9 +8,12 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
   saveAuthToken: (token: string) => ipcRenderer.invoke('auth:token:set', token) as Promise<boolean>,
   clearAuthToken: () => ipcRenderer.invoke('auth:token:clear') as Promise<boolean>,
   getStudioDisplays: () => ipcRenderer.invoke('studio:get-displays'),
-  startMobileCamPairing: () => ipcRenderer.invoke('mobile-cam:start-pairing') as Promise<{ ok: boolean; port?: number; code?: string; expiresAt?: number; addresses?: string[]; message?: string }>,
-  renewMobileCamPairingCode: () => ipcRenderer.invoke('mobile-cam:renew-code') as Promise<{ ok: boolean; code?: string; expiresAt?: number; message?: string }>,
-  stopMobileCamPairing: () => ipcRenderer.invoke('mobile-cam:stop-pairing') as Promise<boolean>,
+  registerStudioMusicFile: (file: File) => ipcRenderer.invoke('studio:music:register', webUtils.getPathForFile(file), file.name) as Promise<{ ok: boolean; asset?: { id: string; name: string; path: string; url: string }; message?: string }>,
+  resolveStudioMusicFiles: (assets: { id: string; name: string; path: string; createdAt: number }[]) => ipcRenderer.invoke('studio:music:resolve', assets) as Promise<{ id: string; name: string; path: string; createdAt: number; url: string; available: boolean }[]>,
+  removeStudioMusicFile: (id: string) => ipcRenderer.invoke('studio:music:remove', id) as Promise<boolean>,
+  startMobileCamPairing: (sourceId: number) => ipcRenderer.invoke('mobile-cam:start-pairing', sourceId) as Promise<{ ok: boolean; sourceId?: number; port?: number; code?: string; expiresAt?: number; addresses?: string[]; message?: string }>,
+  renewMobileCamPairingCode: (sourceId: number) => ipcRenderer.invoke('mobile-cam:renew-code', sourceId) as Promise<{ ok: boolean; sourceId?: number; code?: string; expiresAt?: number; message?: string }>,
+  stopMobileCamPairing: (sourceId: number) => ipcRenderer.invoke('mobile-cam:stop-pairing', sourceId) as Promise<boolean>,
   openStudioDisplay: (displayId: number) => ipcRenderer.invoke('studio:open-display', displayId),
   closeStudioDisplay: () => ipcRenderer.invoke('studio:close-display'),
   getOpenStudioDisplays: () => ipcRenderer.invoke('studio:get-open-displays') as Promise<number[]>,
@@ -56,13 +60,13 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
   startRecording: (options: { capture: { x: number; y: number; width: number; height: number } }) => ipcRenderer.invoke('recording:start', options),
   sendRecordingAudio: (chunk: ArrayBuffer) => ipcRenderer.send('recording:audio', chunk),
   stopRecording: () => ipcRenderer.invoke('recording:stop'),
-  onRecordingStatus: (callback: (event: { status: string; message?: string; filePath?: string }) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, payload: { status: string; message?: string; filePath?: string }) => callback(payload);
+  onRecordingStatus: (callback: (event: RecordingStatusEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: RecordingStatusEvent) => callback(payload);
     ipcRenderer.on('recording:status', listener);
     return () => ipcRenderer.removeListener('recording:status', listener);
   },
-  onStreamStatus: (callback: (event: { status: string; message?: string }) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, payload: { status: string; message?: string }) => callback(payload);
+  onStreamStatus: (callback: (event: StreamStatusEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: StreamStatusEvent) => callback(payload);
     ipcRenderer.on('stream:status', listener);
     return () => ipcRenderer.removeListener('stream:status', listener);
   },

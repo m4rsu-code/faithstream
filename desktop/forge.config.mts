@@ -12,7 +12,7 @@ const config: ForgeConfig = {
   asar: {
    unpack: '**/node_modules/ffmpeg-static/ffmpeg.exe',
   },
-  name: 'FaithStream',
+  name: 'FaithStream Studio',
   executableName: 'faithstream',
   icon: './src/assets/icons/win/camera-logo',
 },
@@ -22,7 +22,7 @@ const config: ForgeConfig = {
 
   makers: [
   new MakerSquirrel({
-    name: 'FaithStream',
+    name: 'FaithStream Studio',
     setupIcon: './src/assets/icons/win/camera-logo.ico',
   }),
 

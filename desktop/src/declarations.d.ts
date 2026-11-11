@@ -7,9 +7,12 @@ interface Window {
     saveAuthToken: (token: string) => Promise<boolean>;
     clearAuthToken: () => Promise<boolean>;
     getStudioDisplays: () => Promise<{ id: number; name: string; primary: boolean; bounds: { x: number; y: number; width: number; height: number } }[]>;
-    startMobileCamPairing: () => Promise<{ ok: boolean; port?: number; code?: string; expiresAt?: number; addresses?: string[]; message?: string }>;
-    renewMobileCamPairingCode: () => Promise<{ ok: boolean; code?: string; expiresAt?: number; message?: string }>;
-    stopMobileCamPairing: () => Promise<boolean>;
+    registerStudioMusicFile: (file: File) => Promise<{ ok: boolean; asset?: { id: string; name: string; path: string; url: string }; message?: string }>;
+    resolveStudioMusicFiles: (assets: { id: string; name: string; path: string; createdAt: number }[]) => Promise<{ id: string; name: string; path: string; createdAt: number; url: string; available: boolean }[]>;
+    removeStudioMusicFile: (id: string) => Promise<boolean>;
+    startMobileCamPairing: (sourceId: number) => Promise<{ ok: boolean; sourceId?: number; port?: number; code?: string; expiresAt?: number; addresses?: string[]; message?: string }>;
+    renewMobileCamPairingCode: (sourceId: number) => Promise<{ ok: boolean; sourceId?: number; code?: string; expiresAt?: number; message?: string }>;
+    stopMobileCamPairing: (sourceId: number) => Promise<boolean>;
     openStudioDisplay: (displayId: number) => Promise<{ ok: boolean; message?: string }>;
     closeStudioDisplay: () => Promise<boolean>;
     getOpenStudioDisplays: () => Promise<number[]>;
@@ -48,8 +51,8 @@ interface Window {
     startRecording: (options: { capture: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; canceled?: boolean; message?: string; filePath?: string }>;
     sendRecordingAudio: (chunk: ArrayBuffer) => void;
     stopRecording: () => Promise<boolean>;
-    onRecordingStatus: (callback: (event: { status: string; message?: string; filePath?: string }) => void) => () => void;
-    onStreamStatus: (callback: (event: { status: string; message?: string }) => void) => () => void;
+    onRecordingStatus: (callback: (event: import('./shared/streamContracts').RecordingStatusEvent) => void) => () => void;
+    onStreamStatus: (callback: (event: import('./shared/streamContracts').StreamStatusEvent) => void) => () => void;
   };
 }
 declare module '*.css';

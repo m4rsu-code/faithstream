@@ -32,7 +32,7 @@ const readJson = async (response: Response): Promise<any> => {
   try {
     return await response.json();
   } catch {
-    return { message: response.ok ? undefined : `The FaithStream server returned an error (${response.status}). Try again in a moment.` };
+    return { message: response.ok ? undefined : `The FaithStream Studio server returned an error (${response.status}). Try again in a moment.` };
   }
 };
 
@@ -56,7 +56,7 @@ const getStoredAuthToken = async () => {
 
 const saveStoredAuthToken = async (token: string) => {
   const stored = await window.faithstreamWindow?.saveAuthToken(token);
-  if (!stored) throw new Error('Secure sign-in storage is unavailable. Restart FaithStream and try again.');
+  if (!stored) throw new Error('Secure sign-in storage is unavailable. Restart FaithStream Studio and try again.');
   localStorage.removeItem(LEGACY_TOKEN_KEY);
 };
 
@@ -407,7 +407,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     } catch (cause) {
       setError(cause instanceof Error && cause.message !== 'Failed to fetch'
         ? cause.message
-        : 'Cannot reach the FaithStream server. Start the Laravel backend and try again.');
+        : 'Cannot reach the FaithStream Studio server. Start the Laravel backend and try again.');
     } finally {
       setBusy(false);
     }
@@ -482,7 +482,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     } catch (cause) {
       setError(cause instanceof Error && cause.message !== 'Failed to fetch'
         ? cause.message
-        : 'Cannot reach the FaithStream server. Start the Laravel backend and try again.');
+        : 'Cannot reach the FaithStream Studio server. Start the Laravel backend and try again.');
     } finally {
       setBusy(false);
     }
@@ -517,7 +517,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
           <div className="absolute -bottom-24 -right-20 h-80 w-80 rounded-full border border-[rgba(255,255,255,0.1)]" />
           <div className="absolute -bottom-10 -right-6 h-52 w-52 rounded-full border border-[rgba(255,255,255,0.1)]" />
           <div className="relative flex items-center gap-3" style={{ WebkitAppRegion: 'drag' } as CSSProperties}>
-            <img src={FaithStreamLogo} alt="FaithStream" className="h-14 w-auto object-contain" />
+            <img src={FaithStreamLogo} alt="FaithStream Studio" className="h-14 w-auto object-contain" />
             <p className="border-l border-[rgba(255,255,255,0.15)] pl-3 text-xs text-warm-white/50">Church media,<br />made simple</p>
           </div>
           <div className="relative max-w-sm">
@@ -530,13 +530,13 @@ export default function AuthGate({ children }: { children: ReactNode }) {
 
         <section className="flex min-h-[620px] flex-col justify-center px-6 py-10 sm:px-10">
           <div className="mb-8 md:hidden">
-            <img src={FaithStreamLogo} alt="FaithStream" className="h-12 w-auto object-contain" />
+            <img src={FaithStreamLogo} alt="FaithStream Studio" className="h-12 w-auto object-contain" />
             <p className="mt-1 text-xs text-warm-white/50">Church media, made simple</p>
           </div>
           <div className="mb-7">
             <p className="text-xs font-semibold uppercase tracking-[.18em] text-brand">{isRegister ? 'Get started' : isForgot ? 'Account recovery' : 'Welcome back'}</p>
             <h2 className="mt-2 text-3xl font-bold">{isRegister ? 'Create your account' : isForgot ? 'Forgot password?' : 'Sign in'}</h2>
-            <p className="mt-2 text-sm text-warm-white/55">{isRegister ? 'Create an account with your Gmail address.' : isForgot ? 'Enter your Gmail address and we’ll email you a password reset link.' : 'Sign in to your FaithStream account.'}</p>
+            <p className="mt-2 text-sm text-warm-white/55">{isRegister ? 'Create an account with your Gmail address.' : isForgot ? 'Enter your Gmail address and we’ll email you a password reset link.' : 'Sign in to your FaithStream Studio account.'}</p>
           </div>
 
           <form onSubmit={(event) => { void submit(event); }} className="space-y-4">
@@ -559,10 +559,10 @@ export default function AuthGate({ children }: { children: ReactNode }) {
             <button disabled={busy} type="submit" className="flex w-full items-center justify-center gap-2 rounded-xl bg-brand px-4 py-3 text-sm font-bold text-navy transition hover:brightness-110 disabled:cursor-wait disabled:opacity-60">{busy ? 'Please wait…' : isRegister ? 'Create account' : isForgot ? 'Send reset link' : 'Sign in'} {!busy && <ArrowRight size={16} />}</button>
           </form>
 
-          <p className="mt-6 text-center text-sm text-warm-white/55">{isForgot ? 'Remember your password?' : isRegister ? 'Already have an account?' : 'New to FaithStream?'}{' '}
+          <p className="mt-6 text-center text-sm text-warm-white/55">{isForgot ? 'Remember your password?' : isRegister ? 'Already have an account?' : 'New to FaithStream Studio?'}{' '}
             <button type="button" onClick={() => switchAuthMode(isRegister || isForgot ? 'login' : 'register')} className="font-semibold text-brand hover:underline">{isRegister || isForgot ? 'Sign in' : 'Create account'}</button>
           </p>
-          <p className="mt-7 text-center text-[11px] leading-relaxed text-warm-white/35">Accounts are stored securely on the FaithStream server. Gmail addresses only.</p>
+          <p className="mt-7 text-center text-[11px] leading-relaxed text-warm-white/35">Accounts are stored securely on the FaithStream Studio server. Gmail addresses only.</p>
         </section>
       </div>
     </div>

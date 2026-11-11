@@ -19,7 +19,7 @@ const KEYS = {
 
 type ThemeName = 'midnight' | 'light' | 'ocean' | 'forest' | 'plum';
 const themes: { id: ThemeName; name: string; description: string; colors: [string, string, string] }[] = [
-  { id: 'midnight', name: 'Midnight', description: 'FaithStream’s dark look', colors: ['#101923', '#192431', '#CB874C'] },
+  { id: 'midnight', name: 'Midnight', description: 'FaithStream Studio’s dark look', colors: ['#101923', '#192431', '#CB874C'] },
   { id: 'light', name: 'Light', description: 'Bright surfaces and dark text', colors: ['#F4F6F9', '#FFFFFF', '#A95119'] },
   { id: 'ocean', name: 'Ocean', description: 'Deep blue with aqua accents', colors: ['#091B24', '#163440', '#54C6D3'] },
   { id: 'forest', name: 'Forest', description: 'Deep green with soft green accents', colors: ['#111D16', '#24382A', '#9BCB7A'] },
@@ -299,7 +299,7 @@ export default function Settings() {
         </header>
 
         <div className="grid gap-4">
-          <SettingsCard icon={CircleUserRound} title="Your profile" description="Your name and role are saved to your FaithStream account. Your sign-in email is fixed.">
+          <SettingsCard icon={CircleUserRound} title="Your profile" description="Your name and role are saved to your FaithStream Studio account. Your sign-in email is fixed.">
             <form onSubmit={saveProfile}>
               <div className="flex flex-wrap items-center gap-3 py-4">
                 <span className="relative flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/20 text-sm font-bold text-brand">
@@ -351,7 +351,7 @@ export default function Settings() {
                 <span className="mt-0.5 text-amber-300"><AlertTriangle size={17} /></span>
                 <div className="min-w-0">
                   {deletionStatus === 'pending' ? <p className="text-sm font-semibold text-warm-white">Request waiting for admin review</p> : deletionStatus === 'rejected' ? <p className="text-sm font-semibold text-warm-white">Your last request was not approved</p> : <p className="text-sm font-semibold text-warm-white">Account deletion requires admin approval</p>}
-                  <p className="mt-1 text-xs leading-relaxed text-warm-white/50">If approved, your FaithStream account, profile photo, and cloud-synced presentations will be permanently deleted. Local files on this computer are not removed.</p>
+                  <p className="mt-1 text-xs leading-relaxed text-warm-white/50">If approved, your FaithStream Studio account, profile photo, and cloud-synced presentations will be permanently deleted. Local files on this computer are not removed.</p>
                   {deletionMessage && <p role="status" className="mt-2 text-xs text-warm-white/65">{deletionMessage}</p>}
                 </div>
               </div>
@@ -359,7 +359,7 @@ export default function Settings() {
             </div>
           </SettingsCard>
 
-          <SettingsCard icon={Palette} title="App colors" description="Pick a look for FaithStream. Your choice applies throughout the app and is remembered on this device.">
+          <SettingsCard icon={Palette} title="App colors" description="Pick a look for FaithStream Studio. Your choice applies throughout the app and is remembered on this device.">
             <div className="grid gap-3 pt-4 sm:grid-cols-2 lg:grid-cols-3">
               {themes.map((option) => {
                 const selected = theme === option.id;
@@ -446,7 +446,7 @@ export default function Settings() {
           <div><h2 id="account-deletion-title" className="text-base font-semibold">Request account deletion</h2><p className="mt-1 text-xs leading-relaxed text-white/55">This request will be sent to an administrator. Your account stays active until an administrator approves it.</p></div>
         </div>
         <div className="mt-4 rounded-xl border border-red-300/15 bg-red-400/5 p-3 text-xs leading-relaxed text-white/70">
-          If approved, your FaithStream account and profile photo will be deleted, along with your cloud-synced presentations. This cannot be undone. Files stored locally on this computer will remain here.
+          If approved, your FaithStream Studio account and profile photo will be deleted, along with your cloud-synced presentations. This cannot be undone. Files stored locally on this computer will remain here.
         </div>
         <form onSubmit={(event) => void submitDeletionRequest(event)} className="mt-4">
           <label className="text-xs font-medium text-white/70">Enter your password to confirm

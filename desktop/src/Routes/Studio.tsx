@@ -30,7 +30,9 @@ import {
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import type { StreamStatus } from '../shared/streamContracts';
 import ConfirmationModal from '../components/modal/ConfirmationModal';
+import AudioMixerSettingsModal from '../components/modal/AudioMixerSettingsModal';
 import ScripturePickerModal, { preloadBible, type SelectedScriptureVerse } from '../components/modal/ScripturePickerModal';
 import CountdownDisplay, { paintCountdown, type CountdownSettings } from '../components/CountdownDisplay';
 import StudioSongsPanel from '../components/StudioSongsPanel';
@@ -157,8 +159,8 @@ type SavedPresentationSlide = {
 type SavedPresentation = { id: string; name: string; slides: SavedPresentationSlide[]; locked?: boolean };
 type StudioMedia = { id: string; type: 'image' | 'video'; blob: Blob; originalBlob?: Blob; optimized?: boolean };
 type StudioMediaUrlMap = Record<string, { type: 'image' | 'video'; url: string; sizeBytes?: number; originalBytes?: number; optimized?: boolean }>;
-type StudioMusicAsset = { id: string; name: string; blob: Blob; createdAt: number };
-type StudioMusicAssetWithUrl = StudioMusicAsset & { url: string };
+type StudioMusicAsset = { id: string; name: string; path: string; createdAt: number };
+type StudioMusicAssetWithUrl = StudioMusicAsset & { url: string; available?: boolean };
 const STUDIO_SCENES_KEY = 'faithstream.studio-scenes';
 const STUDIO_SLIDESHOW_SCENES_KEY = 'faithstream.studio-slideshow-scenes';
 const STUDIO_OUTPUT_REF_KEY = 'faithstream.studio-output-ref';
@@ -170,12 +172,13 @@ const STUDIO_RESOLUTION_KEY = 'faithstream.studio-resolution';
 const STUDIO_FRAME_RATE_KEY = 'faithstream.studio-frame-rate';
 const STUDIO_BITRATE_KEY = 'faithstream.studio-bitrate';
 const STUDIO_SESSION_KEY = 'faithstream.studio-session';
-const STUDIO_MUSIC_DB = 'faithstream.studio-music';
-const STUDIO_MUSIC_STORE = 'tracks';
+const STUDIO_MUSIC_FILES_KEY = 'faithstream.studio-music-files';
 
 const markStartupResourceReady = (resource: 'studio-media' | 'studio-music') => {
   window.dispatchEvent(new CustomEvent('faithstream:startup-resource-ready', { detail: resource }));
 };
+
+const channelGain = (db: number) => db <= -60 ? 0 : 10 ** (db / 20);
 
 const syncPresentationSlides = (scene: Scene, presentation: SavedPresentation): Scene => {
   const hasSourceIds = scene.slides.some((slide) => slide.presentationSlideId !== undefined);
@@ -297,45 +300,15 @@ const saveStudioMedia = async (asset: StudioMedia) => {
   db.close();
 };
 
-const openStudioMusicDb = () => new Promise<IDBDatabase>((resolve, reject) => {
-  const request = indexedDB.open(getAccountDatabaseName(STUDIO_MUSIC_DB), 1);
-  request.onupgradeneeded = () => request.result.createObjectStore(STUDIO_MUSIC_STORE, { keyPath: 'id' });
-  request.onsuccess = () => resolve(request.result);
-  request.onerror = () => reject(request.error);
-});
-
-const readStudioMusic = async (): Promise<StudioMusicAsset[]> => {
-  const db = await openStudioMusicDb();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STUDIO_MUSIC_STORE, 'readonly');
-    const request = transaction.objectStore(STUDIO_MUSIC_STORE).getAll();
-    request.onsuccess = () => resolve((request.result as StudioMusicAsset[]).sort((a, b) => b.createdAt - a.createdAt));
-    request.onerror = () => reject(request.error);
-    transaction.oncomplete = () => db.close();
-    transaction.onerror = () => db.close();
-  });
+const readSavedStudioMusicFiles = (): StudioMusicAsset[] => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(getAccountStorageKey(STUDIO_MUSIC_FILES_KEY)) ?? '[]') as StudioMusicAsset[];
+    return Array.isArray(saved) ? saved.filter((asset) => typeof asset?.id === 'string' && typeof asset?.name === 'string' && typeof asset?.path === 'string' && Number.isFinite(asset?.createdAt)) : [];
+  } catch { return []; }
 };
 
-const saveStudioMusic = async (asset: StudioMusicAsset) => {
-  const db = await openStudioMusicDb();
-  await new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction(STUDIO_MUSIC_STORE, 'readwrite');
-    transaction.objectStore(STUDIO_MUSIC_STORE).put(asset);
-    transaction.oncomplete = () => { db.close(); resolve(); };
-    transaction.onerror = () => { db.close(); reject(transaction.error); };
-    transaction.onabort = () => { db.close(); reject(transaction.error); };
-  });
-};
-
-const deleteStudioMusicAsset = async (id: string) => {
-  const db = await openStudioMusicDb();
-  await new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction(STUDIO_MUSIC_STORE, 'readwrite');
-    transaction.objectStore(STUDIO_MUSIC_STORE).delete(id);
-    transaction.oncomplete = () => { db.close(); resolve(); };
-    transaction.onerror = () => { db.close(); reject(transaction.error); };
-    transaction.onabort = () => { db.close(); reject(transaction.error); };
-  });
+const saveStudioMusicFiles = (assets: StudioMusicAsset[]) => {
+  localStorage.setItem(getAccountStorageKey(STUDIO_MUSIC_FILES_KEY), JSON.stringify(assets));
 };
 
 type Ref = { sceneId: number; slideIdx: number };
@@ -345,7 +318,8 @@ const same = (a: Ref, b: Ref) => a.sceneId === b.sceneId && a.slideIdx === b.sli
 type SourceKind = 'camera' | 'mobile-camera' | 'screen' | 'media' | 'presentation' | 'text' | 'microphone' | 'desktop-audio' | 'music';
 type CameraOrientationMode = 'auto' | 'portrait-up' | 'landscape-left' | 'portrait-down' | 'landscape-right' | 'portrait' | 'upside-down';
 type CameraRotation = 'auto' | '0' | '90' | '180' | '270';
-type MobileCamPairing = { port: number; code: string; addresses: string[]; expiresAt: number; connected: boolean; reconnecting?: boolean; remainingSeconds?: number; refreshError?: string };
+type MobileCamSlot = 1 | 2 | 3;
+type MobileCamPairing = { sourceId: number; slot: MobileCamSlot; port: number; code: string; addresses: string[]; expiresAt: number; connected: boolean; reconnecting?: boolean; remainingSeconds?: number; refreshError?: string };
 type Source = {
   id: number;
   sceneId: number;
@@ -354,6 +328,7 @@ type Source = {
   kind: SourceKind;
   visible: boolean;
   stream?: MediaStream;
+  mobileCamSlot?: MobileCamSlot;
   phoneOrientation?: 'portrait' | 'landscape';
   cameraOrientation?: CameraOrientationMode;
   cameraRotation?: Exclude<CameraRotation, 'auto'>;
@@ -396,6 +371,7 @@ const drawVideoCover = (context: CanvasRenderingContext2D, video: HTMLVideoEleme
   context.restore();
 };
 const STUDIO_SOURCES_KEY = 'faithstream.studio-sources';
+const STUDIO_AUDIO_CHANNELS_KEY = 'faithstream.studio-audio-channels';
 const SOURCE_OPTIONS: { kind: SourceKind; name: string; icon: LucideIcon; group: string }[] = [
   { kind: 'camera', name: 'Camera', icon: Camera, group: 'Video' },
   { kind: 'mobile-camera', name: 'FaithStream Cam', icon: Camera, group: 'Video' },
@@ -413,8 +389,13 @@ const loadStudioSources = (): Source[] => {
     const saved = JSON.parse(localStorage.getItem(getAccountStorageKey(STUDIO_SOURCES_KEY)) ?? '[]') as Source[];
     if (!Array.isArray(saved)) return [];
     const validSources = saved.filter((source) => Number.isFinite(source?.id) && Number.isFinite(source?.sceneId) && !!source.name && SOURCE_OPTIONS.some((option) => option.kind === source.kind));
+    const mobileSources = validSources.filter((source) => source.kind === 'mobile-camera');
+    const mobileSlots = new Map<number, MobileCamSlot>(mobileSources.map((source, index) => [source.id, (source.mobileCamSlot ?? Math.min(index + 1, 3)) as MobileCamSlot] as const));
     return validSources.map((source) => {
-      if (source.kind === 'mobile-camera') return { ...source, shared: true, stream: undefined, connectionStatus: 'disconnected' as const };
+      if (source.kind === 'mobile-camera') {
+        const mobileCamSlot = mobileSlots.get(source.id) ?? 1;
+        return { ...source, name: `FaithStream Cam ${mobileCamSlot}`, mobileCamSlot, shared: true, stream: undefined, connectionStatus: 'disconnected' as const };
+      }
       if (source.kind !== 'camera' || (source.layout && source.layout.width <= 25)) return { ...source, shared: true, stream: undefined };
       const cameraIndex = validSources.filter((item) => item.sceneId === source.sceneId && item.kind === 'camera').findIndex((item) => item.id === source.id);
       return { ...source, shared: true, stream: undefined, layout: { x: 100 - (cameraIndex + 1) * 24, y: 72, width: 22, height: 22 } };
@@ -422,7 +403,7 @@ const loadStudioSources = (): Source[] => {
   } catch { return []; }
 };
 
-type Channel = { id: number; sceneId: number; name: string; icon: LucideIcon; db: number; muted: boolean };
+type Channel = { id: number; sceneId: number; name: string; icon: LucideIcon; db: number; muted: boolean; pan: number; compressor: boolean; compressorThreshold: number };
 
 /* ---------- Small building blocks ---------- */
 
@@ -769,7 +750,7 @@ function AudioChannelMeter({
   useEffect(() => {
     const gain = gainRef.current;
     if (!gain) return;
-    const target = muted || !enabled ? 0 : 10 ** (db / 20);
+    const target = muted || !enabled ? 0 : channelGain(db);
     gain.gain.setTargetAtTime(target, gain.context.currentTime, 0.02);
   }, [db, muted, enabled, stream]);
 
@@ -1257,17 +1238,29 @@ export default function Studio() {
   const musicPreviewElement = useRef<HTMLAudioElement | null>(null);
   const sourceStreams = useRef(new Map<number, MediaStream>());
   const sourceCleanups = useRef(new Map<number, () => void>());
-  const mobileCamPairingDetails = useRef<{ port: number; code: string; addresses: string[]; expiresAt: number } | null>(null);
+  const mobileCamPairingDetails = useRef(new Map<number, Omit<MobileCamPairing, 'connected' | 'reconnecting' | 'remainingSeconds' | 'refreshError'>>());
+  const mobileCamPendingSlots = useRef(new Set<MobileCamSlot>());
   const mobileCamCodeRenewalInFlight = useRef(false);
   const lastMobileCamCodeRenewalAttempt = useRef(0);
-  const mobileCamConnectedState = useRef<boolean | null>(null);
+  const mobileCamConnectedState = useRef(new Map<number, boolean>());
   const sourceObjectUrls = useRef<string[]>([]);
   const sourceMenuRef = useRef<HTMLDivElement>(null);
   const sourceTriggerRef = useRef<HTMLButtonElement>(null);
-  const [channels, setChannels] = useState<Channel[]>(() => sources
-    .filter((source) => source.kind === 'microphone' || source.kind === 'desktop-audio' || source.kind === 'music')
-    .map((source) => ({ id: source.id, sceneId: source.sceneId, name: source.name, icon: source.kind === 'microphone' ? Mic : source.kind === 'music' ? Music2 : Volume2, db: -6, muted: false })));
+  const [channels, setChannels] = useState<Channel[]>(() => {
+    let saved: { id: number; db?: number; muted?: boolean; pan?: number; compressor?: boolean; compressorThreshold?: number }[] = [];
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem(getAccountStorageKey(STUDIO_AUDIO_CHANNELS_KEY)) ?? '[]');
+      if (Array.isArray(parsed)) saved = parsed;
+    } catch { /* Use safe mixer defaults if saved settings are invalid. */ }
+    return sources
+      .filter((source) => source.kind === 'microphone' || source.kind === 'desktop-audio' || source.kind === 'music')
+      .map((source) => {
+        const prefs = saved.find((channel) => channel.id === source.id);
+        return { id: source.id, sceneId: source.sceneId, name: source.name, icon: source.kind === 'microphone' ? Mic : source.kind === 'music' ? Music2 : Volume2, db: prefs?.db ?? -6, muted: prefs?.muted ?? false, pan: prefs?.pan ?? 0, compressor: prefs?.compressor ?? false, compressorThreshold: prefs?.compressorThreshold ?? -18 };
+      });
+  });
   const [audioLevels, setAudioLevels] = useState<Record<number, number>>({});
+  const [audioSettingsChannelId, setAudioSettingsChannelId] = useState<number | null>(null);
 
   const [live, setLive] = useState(false);
   const [startingStream, setStartingStream] = useState(false);
@@ -1280,7 +1273,7 @@ export default function Studio() {
   const [streamKey, setStreamKey] = useState('');
   const [streamSettingsLoaded, setStreamSettingsLoaded] = useState(false);
   const [showStreamKey, setShowStreamKey] = useState(false);
-  const [streamStatus, setStreamStatus] = useState<'idle' | 'connecting' | 'live' | 'stopping' | 'stopped' | 'error'>('idle');
+  const [streamStatus, setStreamStatus] = useState<StreamStatus | 'idle'>('idle');
   const studioSessionStartedAt = useRef<number | null>(null);
   const [streamConnectError, setStreamConnectError] = useState('');
   const streamRenderErrorNotified = useRef(false);
@@ -1291,11 +1284,15 @@ export default function Studio() {
   const liveAudioDestination = useRef<GainNode | null>(null);
   const liveAudioInputs = useRef(new Map<number, MediaStreamAudioSourceNode>());
   const liveAudioGains = useRef(new Map<number, GainNode>());
+  const liveAudioPanners = useRef(new Map<number, StereoPannerNode>());
+  const liveAudioCompressors = useRef(new Map<number, DynamicsCompressorNode>());
   const recordingAudioContext = useRef<AudioContext | null>(null);
   const recordingAudioRecorder = useRef<MediaRecorder | null>(null);
   const recordingAudioDestination = useRef<MediaStreamAudioDestinationNode | null>(null);
   const recordingAudioInputs = useRef(new Map<number, MediaStreamAudioSourceNode>());
   const recordingAudioGains = useRef(new Map<number, GainNode>());
+  const recordingAudioPanners = useRef(new Map<number, StereoPannerNode>());
+  const recordingAudioCompressors = useRef(new Map<number, DynamicsCompressorNode>());
   const [previewMode, setPreviewMode] = useState(() => localStorage.getItem(STUDIO_PREVIEW_MODE_KEY) !== 'false');
   const [studioOutputTab, setStudioOutputTab] = useState<'slideshow' | 'stream'>('stream');
   const [offlineSlide, setOfflineSlide] = useState<Ref>(() => ({ sceneId: slideshowScenes[0]?.id ?? 0, slideIdx: 0 }));
@@ -1321,13 +1318,13 @@ export default function Studio() {
       mobileCamCodeRenewalInFlight.current = true;
       lastMobileCamCodeRenewalAttempt.current = Date.now();
       try {
-        const result = await window.faithstreamWindow?.renewMobileCamPairingCode();
+        const result = await window.faithstreamWindow?.renewMobileCamPairingCode(mobileCamPairing.sourceId);
         if (!active || !result?.ok || !result.code || !result.expiresAt) {
           if (active) setMobileCamPairing((current) => current ? { ...current, refreshError: result?.message || 'Could not refresh the pairing code. Retrying…' } : null);
           return;
         }
-        const details = mobileCamPairingDetails.current;
-        if (details) mobileCamPairingDetails.current = { ...details, code: result.code, expiresAt: result.expiresAt };
+        const details = mobileCamPairingDetails.current.get(mobileCamPairing.sourceId);
+        if (details) mobileCamPairingDetails.current.set(mobileCamPairing.sourceId, { ...details, code: result.code, expiresAt: result.expiresAt });
         setMobileCamPairing((current) => current ? { ...current, code: result.code!, expiresAt: result.expiresAt!, remainingSeconds: 180, refreshError: undefined } : null);
       } catch {
         if (active) setMobileCamPairing((current) => current ? { ...current, refreshError: 'Could not refresh the pairing code. Retrying…' } : null);
@@ -1343,7 +1340,7 @@ export default function Studio() {
     tick();
     const interval = window.setInterval(tick, 1000);
     return () => { active = false; window.clearInterval(interval); };
-  }, [mobileCamPairing?.expiresAt, mobileCamPairing?.connected]);
+  }, [mobileCamPairing?.sourceId, mobileCamPairing?.expiresAt, mobileCamPairing?.connected]);
 
   useEffect(() => {
     let active = true;
@@ -1552,7 +1549,7 @@ export default function Studio() {
 
   useEffect(() => {
     return window.faithstreamWindow?.onStreamStatus((event) => {
-      const status = event.status as typeof streamStatus;
+      const status = event.status;
       setStreamStatus(status);
       if (status === 'error' || status === 'stopped') {
         setLive(false);
@@ -1564,6 +1561,8 @@ export default function Studio() {
         liveAudioInputs.current.forEach((input) => input.disconnect());
         liveAudioInputs.current.clear();
         liveAudioGains.current.clear();
+        liveAudioPanners.current.clear();
+        liveAudioCompressors.current.clear();
       }
     });
   }, []);
@@ -1591,8 +1590,12 @@ export default function Studio() {
       if (activeIds.has(id)) return;
       input.disconnect();
       liveAudioGains.current.get(id)?.disconnect();
+      liveAudioPanners.current.get(id)?.disconnect();
+      liveAudioCompressors.current.get(id)?.disconnect();
       liveAudioInputs.current.delete(id);
       liveAudioGains.current.delete(id);
+      liveAudioPanners.current.delete(id);
+      liveAudioCompressors.current.delete(id);
     });
     mixerChannels.forEach((channel) => {
       const source = sources.find((item) => item.id === channel.id);
@@ -1600,18 +1603,55 @@ export default function Studio() {
         const tracks = source?.stream?.getAudioTracks().filter((track) => track.readyState === 'live') ?? [];
         if (tracks.length) {
           const input = context.createMediaStreamSource(new MediaStream(tracks));
+          const compressor = context.createDynamicsCompressor();
           const newGain = context.createGain();
-          input.connect(newGain).connect(destination);
+          const panner = context.createStereoPanner();
+          compressor.threshold.value = channel.compressor ? channel.compressorThreshold : 0;
+          compressor.ratio.value = channel.compressor ? 3 : 1;
+          compressor.knee.value = channel.compressor ? 12 : 0;
+          panner.pan.value = channel.pan;
+          input.connect(compressor).connect(newGain).connect(panner).connect(destination);
           liveAudioInputs.current.set(channel.id, input);
           liveAudioGains.current.set(channel.id, newGain);
+          liveAudioPanners.current.set(channel.id, panner);
+          liveAudioCompressors.current.set(channel.id, compressor);
         }
       }
       const gain = liveAudioGains.current.get(channel.id);
       if (!gain) return;
-      const value = source?.visible && !channel.muted ? 10 ** (channel.db / 20) : 0;
+      const value = source?.visible && !channel.muted ? channelGain(channel.db) : 0;
       gain.gain.setTargetAtTime(value, context.currentTime, 0.025);
+      const panner = liveAudioPanners.current.get(channel.id);
+      if (panner) panner.pan.setTargetAtTime(channel.pan, context.currentTime, 0.025);
+      const compressor = liveAudioCompressors.current.get(channel.id);
+      if (compressor) {
+        compressor.threshold.setTargetAtTime(channel.compressor ? channel.compressorThreshold : 0, context.currentTime, 0.025);
+        compressor.ratio.setTargetAtTime(channel.compressor ? 3 : 1, context.currentTime, 0.025);
+        compressor.knee.setTargetAtTime(channel.compressor ? 12 : 0, context.currentTime, 0.025);
+      }
     });
   }, [channels, sources, onAir.sceneId]);
+
+  // captureStream() intentionally ignores an audio element's volume and muted
+  // properties, so apply the same fader to its local speaker output separately.
+  useEffect(() => {
+    for (const channel of channels) {
+      const source = sources.find((item) => item.id === channel.id);
+      if (source?.kind !== 'music') continue;
+      const audio = musicElements.current.get(channel.id);
+      if (audio) {
+        audio.volume = Math.max(0, Math.min(1, channelGain(channel.db)));
+        audio.muted = channel.muted || !source.visible;
+      }
+    }
+    const preview = musicPreviewElement.current;
+    if (preview && previewingMusicId) {
+      const source = sources.find((item) => item.kind === 'music' && item.mediaAssetId === previewingMusicId);
+      const channel = source ? channels.find((item) => item.id === source.id) : undefined;
+      preview.volume = channel ? Math.max(0, Math.min(1, channelGain(channel.db))) : 1;
+      preview.muted = !!channel && (channel.muted || !source?.visible);
+    }
+  }, [channels, sources, previewingMusicId]);
 
   useEffect(() => {
     const context = recordingAudioContext.current;
@@ -1622,8 +1662,12 @@ export default function Studio() {
       if (activeIds.has(id)) return;
       input.disconnect();
       recordingAudioGains.current.get(id)?.disconnect();
+      recordingAudioPanners.current.get(id)?.disconnect();
+      recordingAudioCompressors.current.get(id)?.disconnect();
       recordingAudioInputs.current.delete(id);
       recordingAudioGains.current.delete(id);
+      recordingAudioPanners.current.delete(id);
+      recordingAudioCompressors.current.delete(id);
     });
     mixerChannels.forEach((channel) => {
       const source = sources.find((item) => item.id === channel.id);
@@ -1631,21 +1675,41 @@ export default function Studio() {
         const tracks = source?.stream?.getAudioTracks().filter((track) => track.readyState === 'live') ?? [];
         if (tracks.length) {
           const input = context.createMediaStreamSource(new MediaStream(tracks));
+          const compressor = context.createDynamicsCompressor();
           const gain = context.createGain();
-          input.connect(gain).connect(destination);
+          const panner = context.createStereoPanner();
+          compressor.threshold.value = channel.compressor ? channel.compressorThreshold : 0;
+          compressor.ratio.value = channel.compressor ? 3 : 1;
+          compressor.knee.value = channel.compressor ? 12 : 0;
+          panner.pan.value = channel.pan;
+          input.connect(compressor).connect(gain).connect(panner).connect(destination);
           recordingAudioInputs.current.set(channel.id, input);
           recordingAudioGains.current.set(channel.id, gain);
+          recordingAudioPanners.current.set(channel.id, panner);
+          recordingAudioCompressors.current.set(channel.id, compressor);
         }
       }
       const gain = recordingAudioGains.current.get(channel.id);
       if (!gain) return;
-      gain.gain.setTargetAtTime(source?.visible && !channel.muted ? 10 ** (channel.db / 20) : 0, context.currentTime, 0.025);
+      gain.gain.setTargetAtTime(source?.visible && !channel.muted ? channelGain(channel.db) : 0, context.currentTime, 0.025);
+      const panner = recordingAudioPanners.current.get(channel.id);
+      if (panner) panner.pan.setTargetAtTime(channel.pan, context.currentTime, 0.025);
+      const compressor = recordingAudioCompressors.current.get(channel.id);
+      if (compressor) {
+        compressor.threshold.setTargetAtTime(channel.compressor ? channel.compressorThreshold : 0, context.currentTime, 0.025);
+        compressor.ratio.setTargetAtTime(channel.compressor ? 3 : 1, context.currentTime, 0.025);
+        compressor.knee.setTargetAtTime(channel.compressor ? 12 : 0, context.currentTime, 0.025);
+      }
     });
   }, [channels, sources, onAir.sceneId]);
 
   useEffect(() => {
     try { localStorage.setItem(getAccountStorageKey(STUDIO_SOURCES_KEY), JSON.stringify(sources.map(({ stream: _stream, ...source }) => source))); } catch { /* Keep the current source list usable if storage is unavailable. */ }
   }, [sources]);
+
+  useEffect(() => {
+    try { localStorage.setItem(getAccountStorageKey(STUDIO_AUDIO_CHANNELS_KEY), JSON.stringify(channels.map(({ id, db, muted, pan, compressor, compressorThreshold }) => ({ id, db, muted, pan, compressor, compressorThreshold })))); } catch { /* Keep mixer changes active for this session if storage is unavailable. */ }
+  }, [channels]);
 
   useEffect(() => () => {
     sourceStreams.current.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
@@ -1707,22 +1771,18 @@ export default function Studio() {
 
   useEffect(() => {
     let cancelled = false;
-    let urls: string[] = [];
-    void readStudioMusic().then((assets) => {
-      const loaded = assets.map((asset) => {
-        const url = URL.createObjectURL(asset.blob);
-        urls.push(url);
-        return { ...asset, url };
-      });
-      if (cancelled) { urls.forEach(URL.revokeObjectURL); return; }
-      sourceObjectUrls.current.push(...urls);
-      setMusicAssets(loaded);
+    const bridge = window.faithstreamWindow;
+    if (!bridge) { markStartupResourceReady('studio-music'); return () => { cancelled = true; }; }
+    void bridge.resolveStudioMusicFiles(readSavedStudioMusicFiles()).then((assets) => {
+      if (cancelled) return;
+      saveStudioMusicFiles(assets.map(({ url: _url, ...asset }) => asset));
+      setMusicAssets(assets);
       markStartupResourceReady('studio-music');
     }).catch(() => {
       if (!cancelled) markStartupResourceReady('studio-music');
       if (!cancelled) setSourceError('Could not load saved music tracks.');
     });
-    return () => { cancelled = true; urls.forEach(URL.revokeObjectURL); };
+    return () => { cancelled = true; };
   }, []);
 
   const refreshStudioMediaUrls = async () => {
@@ -2032,7 +2092,10 @@ export default function Studio() {
   const selectedProgramOverlay = previewSetupOverlays.find((source) => source.id === selectedProgramSource);
   const selectedProgramLayout = selectedProgramOverlay ? getPreviewSetupLayout(selectedProgramOverlay) : null;
   const cameraLimitReached = sceneSources.filter((source) => source.kind === 'camera').length >= 3;
+  const mobileCamLimitReached = sources.filter((source) => source.kind === 'mobile-camera').length + mobileCamPendingSlots.current.size >= 3;
   const mixerChannels = channels.filter((channel) => onAirSceneSources.some((source) => source.id === channel.id));
+  const audioSettingsChannel = channels.find((channel) => channel.id === audioSettingsChannelId);
+  const audioSettingsSource = audioSettingsChannel ? sources.find((source) => source.id === audioSettingsChannel.id) : undefined;
   const connectedMixerChannels = mixerChannels.filter((channel) => sources.find((source) => source.id === channel.id)?.stream?.getAudioTracks().some((track) => track.readyState === 'live'));
   const audibleMixerChannels = connectedMixerChannels.filter((channel) => !channel.muted && sources.find((source) => source.id === channel.id)?.visible);
   const streamAudioPeak = Math.max(0, ...audibleMixerChannels.map((channel) => audioLevels[channel.id] ?? 0));
@@ -2088,7 +2151,7 @@ export default function Studio() {
     setPendingScriptureDesign({ reference, verses: selectedVerses?.length ? selectedVerses : [{ reference, text }] });
   };
 
-  const addScriptureScene = async (reference: string, verses: SelectedScriptureVerse[], style: SongStyle) => {
+  const addScriptureScene = async (reference: string, verses: SelectedScriptureVerse[], style: SongStyle, presentNow = false) => {
     const slideshow = studioOutputTab === 'slideshow';
     const list = slideshow ? slideshowScenes : scenes;
     const id = Math.max(0, ...list.map((scene) => scene.id), onAir.sceneId, preview.sceneId, selected.sceneId, offlineSlide.sceneId) + 1;
@@ -2119,9 +2182,26 @@ export default function Studio() {
     });
     const bg = slides[0]?.bg ?? style.background;
     const scene: Scene = { id, name: reference, desc: `Scripture · ${slides.length} verses`, bg, slides };
-    if (slideshow) setSlideshowScenes((current) => [...current, scene]);
-    else setScenes((current) => [...current, scene]);
+    if (slideshow) {
+      setSlideshowScenes((current) => [...current, scene]);
+      if (presentNow) setOfflineSlide({ sceneId: id, slideIdx: 0 });
+    } else {
+      setScenes((current) => [...current, scene]);
+      if (presentNow) {
+        const target = { sceneId: id, slideIdx: 0 };
+        setSceneId(id);
+        setSelected(target);
+        setPreview(target);
+        setOnAir(target);
+      }
+    }
     setPendingScriptureDesign(null);
+  };
+
+  const presentScriptureNow = (reference: string, text: string, selectedVerses?: SelectedScriptureVerse[]) => {
+    setScripturePickerOpen(false);
+    const verses = selectedVerses?.length ? selectedVerses : [{ reference, text }];
+    void addScriptureScene(reference, verses, { ...DEFAULT_SONG_STYLE, titleSlide: false }, true);
   };
 
 
@@ -2317,6 +2397,9 @@ export default function Studio() {
         icon: kind === 'microphone' ? Mic : kind === 'music' ? Music2 : Volume2,
         db: -6,
         muted: false,
+        pan: 0,
+        compressor: false,
+        compressorThreshold: -18,
       }]);
     }
     return newSource;
@@ -2421,9 +2504,10 @@ export default function Studio() {
     if (sourceId !== undefined) {
       setSources((list) => list.map((source) => source.id === sourceId ? { ...source, connectionStatus: connected ? 'connected' : 'disconnected' } : source));
     }
-    const previous = mobileCamConnectedState.current;
+    const statusKey = sourceId ?? 0;
+    const previous = mobileCamConnectedState.current.get(statusKey);
     if (previous === connected) return;
-    mobileCamConnectedState.current = connected;
+    mobileCamConnectedState.current.set(statusKey, connected);
     if (!connected && previous !== true) return;
     publishStudioNotification(
       connected ? 'FaithStream Cam connected' : 'FaithStream Cam disconnected',
@@ -2437,17 +2521,20 @@ export default function Studio() {
     sourceId?: number,
     preferredDeviceId?: string,
     onPhoneOrientation?: (orientation: 'portrait' | 'landscape') => void,
+    mobileCamSlot?: MobileCamSlot,
   ): Promise<{ stream: MediaStream; deviceId?: string; deviceName?: string; cleanup?: () => void; phoneOrientation?: 'portrait' | 'landscape' } | undefined> => {
     if (!navigator.mediaDevices) throw new Error('Media capture is unavailable in this window.');
     if (kind === 'mobile-camera') {
-      const pairing = await window.faithstreamWindow?.startMobileCamPairing();
+      if (sourceId === undefined || mobileCamSlot === undefined) throw new Error('Could not identify this FaithStream Cam source.');
+      const pairing = await window.faithstreamWindow?.startMobileCamPairing(sourceId);
       if (!pairing?.ok || !pairing.port || !pairing.code || !pairing.expiresAt) throw new Error(pairing?.message || 'Could not start local camera pairing.');
       if (!pairing.addresses?.length) {
-        void window.faithstreamWindow?.stopMobileCamPairing();
+        void window.faithstreamWindow?.stopMobileCamPairing(sourceId);
         throw new Error('No local Wi-Fi address was found. Connect this computer to the same Wi-Fi as your phone and try again.');
       }
-      mobileCamPairingDetails.current = { port: pairing.port, code: pairing.code, addresses: pairing.addresses, expiresAt: pairing.expiresAt };
-      setMobileCamPairing({ ...mobileCamPairingDetails.current, connected: false, remainingSeconds: 180 });
+      const pairingDetails = { sourceId, slot: mobileCamSlot, port: pairing.port, code: pairing.code, addresses: pairing.addresses, expiresAt: pairing.expiresAt };
+      mobileCamPairingDetails.current.set(sourceId, pairingDetails);
+      setMobileCamPairing({ ...pairingDetails, connected: false, remainingSeconds: 180 });
       return await new Promise<{ stream: MediaStream; deviceName: string; cleanup: () => void; phoneOrientation?: 'portrait' | 'landscape' }>((resolve, reject) => {
         const socket = new WebSocket(`ws://127.0.0.1:${pairing.port}/?code=${pairing.code}&role=studio`);
         const peer = new RTCPeerConnection({ iceServers: [] });
@@ -2457,15 +2544,21 @@ export default function Studio() {
         let intentionallyClosed = false;
         let remoteStream: MediaStream | null = null;
         let phoneOrientation: 'portrait' | 'landscape' = 'portrait';
+        const discardPairing = () => {
+          mobileCamPairingDetails.current.delete(sourceId);
+          void window.faithstreamWindow?.stopMobileCamPairing(sourceId);
+          setMobileCamPairing((current) => current?.sourceId === sourceId ? null : current);
+        };
         const cleanup = () => {
           intentionallyClosed = true;
           window.clearTimeout(timeout); peer.close(); socket.close();
-          void window.faithstreamWindow?.stopMobileCamPairing();
+          void window.faithstreamWindow?.stopMobileCamPairing(sourceId);
         };
         const timeout = window.setTimeout(() => {
           if (finished) return;
           finished = true; peer.close(); socket.close();
-          reject(new Error('Phone camera did not connect. Check both devices are on the same Wi-Fi and the computer firewall allows FaithStream.'));
+          discardPairing();
+          reject(new Error('Phone camera did not connect. Check both devices are on the same Wi-Fi and the computer firewall allows FaithStream Studio.'));
         }, 120_000);
         peer.addTransceiver('video', { direction: 'recvonly' });
         peer.onicecandidate = (event) => { if (event.candidate && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ice', candidate: event.candidate.toJSON() })); };
@@ -2491,7 +2584,7 @@ export default function Studio() {
             finished = true; window.clearTimeout(timeout);
             notifyMobileCamStatus(true, sourceId);
             setMobileCamPairing(null);
-            resolve({ stream: remoteStream, deviceName: 'FaithStream Cam', cleanup, phoneOrientation });
+            resolve({ stream: remoteStream, deviceName: `FaithStream Cam ${mobileCamSlot}`, cleanup, phoneOrientation });
             return;
           }
           if (incoming === remoteStream) {
@@ -2516,11 +2609,13 @@ export default function Studio() {
         socket.onerror = () => {
           if (finished) return;
           finished = true; window.clearTimeout(timeout); peer.close();
-          reject(new Error('Could not open the local camera connection. Allow FaithStream through the computer firewall.'));
+          discardPairing();
+          reject(new Error('Could not open the local camera connection. Allow FaithStream Studio through the computer firewall.'));
         };
         socket.onclose = () => {
           if (!finished) {
             finished = true; window.clearTimeout(timeout); peer.close();
+            discardPairing();
             reject(new Error('Phone camera pairing was canceled or disconnected.'));
           } else {
             setMobileCamPairing((value) => value ? { ...value, connected: false } : value);
@@ -2605,14 +2700,26 @@ export default function Studio() {
       setSourceError('A scene can have up to 3 camera sources.');
       return;
     }
+    let mobileCamSlot: MobileCamSlot | undefined;
+    if (kind === 'mobile-camera') {
+      mobileCamSlot = ([1, 2, 3] as const).find((slot) =>
+        !sources.some((source) => source.kind === 'mobile-camera' && source.mobileCamSlot === slot) && !mobileCamPendingSlots.current.has(slot),
+      );
+      if (!mobileCamSlot) {
+        setSourceError('You can connect up to 3 FaithStream Cam phones. Remove a phone source to add another.');
+        return;
+      }
+      mobileCamPendingSlots.current.add(mobileCamSlot);
+    }
     try {
       const sourceId = Math.max(0, ...sources.map((source) => source.id)) + 1;
       const captured = await captureStream(kind, sourceId, undefined, (orientation) => {
         setSources((list) => list.map((item) => item.id === sourceId ? { ...item, phoneOrientation: orientation } : item));
-      });
+      }, mobileCamSlot);
       const stream = captured?.stream;
       const source = createSource(kind, {
         id: sourceId,
+        ...(mobileCamSlot ? { mobileCamSlot, name: `FaithStream Cam ${mobileCamSlot}` } : {}),
         ...(stream ? { stream } : {}),
         ...(captured?.deviceId ? { deviceId: captured.deviceId } : {}),
         ...(captured?.deviceName ? { name: captured.deviceName } : {}),
@@ -2644,6 +2751,8 @@ export default function Studio() {
       if (error instanceof DOMException && error.name === 'NotAllowedError') return;
       if (kind === 'mobile-camera') publishStudioNotification('FaithStream Cam pairing failed', message, 'error');
       else setSourceError(message);
+    } finally {
+      if (mobileCamSlot) mobileCamPendingSlots.current.delete(mobileCamSlot);
     }
   };
 
@@ -2669,6 +2778,7 @@ export default function Studio() {
   };
 
   const addMusicAssetAsSource = (asset: StudioMusicAssetWithUrl) => {
+    if (asset.available === false) return;
     const source = createSource('music', { name: asset.name, mediaAssetId: asset.id, loop: true });
     if (source) {
       setAddSourceOpen(false);
@@ -2680,13 +2790,13 @@ export default function Studio() {
     if (!file) return;
     setSourceError('');
     try {
-      const stored: StudioMusicAsset = { id: `music-${crypto.randomUUID()}`, name: file.name, blob: file, createdAt: Date.now() };
-      await saveStudioMusic(stored);
-      const asset = { ...stored, url: URL.createObjectURL(stored.blob) };
-      sourceObjectUrls.current.push(asset.url);
+      const result = await window.faithstreamWindow?.registerStudioMusicFile(file);
+      if (!result?.ok || !result.asset) throw new Error(result?.message ?? 'Could not access this audio file.');
+      const asset: StudioMusicAssetWithUrl = { ...result.asset, createdAt: Date.now() };
+      saveStudioMusicFiles([asset, ...readSavedStudioMusicFiles().filter((item) => item.id !== asset.id)]);
       setMusicAssets((current) => [asset, ...current]);
-    } catch {
-      setSourceError('Could not save this audio file. Please try another file.');
+    } catch (error) {
+      setSourceError(error instanceof Error ? error.message : 'Could not add this audio file. Check that it still exists.');
     }
   };
 
@@ -2699,6 +2809,11 @@ export default function Studio() {
     }
     musicPreviewElement.current?.pause();
     const audio = new Audio(asset.url);
+    audio.crossOrigin = 'anonymous';
+    const source = sources.find((item) => item.kind === 'music' && item.mediaAssetId === asset.id);
+    const channel = source ? channels.find((item) => item.id === source.id) : undefined;
+    audio.volume = channel ? Math.max(0, Math.min(1, channelGain(channel.db))) : 1;
+    audio.muted = !!channel && (channel.muted || !source?.visible);
     audio.onended = () => { setPreviewingMusicId(null); musicPreviewElement.current = null; };
     musicPreviewElement.current = audio;
     setPreviewingMusicId(asset.id);
@@ -2728,13 +2843,14 @@ export default function Studio() {
 
   const reconnectSource = async (source: Source) => {
     setSourceError('');
-    if (source.kind === 'mobile-camera' && mobileCamPairingDetails.current) {
-      setMobileCamPairing({ ...mobileCamPairingDetails.current, connected: false, reconnecting: true, remainingSeconds: Math.max(0, Math.ceil((mobileCamPairingDetails.current.expiresAt - Date.now()) / 1000)) });
+    const pairingDetails = source.kind === 'mobile-camera' ? mobileCamPairingDetails.current.get(source.id) : undefined;
+    if (source.kind === 'mobile-camera' && pairingDetails) {
+      setMobileCamPairing({ ...pairingDetails, connected: false, reconnecting: true, remainingSeconds: Math.max(0, Math.ceil((pairingDetails.expiresAt - Date.now()) / 1000)) });
       return;
     }
     setReconnectingSourceId(source.id);
     try {
-      const captured = await captureStream(source.kind, source.id, source.deviceId);
+      const captured = await captureStream(source.kind, source.id, source.deviceId, undefined, source.mobileCamSlot);
       const stream = captured?.stream;
       if (!stream) return;
       sourceStreams.current.set(source.id, stream);
@@ -2779,9 +2895,9 @@ export default function Studio() {
     sourceCleanups.current.get(id)?.();
     sourceCleanups.current.delete(id);
     if (source?.kind === 'mobile-camera') {
-      mobileCamPairingDetails.current = null;
-      setMobileCamPairing(null);
-      mobileCamConnectedState.current = null;
+      mobileCamPairingDetails.current.delete(id);
+      mobileCamConnectedState.current.delete(id);
+      setMobileCamPairing((current) => current?.sourceId === id ? null : current);
     }
     setChannels((list) => list.filter((channel) => channel.id !== id));
     setSources((list) => list.filter((source) => source.id !== id));
@@ -2789,15 +2905,14 @@ export default function Studio() {
 
   const deleteMusicAsset = async (asset: StudioMusicAssetWithUrl) => {
     try {
-      await deleteStudioMusicAsset(asset.id);
+      await window.faithstreamWindow?.removeStudioMusicFile(asset.id);
+      saveStudioMusicFiles(readSavedStudioMusicFiles().filter((item) => item.id !== asset.id));
       if (previewingMusicId === asset.id) {
         musicPreviewElement.current?.pause();
         musicPreviewElement.current = null;
         setPreviewingMusicId(null);
       }
       sources.filter((source) => source.kind === 'music' && source.mediaAssetId === asset.id).forEach((source) => removeSource(source.id));
-      URL.revokeObjectURL(asset.url);
-      sourceObjectUrls.current = sourceObjectUrls.current.filter((url) => url !== asset.url);
       setMusicAssets((current) => current.filter((item) => item.id !== asset.id));
     } catch {
       setSourceError('Could not delete this music track. Please try again.');
@@ -2856,6 +2971,8 @@ export default function Studio() {
     liveAudioInputs.current.forEach((input) => input.disconnect());
     liveAudioInputs.current.clear();
     liveAudioGains.current.clear();
+    liveAudioPanners.current.clear();
+    liveAudioCompressors.current.clear();
   };
 
   const clearRecordingAudio = () => {
@@ -2863,6 +2980,8 @@ export default function Studio() {
     recordingAudioInputs.current.forEach((input) => input.disconnect());
     recordingAudioInputs.current.clear();
     recordingAudioGains.current.clear();
+    recordingAudioPanners.current.clear();
+    recordingAudioCompressors.current.clear();
     recordingAudioDestination.current = null;
     void recordingAudioContext.current?.close();
     recordingAudioContext.current = null;
@@ -2887,11 +3006,19 @@ export default function Studio() {
         const tracks = source?.stream?.getAudioTracks().filter((track) => track.readyState === 'live') ?? [];
         if (!tracks.length) return;
         const input = context!.createMediaStreamSource(new MediaStream(tracks));
+        const compressor = context!.createDynamicsCompressor();
         const gain = context!.createGain();
-        gain.gain.value = source?.visible && !channel.muted ? 10 ** (channel.db / 20) : 0;
-        input.connect(gain).connect(destination);
+        const panner = context!.createStereoPanner();
+        gain.gain.value = source?.visible && !channel.muted ? channelGain(channel.db) : 0;
+        compressor.threshold.value = channel.compressor ? channel.compressorThreshold : 0;
+        compressor.ratio.value = channel.compressor ? 3 : 1;
+        compressor.knee.value = channel.compressor ? 12 : 0;
+        panner.pan.value = channel.pan;
+        input.connect(compressor).connect(gain).connect(panner).connect(destination);
         recordingAudioInputs.current.set(channel.id, input);
         recordingAudioGains.current.set(channel.id, gain);
+        recordingAudioPanners.current.set(channel.id, panner);
+        recordingAudioCompressors.current.set(channel.id, compressor);
       });
       if (!MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) throw new Error('This computer cannot encode recording audio.');
       const recorder = new MediaRecorder(destination.stream, { mimeType: 'audio/webm;codecs=opus' });
@@ -2955,7 +3082,7 @@ export default function Studio() {
   const startLive = async () => {
     const bridge = window.faithstreamWindow;
     if (!bridge) {
-      setStreamConnectError('Live streaming is only available in the FaithStream desktop app.');
+      setStreamConnectError('Live streaming is only available in the FaithStream Studio desktop app.');
       return;
     }
     if (!streamServerUrl.trim() || !streamKey.trim()) {
@@ -2990,11 +3117,19 @@ export default function Studio() {
         const tracks = source?.stream?.getAudioTracks().filter((track) => track.readyState === 'live') ?? [];
         if (!tracks.length) return;
         const input = context!.createMediaStreamSource(new MediaStream(tracks));
+        const compressor = context!.createDynamicsCompressor();
         const gain = context!.createGain();
-        gain.gain.value = source?.visible && !channel.muted ? 10 ** (channel.db / 20) : 0;
-        input.connect(gain).connect(mixedAudio);
+        const panner = context!.createStereoPanner();
+        gain.gain.value = source?.visible && !channel.muted ? channelGain(channel.db) : 0;
+        compressor.threshold.value = channel.compressor ? channel.compressorThreshold : 0;
+        compressor.ratio.value = channel.compressor ? 3 : 1;
+        compressor.knee.value = channel.compressor ? 12 : 0;
+        panner.pan.value = channel.pan;
+        input.connect(compressor).connect(gain).connect(panner).connect(mixedAudio);
         liveAudioInputs.current.set(channel.id, input);
         liveAudioGains.current.set(channel.id, gain);
+        liveAudioPanners.current.set(channel.id, panner);
+        liveAudioCompressors.current.set(channel.id, compressor);
       });
       const output = programCanvasRef.current;
       if (!output) throw new Error('The On-air output is not ready.');
@@ -3355,9 +3490,9 @@ export default function Studio() {
               {musicAssets.map((asset) => {
                 const added = sceneSources.some((source) => source.kind === 'music' && source.mediaAssetId === asset.id);
                 return <li key={asset.id} className="flex min-w-0 items-center gap-1 rounded-lg px-1 py-1 hover:bg-white/5">
-                  <button type="button" onClick={() => previewMusic(asset)} title={previewingMusicId === asset.id ? 'Stop preview' : `Preview ${asset.name}`} aria-label={previewingMusicId === asset.id ? `Stop preview of ${asset.name}` : `Preview ${asset.name}`} className="shrink-0 rounded p-1.5 text-brand hover:bg-white/10">{previewingMusicId === asset.id ? <Pause size={13} /> : <Play size={13} />}</button>
-                  <span className="min-w-0 flex-1 truncate text-[11px] text-warm-white/75" title={asset.name}>{asset.name}</span>
-                  <button type="button" disabled={added} onClick={() => addMusicAssetAsSource(asset)} className="shrink-0 rounded px-2 py-1 text-[10px] font-semibold text-brand hover:bg-brand/10 disabled:text-warm-white/35">{added ? 'Added' : 'Add'}</button>
+                  <button type="button" disabled={asset.available === false} onClick={() => previewMusic(asset)} title={asset.available === false ? 'Original file is unavailable' : previewingMusicId === asset.id ? 'Stop preview' : `Preview ${asset.name}`} aria-label={previewingMusicId === asset.id ? `Stop preview of ${asset.name}` : `Preview ${asset.name}`} className="shrink-0 rounded p-1.5 text-brand hover:bg-white/10 disabled:text-warm-white/25">{previewingMusicId === asset.id ? <Pause size={13} /> : <Play size={13} />}</button>
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-warm-white/75" title={asset.path}>{asset.name}{asset.available === false && <span className="ml-1 text-red-300">· File unavailable</span>}</span>
+                  <button type="button" disabled={added || asset.available === false} onClick={() => addMusicAssetAsSource(asset)} className="shrink-0 rounded px-2 py-1 text-[10px] font-semibold text-brand hover:bg-brand/10 disabled:text-warm-white/35">{added ? 'Added' : 'Add'}</button>
                   <button type="button" aria-label={`Delete ${asset.name}`} title="Delete track" onClick={() => { void deleteMusicAsset(asset); }} className="shrink-0 rounded p-1.5 text-warm-white/40 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={13} /></button>
                 </li>;
               })}
@@ -3369,11 +3504,11 @@ export default function Studio() {
       </div>
 
       {/* Bottom row: natural height */}
-      <div className="grid shrink-0 grid-cols-4 gap-3">
+      <div className="grid h-[min(14rem,30vh)] shrink-0 grid-cols-4 gap-3">
         {/* Sources stay in the original lower row; the Add menu opens upward to stay clear of the footer. */}
         <Panel
           title="Sources"
-          className="max-h-48 min-h-0"
+          className="h-full min-h-0"
           action={
             <button ref={sourceTriggerRef} aria-label="Add source" aria-expanded={addSourceOpen} onClick={() => setAddSourceOpen((open) => !open)} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold text-warm-white/75 hover:bg-white/5 hover:text-white">
               <Plus size={15} /> Add source
@@ -3387,11 +3522,12 @@ export default function Studio() {
                   <div key={group} className="mb-1 last:mb-0">
                     <p className="px-2 pb-1 pt-2 text-[10px] font-bold uppercase tracking-wider text-warm-white/40">{group}</p>
                     {SOURCE_OPTIONS.filter((option) => option.group === group && option.kind !== 'music').map(({ kind, name, icon: Icon }) => {
-                      const disabled = kind === 'camera' && cameraLimitReached;
+                      const disabled = (kind === 'camera' && cameraLimitReached) || (kind === 'mobile-camera' && mobileCamLimitReached);
                       return (
                         <button key={kind} disabled={disabled} onClick={() => { void addSource(kind); }} className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-left text-xs text-warm-white/80 hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40">
                           <span className="flex items-center gap-2"><Icon size={14} className="text-warm-white/60" />{name}</span>
                           {kind === 'camera' && <span className="text-[10px] text-warm-white/45">{sceneSources.filter((source) => source.kind === 'camera').length}/3</span>}
+                          {kind === 'mobile-camera' && <span className="text-[10px] text-warm-white/45">{sources.filter((source) => source.kind === 'mobile-camera').length + mobileCamPendingSlots.current.size}/3</span>}
                         </button>
                       );
                     })}
@@ -3403,7 +3539,7 @@ export default function Studio() {
             {sceneSources.length > 0 ? (
               <ul className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,.35) transparent' }}>
                 {sceneSources.map((source) => {
-                  const { id, name, kind } = source;
+                  const { id, name, kind, mobileCamSlot } = source;
                   const visible = isPreviewSourceVisible(source);
                   const reconnectable = ['camera', 'mobile-camera', 'screen', 'microphone', 'desktop-audio'].includes(kind);
                   const hasLiveTrack = !!source.stream?.getTracks().some((track) => track.readyState === 'live' && !track.muted);
@@ -3421,9 +3557,10 @@ export default function Studio() {
                       onDrop={(event) => { event.preventDefault(); reorderSources(Number(event.dataTransfer.getData('text/source-id')), id); }}
                       className={`group flex items-center gap-2 rounded-lg border px-2 py-1.5 text-sm text-warm-white ${selectedProgramSource === id ? 'border-sky-400/50 bg-sky-400/5' : 'border-white/5 bg-white/[0.02]'}`}
                     >
-                      {kind === 'music' && musicAsset && <audio
+                      {kind === 'music' && musicAsset?.available !== false && musicAsset?.url && <audio
                         ref={(element) => { if (element) musicElements.current.set(id, element); else musicElements.current.delete(id); }}
                         src={musicAsset.url}
+                        crossOrigin="anonymous"
                         loop={source.loop ?? false}
                         onPlay={(event) => { setMusicPlaying((current) => ({ ...current, [id]: true })); attachMusicStream(id, event.currentTarget); }}
                         onPause={() => setMusicPlaying((current) => ({ ...current, [id]: false }))}
@@ -3432,7 +3569,7 @@ export default function Studio() {
                       />}
                       <span title="Drag to reorder layers; items higher in the list appear in front"><GripVertical size={14} className="shrink-0 cursor-grab text-warm-white/35" /></span>
                       <Icon size={15} className="shrink-0 text-warm-white/70" />
-                      <button type="button" disabled={!['camera', 'mobile-camera', 'screen', 'media', 'presentation', 'text'].includes(kind)} aria-pressed={selectedProgramSource === id} onClick={() => setSelectedProgramSource(id)} title="Select this layer in Program setup" className="flex min-w-0 flex-1 flex-col truncate text-left disabled:cursor-default"><span className="truncate">{name}</span>{kind !== 'mobile-camera' && disconnected && <span className="truncate text-[9px] font-semibold text-red-300">Disconnected</span>}{mediaAsset?.sizeBytes !== undefined && <span className="truncate text-[9px] text-warm-white/40">{mediaAsset.optimized && mediaAsset.originalBytes ? `${formatMediaSizeInKb(mediaAsset.originalBytes)} → ` : ''}{formatMediaSizeInKb(mediaAsset.sizeBytes)}{mediaAsset.optimized ? ' · optimized' : ''}</span>}</button>
+                      <button type="button" disabled={!['camera', 'mobile-camera', 'screen', 'media', 'presentation', 'text'].includes(kind)} aria-pressed={selectedProgramSource === id} onClick={() => setSelectedProgramSource(id)} title="Select this layer in Program setup" className="flex min-w-0 flex-1 flex-col truncate text-left disabled:cursor-default"><span className="flex min-w-0 items-center gap-1.5 truncate">{kind === 'mobile-camera' && mobileCamSlot && <span className="shrink-0 rounded bg-sky-400/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-sky-200">Cam {mobileCamSlot}</span>}<span className="truncate">{name}</span></span>{kind === 'music' && (!musicAsset || musicAsset.available === false) && <span className="truncate text-[9px] font-semibold text-red-300">Original file unavailable</span>}{kind !== 'mobile-camera' && kind !== 'music' && disconnected && <span className="truncate text-[9px] font-semibold text-red-300">Disconnected</span>}{mediaAsset?.sizeBytes !== undefined && <span className="truncate text-[9px] text-warm-white/40">{mediaAsset.optimized && mediaAsset.originalBytes ? `${formatMediaSizeInKb(mediaAsset.originalBytes)} → ` : ''}{formatMediaSizeInKb(mediaAsset.sizeBytes)}{mediaAsset.optimized ? ' · optimized' : ''}</span>}</button>
                       {kind === 'music' && <>
                         <button type="button" aria-label={musicPlaying[id] ? `Pause ${name}` : `Play ${name}`} title={musicPlaying[id] ? 'Pause track' : 'Play track'} onClick={() => toggleMusicPlayback(id)} className="text-warm-white/70 hover:text-brand">{musicPlaying[id] ? <Pause size={14} /> : <Play size={14} />}</button>
                         <button type="button" aria-pressed={source.loop ?? false} title={source.loop ? 'Loop enabled' : 'Play once'} onClick={() => {
@@ -3474,59 +3611,27 @@ export default function Studio() {
         </Panel>
 
         {/* Audio mixer */}
-        <Panel title="Audio Mixer">
-          <ul className="flex flex-col gap-3">
+        <Panel title="Audio Mixer" className="h-full min-h-0">
+          <ul className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,.35) transparent' }}>
             {mixerChannels.map(({ id, name, icon: Icon, db, muted }) => {
               const source = sources.find((item) => item.id === id);
               return (
-                <li key={id} className="flex items-center gap-3">
-                  <Icon size={16} className="shrink-0 text-warm-white/70" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex justify-between text-xs text-warm-white">
-                      <span className="truncate">{name}</span>
-                      <span className="ml-2 shrink-0 tabular-nums text-warm-white/60">{db.toFixed(1)} dB</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={-60}
-                      max={0}
-                      step={0.5}
-                      value={db}
-                      disabled={muted || !source?.stream}
-                      aria-label={`${name} volume`}
-                      onChange={(e) => updateChannel(id, { db: Number(e.target.value) })}
-                      className="mt-1 w-full accent-brand disabled:opacity-40"
-                    />
-                    <AudioChannelMeter
-                      stream={source?.stream}
-                      db={db}
-                      muted={muted}
-                      enabled={source?.visible ?? false}
-                      onLevel={(level) => setAudioLevels((current) => Math.abs((current[id] ?? 0) - level) < 0.005 ? current : { ...current, [id]: level })}
-                    />
-                    {source?.kind === 'microphone' && (
-                      <div className="mt-1 flex items-center justify-between gap-2 text-[10px]">
-                        <span className="text-warm-white/55">Noise suppression</span>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={source.noiseSuppression ?? true}
-                          disabled={!source.stream?.getAudioTracks().some((track) => track.readyState === 'live')}
-                          onClick={() => { void toggleNoiseSuppression(id); }}
-                          className={`rounded px-1.5 py-0.5 font-medium disabled:opacity-40 ${(source.noiseSuppression ?? true) ? 'bg-emerald-500/15 text-emerald-300' : 'bg-white/10 text-warm-white/55'}`}
-                        >
-                          {(source.noiseSuppression ?? true) ? 'On' : 'Off'}
-                        </button>
+                <li key={id} className="rounded-lg border border-white/5 bg-white/[0.02] px-2 py-1.5">
+                  <div className="flex items-center gap-2">
+                    <Icon size={15} className="shrink-0 text-warm-white/70" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex justify-between text-[11px] text-warm-white">
+                        <span className="truncate">{name}</span>
+                        <span className="ml-2 shrink-0 tabular-nums text-warm-white/60">{db.toFixed(1)} dB</span>
                       </div>
-                    )}
+                      <input type="range" min={-60} max={12} step={0.5} value={db} aria-label={`${name} volume`} onChange={(e) => updateChannel(id, { db: Number(e.target.value) })} className="mt-1 w-full accent-brand" />
+                    </div>
+                    <button type="button" aria-label={`Open ${name} mixer settings`} title={`Mixer settings for ${name}`} onClick={() => setAudioSettingsChannelId(id)} className="rounded p-1 text-warm-white/55 hover:bg-white/10 hover:text-brand"><Settings size={14} /></button>
+                    <button type="button" aria-pressed={muted} aria-label={muted ? `Unmute ${name}` : `Mute ${name}`} onClick={() => updateChannel(id, { muted: !muted })} className={`rounded p-1 ${muted ? 'text-red-400' : 'text-warm-white/70 hover:text-brand'}`}>
+                      {muted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                    </button>
                   </div>
-                  <button
-                    aria-label={muted ? `Unmute ${name}` : `Mute ${name}`}
-                    onClick={() => updateChannel(id, { muted: !muted })}
-                    className={muted ? 'text-red-400' : 'text-warm-white/70 hover:text-brand'}
-                  >
-                    {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
-                  </button>
+                  <AudioChannelMeter stream={source?.stream} db={db} muted={muted} enabled={source?.visible ?? false} onLevel={(level) => setAudioLevels((current) => Math.abs((current[id] ?? 0) - level) < 0.005 ? current : { ...current, [id]: level })} />
                 </li>
               );
             })}
@@ -3536,7 +3641,7 @@ export default function Studio() {
         </Panel>
 
         {/* Stream status */}
-        <Panel title="Stream Status">
+        <Panel title="Stream Status" className="h-full min-h-0">
           <div className="mb-3 flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-600 text-lg font-bold text-white">
               f
@@ -3578,6 +3683,7 @@ export default function Studio() {
         {/* Quick controls */}
         <Panel
           title="Quick Controls"
+          className="h-full min-h-0"
           action={<button aria-label="Studio settings" title="Studio settings" onClick={() => setSettingsOpen(true)} className="rounded-lg p-1.5 text-warm-white/65 hover:bg-white/5 hover:text-white"><Settings size={16} /></button>}
         >
           <div className="flex flex-col gap-2.5">
@@ -3817,7 +3923,7 @@ export default function Studio() {
                       return <div key={channel.id} className="flex items-center justify-between gap-3 text-xs">
                         <span className="flex min-w-0 items-center gap-2 text-warm-white/75"><channel.icon size={14} /><span className="truncate">{channel.name}</span></span>
                         <span className={status === 'Receiving audio' ? 'text-emerald-300' : 'text-warm-white/45'}>{status}</span>
-                        {source?.stream && <MonitorAudioTrack stream={source.stream} enabled={audioMonitor && liveTrack && source.visible && !channel.muted} volume={10 ** (channel.db / 20)} />}
+                        {source?.stream && <MonitorAudioTrack stream={source.stream} enabled={audioMonitor && liveTrack && source.visible && !channel.muted} volume={channelGain(channel.db)} />}
                       </div>;
                     })}
                     {!mixerChannels.length && <p className="text-xs text-warm-white/45">No microphone or desktop audio sources are in this scene yet.</p>}
@@ -3831,7 +3937,7 @@ export default function Studio() {
             </div>
             <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-4">
               <div className="min-w-0 text-xs">
-                {streamConnectError ? <p role="alert" className="text-red-300">{streamConnectError}</p> : startingStream ? <p role="status" className="text-amber-200">Preparing the full-resolution program output…</p> : <p className="text-warm-white/45">FaithStream will send the On-air program and enabled audio sources to Facebook over RTMPS.</p>}
+                {streamConnectError ? <p role="alert" className="text-red-300">{streamConnectError}</p> : startingStream ? <p role="status" className="text-amber-200">Preparing the full-resolution program output…</p> : <p className="text-warm-white/45">FaithStream Studio will send the On-air program and enabled audio sources to Facebook over RTMPS.</p>}
               </div>
               <div className="flex gap-2">
                 <button type="button" disabled={startingStream} onClick={() => { setGoLiveSetupOpen(false); setAudioMonitor(false); }} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-warm-white/75 hover:bg-white/5 disabled:opacity-40">Cancel</button>
@@ -3894,8 +4000,8 @@ export default function Studio() {
         createPortal(<div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
           <section role="dialog" aria-modal="true" aria-labelledby="mobile-cam-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
-              <div><h2 id="mobile-cam-title" className="text-lg font-bold text-warm-white">{mobileCamPairing.reconnecting ? 'Reconnect FaithStream Cam' : 'Connect FaithStream Cam'}</h2><p className="mt-1 text-sm text-warm-white/55">{mobileCamPairing.reconnecting ? 'Tap Reconnect camera on your phone and use the current code below.' : 'Install and open FaithStream Cam on your phone. Both devices must use the same Wi-Fi.'}</p></div>
-              <button aria-label="Close pairing details" onClick={() => { if (!mobileCamPairing.connected && !mobileCamPairing.reconnecting) { void window.faithstreamWindow?.stopMobileCamPairing(); mobileCamPairingDetails.current = null; } setMobileCamPairing(null); }} className="rounded-lg p-1.5 text-warm-white/55 hover:bg-white/10 hover:text-white"><X size={17} /></button>
+              <div><h2 id="mobile-cam-title" className="text-lg font-bold text-warm-white">{mobileCamPairing.reconnecting ? `Reconnect Cam ${mobileCamPairing.slot}` : `Connect Cam ${mobileCamPairing.slot}`}</h2><p className="mt-1 text-sm text-warm-white/55">{mobileCamPairing.reconnecting ? 'Tap Reconnect camera on your phone and use the current code below.' : 'Install and open FaithStream Cam on your phone. Both devices must use the same Wi-Fi.'}</p></div>
+              <button aria-label="Close pairing details" onClick={() => { if (!mobileCamPairing.connected && !mobileCamPairing.reconnecting) { void window.faithstreamWindow?.stopMobileCamPairing(mobileCamPairing.sourceId); mobileCamPairingDetails.current.delete(mobileCamPairing.sourceId); } setMobileCamPairing(null); }} className="rounded-lg p-1.5 text-warm-white/55 hover:bg-white/10 hover:text-white"><X size={17} /></button>
             </div>
             <div className="mt-5 rounded-xl border border-white/10 bg-black/20 p-4">
               <p className="text-xs font-semibold uppercase tracking-wide text-warm-white/50">Studio address</p>
@@ -3906,10 +4012,26 @@ export default function Studio() {
             </div>
             <p role="status" className={`mt-4 text-sm ${mobileCamPairing.connected ? 'text-emerald-300' : mobileCamPairing.reconnecting ? 'text-amber-200' : 'text-warm-white/70'}`}>{mobileCamPairing.connected ? 'Phone camera connected. You can position it in Preview setup.' : mobileCamPairing.reconnecting ? 'Disconnected · waiting for the phone to reconnect…' : 'Waiting for your phone to connect…'}</p>
             {mobileCamPairing.refreshError && <p role="alert" className="mt-2 text-xs text-amber-200">{mobileCamPairing.refreshError}</p>}
-            <div className="mt-5 flex justify-end"><button onClick={() => { if (!mobileCamPairing.connected && !mobileCamPairing.reconnecting) { void window.faithstreamWindow?.stopMobileCamPairing(); mobileCamPairingDetails.current = null; } setMobileCamPairing(null); }} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy">{mobileCamPairing.connected || mobileCamPairing.reconnecting ? 'Close' : 'Cancel pairing'}</button></div>
+            <div className="mt-5 flex justify-end"><button onClick={() => { if (!mobileCamPairing.connected && !mobileCamPairing.reconnecting) { void window.faithstreamWindow?.stopMobileCamPairing(mobileCamPairing.sourceId); mobileCamPairingDetails.current.delete(mobileCamPairing.sourceId); } setMobileCamPairing(null); }} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy">{mobileCamPairing.connected || mobileCamPairing.reconnecting ? 'Close' : 'Cancel pairing'}</button></div>
           </section>
         </div>, document.body)
       )}
+      <AudioMixerSettingsModal
+        channel={audioSettingsChannel ?? null}
+        source={audioSettingsSource}
+        noiseSuppressionSupported={typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getSupportedConstraints?.().noiseSuppression}
+        error={audioError}
+        onChange={(patch) => { if (audioSettingsChannel) updateChannel(audioSettingsChannel.id, patch); }}
+        onToggleNoiseSuppression={() => { if (audioSettingsChannel) void toggleNoiseSuppression(audioSettingsChannel.id); }}
+        onClose={() => setAudioSettingsChannelId(null)}
+        meter={audioSettingsChannel && <AudioChannelMeter
+          stream={audioSettingsSource?.stream}
+          db={audioSettingsChannel.db}
+          muted={audioSettingsChannel.muted}
+          enabled={audioSettingsSource?.visible ?? false}
+          onLevel={(level) => setAudioLevels((current) => Math.abs((current[audioSettingsChannel.id] ?? 0) - level) < 0.005 ? current : { ...current, [audioSettingsChannel.id]: level })}
+        />}
+      />
       <ConfirmationModal
         open={endStreamConfirmOpen}
         title="End the live stream?"
@@ -3940,6 +4062,7 @@ export default function Studio() {
         open={scripturePickerOpen}
         onClose={() => setScripturePickerOpen(false)}
         onAdd={beginScriptureDesign}
+        onPresent={presentScriptureNow}
       />
       {pendingScriptureDesign && <ScriptureDesignModal
         reference={pendingScriptureDesign.reference}
