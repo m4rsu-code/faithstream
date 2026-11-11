@@ -1,6 +1,6 @@
-# FaithStream Backend
+# FaithStream Studio Backend
 
-API and server for FaithStream: authentication, church accounts, saved slides and stream settings.
+API and server for FaithStream Studio: authentication, church accounts, saved slides and stream settings.
 
 ## Local development
 
@@ -9,7 +9,7 @@ The Laravel API lives in `backend/api`. It supports Gmail-only account registrat
 1. Install PHP 8.3 or newer, Composer, and PostgreSQL.
 2. In `backend/api/.env`, set `DB_DATABASE=faithstream`, `DB_USERNAME=postgres`, and `DB_PASSWORD` to the PostgreSQL password you chose. The file is local and must not be committed.
 3. Create the `faithstream` database in pgAdmin if it does not exist.
-4. From the FaithStream project root, run:
+4. From the FaithStream Studio project root, run:
 
    ```powershell
    php artisan migrate
