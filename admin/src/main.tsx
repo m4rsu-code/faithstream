@@ -6,7 +6,7 @@ import AdminLayout from './components/AdminLayout';
 import RequireAdmin from './components/RequireAdmin';
 import LoginPage from './routes/login';
 import OverviewPage from './routes/overview';
-import SubscriptionsPage from './routes/subscriptions';
+import LicensesPage from './routes/licenses';
 import UsersPage from './routes/user';
 import '../styles.css';
 import '../brand.css';
@@ -25,7 +25,8 @@ function AppRoutes() {
           <Route index element={<Navigate to="/overview" replace />} />
           <Route path="overview" element={<OverviewPage />} />
           <Route path="users" element={<UsersPage />} />
-          <Route path="subscriptions" element={<SubscriptionsPage />} />
+          <Route path="licenses" element={<LicensesPage />} />
+          <Route path="subscriptions" element={<Navigate to="/licenses" replace />} />
         </Route>
       </Route>
       <Route path="*" element={<DefaultRoute />} />

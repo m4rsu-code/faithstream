@@ -39,9 +39,25 @@ export async function requestApi<T>(path: string, options: RequestInit = {}): Pr
   return data as T;
 }
 
+export async function requestApiBlob(path: string): Promise<Blob> {
+  const token = sessionStorage.getItem(TOKEN_KEY);
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers: { Accept: 'image/*', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    cache: 'no-store',
+  });
+  if (!response.ok) {
+    const data: unknown = await response.json().catch(() => ({}));
+    const message = typeof data === 'object' && data !== null && 'message' in data
+      ? String(data.message)
+      : `Request failed (${response.status}).`;
+    throw new ApiError(message, response.status);
+  }
+  return response.blob();
+}
+
 export function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message === 'Failed to fetch') {
-    return `Cannot reach the FaithStream API at ${API_BASE}. Start the backend and try again.`;
+    return `Cannot reach the FaithStream Studio API at ${API_BASE}. Start the backend and try again.`;
   }
 
   return error instanceof Error ? error.message : 'Something went wrong. Please try again.';

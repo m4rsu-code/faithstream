@@ -13,23 +13,42 @@ interface AdminAuthContextValue {
 
 const AdminAuthContext = createContext<AdminAuthContextValue | null>(null);
 
-function readStoredUser(): AuthUser | null {
+function isAuthUser(value: unknown): value is AuthUser {
+  if (!value || typeof value !== 'object') return false;
+  const user = value as Partial<AuthUser>;
+  return typeof user.id === 'number' && Number.isFinite(user.id)
+    && typeof user.name === 'string'
+    && typeof user.email_address === 'string'
+    && typeof user.role === 'string';
+}
+
+type AuthSession =
+  | { phase: 'authenticated'; token: string; user: AuthUser }
+  | { phase: 'anonymous' };
+
+function readStoredSession(): AuthSession {
+  const token = sessionStorage.getItem(TOKEN_KEY);
   try {
-    return JSON.parse(sessionStorage.getItem(USER_KEY) || 'null') as AuthUser | null;
+    const user: unknown = JSON.parse(sessionStorage.getItem(USER_KEY) || 'null');
+    if (token && isAuthUser(user)) return { phase: 'authenticated', token, user };
   } catch {
-    return null;
+    // A corrupt user record should never leave a token-only session behind.
   }
+  sessionStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(USER_KEY);
+  return { phase: 'anonymous' };
 }
 
 export function AdminAuthProvider({ children }: { children: ReactNode }) {
-  const [token, setToken] = useState<string | null>(() => sessionStorage.getItem(TOKEN_KEY));
-  const [user, setUser] = useState<AuthUser | null>(readStoredUser);
+  // Keep token and identity in one state value so React cannot observe a half-authenticated session.
+  const [session, setSession] = useState<AuthSession>(readStoredSession);
+  const token = session.phase === 'authenticated' ? session.token : null;
+  const user = session.phase === 'authenticated' ? session.user : null;
 
   const clearSession = useCallback((): void => {
     sessionStorage.removeItem(TOKEN_KEY);
     sessionStorage.removeItem(USER_KEY);
-    setToken(null);
-    setUser(null);
+    setSession({ phase: 'anonymous' });
   }, []);
 
   const login = useCallback(async (email: string, password: string): Promise<void> => {
@@ -37,10 +56,15 @@ export function AdminAuthProvider({ children }: { children: ReactNode }) {
       method: 'POST',
       body: JSON.stringify({ email_address: email, password }),
     });
-    sessionStorage.setItem(TOKEN_KEY, result.token);
-    sessionStorage.setItem(USER_KEY, JSON.stringify(result.user));
-    setToken(result.token);
-    setUser(result.user);
+    try {
+      sessionStorage.setItem(TOKEN_KEY, result.token);
+      sessionStorage.setItem(USER_KEY, JSON.stringify(result.user));
+    } catch (error) {
+      sessionStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(USER_KEY);
+      throw error;
+    }
+    setSession({ phase: 'authenticated', token: result.token, user: result.user });
   }, []);
 
   const logout = useCallback(async (): Promise<void> => {

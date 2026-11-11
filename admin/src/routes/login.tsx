@@ -49,10 +49,10 @@ export default function LoginPage() {
   return (
     <main className="login-screen min-h-screen grid">
       <section className="login-card">
-        <div className="brand-lockup login-brand"><img className="brand-logo" src={FaithStreamLogo} alt="FaithStream" /><small>ADMIN</small></div>
+        <div className="brand-lockup login-brand"><img className="brand-logo" src={FaithStreamLogo} alt="FaithStream Studio" /><small>ADMIN</small></div>
         <p className="eyebrow">PRIVATE ADMIN CONSOLE</p>
         <h1>Good to have you<br /><em>back.</em></h1>
-        <p className="login-copy">Sign in with your FaithStream administrator account to view service activity.</p>
+        <p className="login-copy">Sign in with your FaithStream Studio administrator account to view service activity.</p>
         <form className="login-form" onSubmit={(event) => void submit(event)}>
           <label htmlFor="email">Email address</label>
           <input id="email" type="email" autoComplete="username" placeholder="admin@gmail.com" required value={email} onChange={(event) => setEmail(event.target.value)} />
@@ -65,7 +65,7 @@ export default function LoginPage() {
       </section>
       <aside className="login-art">
         <div className="art-orbit orbit-one" /><div className="art-orbit orbit-two" /><div className="art-cross">✳</div>
-        <div className="art-copy"><img className="faithstream-hero-logo" src={FaithStreamLogo} alt="FaithStream" /><span>FAITHSTREAM</span><h2>Clear insight<br />for a <em>steadier</em><br />service.</h2><p>One private place to understand what’s happening across your platform.</p></div>
+        <div className="art-copy"><img className="faithstream-hero-logo" src={FaithStreamLogo} alt="FaithStream Studio" /><span>FAITHSTREAM STUDIO</span><h2>Clear insight<br />for a <em>steadier</em><br />service.</h2><p>One private place to understand what’s happening across your platform.</p></div>
         <div className="art-bottom"><span>OPERATIONS OVERVIEW</span><span>01 — PRIVATE</span></div>
       </aside>
     </main>

@@ -3,6 +3,7 @@ export interface AuthUser {
   name: string;
   email_address: string;
   role: string;
+  license_status?: 'active' | null;
 }
 
 export interface DirectoryUser extends AuthUser {
@@ -23,7 +24,7 @@ export interface OverviewResponse {
   };
   registrations: Array<{ month: string; users: number }>;
   recent_users: DirectoryUser[];
-  subscriptions: { configured: boolean; message: string };
+  licenses: { configured: boolean; message: string };
   generated_at: string;
 }
 
@@ -56,6 +57,31 @@ export interface DeletionRequestsResponse {
 }
 
 export interface DeletionRequestCountResponse {
+  pending_count: number;
+}
+
+export interface LicensePaymentRequest {
+  id: number;
+  name: string;
+  email_address: string | null;
+  payment_method: string;
+  payer_name: string;
+  transaction_reference: string;
+  amount: number;
+  currency: string;
+  status: 'pending' | 'approved' | 'rejected';
+  submitted_at: string | null;
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+  admin_note: string | null;
+}
+
+export interface LicensePaymentRequestsResponse {
+  payments: LicensePaymentRequest[];
+  pagination: { current_page: number; last_page: number; total: number };
+}
+
+export interface LicensePaymentCountResponse {
   pending_count: number;
 }
 

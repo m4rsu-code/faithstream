@@ -84,7 +84,7 @@ export default function OverviewPage() {
 
   return (
     <section className="page-content">
-      <div className="page-heading"><div><p className="eyebrow">PLATFORM HEALTH</p><h1>Overview</h1><p className="page-subtitle">A live snapshot of FaithStream accounts and service activity.</p></div><span className="updated-label">{formatTime(updatedAt)}</span></div>
+      <div className="page-heading"><div><p className="eyebrow">PLATFORM HEALTH</p><h1>Overview</h1><p className="page-subtitle">A live snapshot of FaithStream Studio accounts and service activity.</p></div><span className="updated-label">{formatTime(updatedAt)}</span></div>
       {error && <div className="alert-banner" role="alert">{error}</div>}
       <div className="stats-grid">
         <StatCard label="Total accounts" value={stats?.total_users} meta="All registered users" icon="♙" />
@@ -94,7 +94,7 @@ export default function OverviewPage() {
       </div>
       <div className="dashboard-grid">
         <section className="panel registrations-panel"><div className="panel-heading"><div><p className="eyebrow">ACCOUNT GROWTH</p><h2>New registrations</h2></div><span className="panel-range">LAST 6 MONTHS</span></div><div className="registration-chart"><RegistrationChart months={overview?.registrations || []} /></div></section>
-        <section className="panel subscription-summary"><div className="panel-heading"><div><p className="eyebrow">REVENUE &amp; PLANS</p><h2>Subscriptions</h2></div><span className="subscription-icon">◇</span></div><div className="not-configured"><span className="not-configured-dot" /><strong>Billing not connected</strong><p>Subscription plans and payment records are not configured in the backend yet.</p><Link className="text-button" to="/subscriptions">View setup status <span>→</span></Link></div></section>
+        <section className="panel subscription-summary"><div className="panel-heading"><div><p className="eyebrow">PRODUCT ACCESS</p><h2>Licenses</h2></div><span className="subscription-icon">◇</span></div><div className="not-configured"><span className="not-configured-dot" /><strong>Free launch period</strong><p>FaithStream Studio is free for at least the first three months. A one-time license is planned afterward.</p><Link className="text-button" to="/licenses">View license details <span>→</span></Link></div></section>
       </div>
       <section className="panel users-panel"><div className="panel-heading users-panel-heading"><div><p className="eyebrow">ACCOUNT DIRECTORY</p><h2>Recently joined</h2></div><Link className="text-button" to="/users">View all users <span>→</span></Link></div><UserTable users={overview?.recent_users || []} compact emptyMessage="No accounts have registered yet." /></section>
       <PageFooter>Private operational data · {formatDate(updatedAt)}</PageFooter>
