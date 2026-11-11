@@ -26,7 +26,7 @@ export default function CameraScreen() {
   const hadCameraStream = useRef(false);
   const scrollRef = useRef<ScrollView | null>(null);
   const codeInputRef = useRef<TextInput | null>(null);
-  const { camera, connect, disconnect, flipCamera, status, stream } = useStudioCamera();
+  const { camera, connect, disconnect, flipCamera, phase, status, stream } = useStudioCamera();
 
   useEffect(() => {
     if (stream && !hadCameraStream.current) setCameraFullscreen(true);
@@ -69,6 +69,7 @@ export default function CameraScreen() {
             address={address}
             code={code}
             connected={stream !== null}
+            phase={phase}
             codeInputRef={codeInputRef}
             onAddressChange={setAddress}
             onAddressSubmit={() => codeInputRef.current?.focus()}

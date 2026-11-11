@@ -1,13 +1,13 @@
 # FaithStream Cam
 
-FaithStream Cam turns an Android or iPhone camera into a live camera source in the FaithStream desktop Studio. Video travels directly between the phone and Studio over the same local Wi-Fi network using WebRTC; no cloud video relay is used.
+FaithStream Cam turns an Android or iPhone camera into a live camera source in the FaithStream Studio desktop Studio. Video travels directly between the phone and Studio over the same local Wi-Fi network using WebRTC; no cloud video relay is used.
 
 ## Requirements
 
 - Node.js 20 or later
 - Android Studio and an Android device, or macOS with Xcode and an iPhone
 - Phone and Studio computer on the same Wi-Fi network
-- Allow FaithStream through the computer firewall for the temporary local pairing port
+- Allow FaithStream Studio through the computer firewall for the temporary local pairing port
 
 This app uses native WebRTC code, so it needs a development build and cannot run inside Expo Go.
 
@@ -39,7 +39,7 @@ For iPhone, run `npx expo run:ios` on macOS with Xcode and a connected iPhone. T
 3. Open FaithStream Cam on the phone, enter an address including its port (for example `192.168.1.25:43127`) and the code, then tap **Connect camera**.
 4. Once the source appears in Studio, position and resize it like other camera layers. Leave FaithStream Cam open while using the camera.
 
-The pairing code and local server are temporary and are regenerated when a new pairing starts. If the phone cannot connect, confirm both devices are on the same Wi-Fi and allow FaithStream through the computer's firewall.
+The pairing code and local server are temporary and are regenerated when a new pairing starts. If the phone cannot connect, confirm both devices are on the same Wi-Fi and allow FaithStream Studio through the computer's firewall.
 
 ## Android SDK not found
 

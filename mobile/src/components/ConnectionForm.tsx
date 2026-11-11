@@ -1,11 +1,13 @@
 import type { RefObject } from 'react';
 import { Keyboard, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { colors } from '../theme/colors';
+import type { CameraConnectionPhase } from '../hooks/useStudioCamera';
 
 type Props = {
   address: string;
   code: string;
   connected: boolean;
+  phase: CameraConnectionPhase;
   codeInputRef: RefObject<TextInput | null>;
   onAddressChange: (value: string) => void;
   onAddressSubmit: () => void;
@@ -17,11 +19,11 @@ type Props = {
 };
 
 export default function ConnectionForm({
-  address, code, connected, codeInputRef, onAddressChange, onAddressSubmit, onCodeChange,
+  address, code, connected, phase, codeInputRef, onAddressChange, onAddressSubmit, onCodeChange,
   onConnect, onDisconnect, onInputFocus, status,
 }: Props) {
-  const disconnected = status === 'Studio disconnected' || status === 'Disconnected' || status.startsWith('Could not reach Studio');
-  const connecting = status.startsWith('Requesting') || status.startsWith('Connecting') || status.startsWith('Waiting');
+  const disconnected = phase === 'disconnected' || phase === 'failed';
+  const connecting = !connected && ['requesting-permission', 'connecting', 'waiting-for-studio'].includes(phase);
   const indicatorColor = connected ? colors.green : disconnected ? '#ef6b6b' : connecting ? colors.orange : '#718397';
 
   return (
@@ -56,8 +58,8 @@ export default function ConnectionForm({
         maxLength={6}
         style={[styles.input, styles.pin]}
       />
-      <TouchableOpacity onPress={connected ? onDisconnect : onConnect} style={[styles.button, connected && styles.disconnect, disconnected && styles.reconnect]}>
-        <Text style={styles.buttonText}>{connected ? 'Disconnect camera' : disconnected ? 'Reconnect camera' : 'Connect camera'}</Text>
+      <TouchableOpacity disabled={connecting} onPress={connected ? onDisconnect : onConnect} style={[styles.button, connected && styles.disconnect, disconnected && styles.reconnect, connecting && styles.connecting]}>
+        <Text style={styles.buttonText}>{connecting ? 'Connecting…' : connected ? 'Disconnect camera' : disconnected ? 'Reconnect camera' : 'Connect camera'}</Text>
       </TouchableOpacity>
       <View accessibilityLiveRegion="polite" style={styles.statusRow}>
         <View style={[styles.statusDot, { backgroundColor: indicatorColor }]} />
@@ -77,6 +79,7 @@ const styles = StyleSheet.create({
   button: { marginTop: 14, backgroundColor: colors.orange, padding: 12, alignItems: 'center', borderRadius: 9, minHeight: 46, justifyContent: 'center' },
   disconnect: { backgroundColor: '#334252' },
   reconnect: { backgroundColor: '#8c3f37' },
+  connecting: { opacity: 0.65 },
   buttonText: { color: '#101923', fontWeight: '800' },
   statusRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, marginTop: 10 },
   statusDot: { width: 8, height: 8, borderRadius: 4 },

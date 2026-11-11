@@ -13,6 +13,20 @@ registerGlobals();
 
 export type CameraFacing = 'front' | 'back';
 type CameraOrientation = 'portrait' | 'landscape';
+export type CameraConnectionPhase = 'idle' | 'requesting-permission' | 'connecting' | 'waiting-for-studio' | 'connected' | 'publishing' | 'reconnecting' | 'disconnected' | 'failed';
+type CameraConnectionState = { phase: Exclude<CameraConnectionPhase, 'failed'> } | { phase: 'failed'; message: string };
+
+const phaseMessages: Record<Exclude<CameraConnectionPhase, 'failed'>, string> = {
+  idle: 'Not connected',
+  'requesting-permission': 'Requesting camera permission…',
+  connecting: 'Connecting to Studio…',
+  'waiting-for-studio': 'Waiting for Studio…',
+  connected: 'Connected · camera ready',
+  publishing: 'On air · connected to Studio',
+  reconnecting: 'Reconnecting to Studio…',
+  disconnected: 'Studio disconnected',
+};
+const isActiveConnection = (phase: CameraConnectionPhase) => ['requesting-permission', 'connecting', 'waiting-for-studio', 'connected', 'publishing', 'reconnecting'].includes(phase);
 
 const readScreenOrientation = (): CameraOrientation => {
   const { width, height } = Dimensions.get('screen');
@@ -27,7 +41,9 @@ const videoConstraints = (facing: CameraFacing, orientation: CameraOrientation) 
 });
 
 export function useStudioCamera() {
-  const [status, setStatus] = useState('Not connected');
+  const [connection, setConnection] = useState<CameraConnectionState>({ phase: 'idle' });
+  const connectionRef = useRef<CameraConnectionState>({ phase: 'idle' });
+  const attemptId = useRef(0);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [camera, setCamera] = useState<CameraFacing>('back');
   const cameraRef = useRef<CameraFacing>('back');
@@ -36,7 +52,14 @@ export function useStudioCamera() {
   const local = useRef<MediaStream | null>(null);
   const orientationSubscription = useRef<{ remove: () => void } | null>(null);
 
+  const transition = useCallback((next: CameraConnectionState) => {
+    connectionRef.current = next;
+    setConnection(next);
+  }, []);
+  const status = connection.phase === 'failed' ? connection.message : phaseMessages[connection.phase];
+
   const disconnect = useCallback(() => {
+    attemptId.current += 1;
     const currentSocket = socket.current;
     if (currentSocket) {
       currentSocket.onclose = null;
@@ -52,10 +75,16 @@ export function useStudioCamera() {
     local.current?.getTracks().forEach((track) => track.stop());
     local.current = null;
     setStream(null);
-    setStatus('Disconnected');
-  }, []);
+    transition({ phase: 'disconnected' });
+  }, [transition]);
 
   useEffect(() => () => {
+    attemptId.current += 1;
+    if (socket.current) {
+      socket.current.onclose = null;
+      socket.current.onerror = null;
+      socket.current.onmessage = null;
+    }
     socket.current?.close();
     orientationSubscription.current?.remove();
     peer.current?.close();
@@ -63,6 +92,7 @@ export function useStudioCamera() {
   }, []);
 
   const connect = useCallback(async (address: string, code: string) => {
+    if (isActiveConnection(connectionRef.current.phase)) return;
     const host = address.trim().replace(/^https?:\/\//, '').replace(/^wss?:\/\//, '').replace(/\/$/, '');
     const pin = code.trim();
     if (!host || !/^\d{6}$/.test(pin)) {
@@ -70,27 +100,36 @@ export function useStudioCamera() {
       return;
     }
 
+    const attempt = ++attemptId.current;
+    transition({ phase: 'requesting-permission' });
     try {
-      setStatus('Requesting camera permission…');
       const activeOrientation = readScreenOrientation();
       const cameraStream = await mediaDevices.getUserMedia({
         audio: false,
         video: videoConstraints(camera, activeOrientation),
       });
+      if (attempt !== attemptId.current) {
+        cameraStream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       local.current = cameraStream;
       setStream(cameraStream);
-      setStatus('Connecting to Studio…');
+      transition({ phase: 'connecting' });
 
       const ws = new WebSocket(`ws://${host}/?code=${encodeURIComponent(pin)}&role=phone`);
       const queuedIce: RTCIceCandidateInit[] = [];
       let hasRemoteDescription = false;
+      let terminalFailure = false;
       socket.current = ws;
 
       ws.onerror = () => {
-        setStatus('Could not reach Studio. Check Wi-Fi and address.');
+        if (attempt !== attemptId.current) return;
+        terminalFailure = true;
+        transition({ phase: 'failed', message: 'Could not reach Studio. Check Wi-Fi and address.' });
         ws.close();
       };
       ws.onclose = () => {
+        if (attempt !== attemptId.current) return;
         orientationSubscription.current?.remove();
         orientationSubscription.current = null;
         peer.current?.close();
@@ -98,10 +137,11 @@ export function useStudioCamera() {
         local.current?.getTracks().forEach((track) => track.stop());
         local.current = null;
         setStream(null);
-        setStatus('Studio disconnected');
+        if (!terminalFailure) transition({ phase: 'disconnected' });
       };
       ws.onopen = () => {
-        setStatus('Waiting for Studio…');
+        if (attempt !== attemptId.current) return;
+        transition({ phase: 'waiting-for-studio' });
         orientationSubscription.current?.remove();
         const sendOrientation = (orientation: CameraOrientation) => {
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'orientation', orientation }));
@@ -117,10 +157,16 @@ export function useStudioCamera() {
         void updateForOrientation(initialScreen.width, initialScreen.height);
       };
       ws.onmessage = async (event) => {
+        if (attempt !== attemptId.current) return;
         let message: Signal;
         try { message = JSON.parse(String(event.data)); } catch { return; }
-        if (message.type === 'error') { setStatus(message.message || 'Pairing failed'); ws.close(); return; }
-        if (message.type === 'joined') { setStatus('Connected · camera ready'); return; }
+        if (message.type === 'error') {
+          terminalFailure = true;
+          transition({ phase: 'failed', message: message.message || 'Pairing failed' });
+          ws.close();
+          return;
+        }
+        if (message.type === 'joined') { transition({ phase: 'connected' }); return; }
 
         if (message.type === 'offer' && message.sdp) {
           const connection = new NativeRTCPeerConnection({ iceServers: [] });
@@ -132,12 +178,15 @@ export function useStudioCamera() {
             }
           };
           connection.onconnectionstatechange = () => {
-            if (connection.connectionState === 'connected') setStatus('On air · connected to Studio');
+            if (attempt !== attemptId.current) return;
+            if (connection.connectionState === 'connected') transition({ phase: 'publishing' });
             else if (connection.connectionState === 'failed') {
-              setStatus('Studio disconnected');
+              terminalFailure = true;
+              transition({ phase: 'failed', message: 'Camera connection failed. Reconnect to Studio and try again.' });
               ws.close();
-            } else if (connection.connectionState === 'disconnected') setStatus('Reconnecting to Studio…');
-            else setStatus(`Camera ${connection.connectionState}`);
+            } else if (connection.connectionState === 'disconnected') transition({ phase: 'reconnecting' });
+            else if (connection.connectionState === 'closed') transition({ phase: 'disconnected' });
+            else transition({ phase: 'connecting' });
           };
           await connection.setRemoteDescription({ type: 'offer', sdp: message.sdp });
           hasRemoteDescription = true;
@@ -157,30 +206,47 @@ export function useStudioCamera() {
         }
       };
     } catch (error) {
+      if (attempt !== attemptId.current) return;
       disconnect();
       const detail = error instanceof Error ? error.message : 'Camera setup failed.';
+      transition({ phase: 'failed', message: detail });
       Alert.alert('Could not start FaithStream Cam', detail);
     }
-  }, [camera, disconnect]);
+  }, [camera, disconnect, transition]);
 
   const flipCamera = useCallback(async () => {
-    if (!local.current) return;
+    const currentStream = local.current;
+    if (!currentStream) return;
+    const attempt = attemptId.current;
     const next: CameraFacing = camera === 'back' ? 'front' : 'back';
     cameraRef.current = next;
     setCamera(next);
+    let replacement: MediaStream | null = null;
     try {
-      const replacement = await mediaDevices.getUserMedia({ audio: false, video: videoConstraints(next, readScreenOrientation()) });
+      replacement = await mediaDevices.getUserMedia({ audio: false, video: videoConstraints(next, readScreenOrientation()) });
+      if (attempt !== attemptId.current || local.current !== currentStream) {
+        replacement.getTracks().forEach((track) => track.stop());
+        return;
+      }
       const track = replacement.getVideoTracks()[0];
       const sender = peer.current?.getSenders().find((item) => item.track?.kind === 'video');
       if (sender && track) await sender.replaceTrack(track);
-      local.current.getTracks().forEach((item) => item.stop());
+      if (attempt !== attemptId.current || local.current !== currentStream) {
+        replacement.getTracks().forEach((item) => item.stop());
+        return;
+      }
+      currentStream.getTracks().forEach((item) => item.stop());
       local.current = replacement;
       setStream(replacement);
     } catch {
+      if (attempt !== attemptId.current) {
+        replacement?.getTracks().forEach((track) => track.stop());
+        return;
+      }
       cameraRef.current = camera;
       setCamera(camera);
     }
   }, [camera]);
 
-  return { camera, connect, disconnect, flipCamera, status, stream };
+  return { camera, connect, disconnect, flipCamera, phase: connection.phase, status, stream };
 }
