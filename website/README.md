@@ -1,6 +1,6 @@
-# FaithStream Website
+# FaithStream Studio Website
 
-Public website for FaithStream desktop and mobile companion apps.
+Public website for FaithStream Studio desktop and mobile companion apps.
 
 ## Run locally
 
@@ -22,4 +22,4 @@ Place the finished walkthrough at `public/videos/faithstream-introduction.mp4`, 
 
 ## Publish downloads and subscription details
 
-The Downloads page currently links to the FaithStream GitHub Releases page. Attach signed/release-ready desktop and Android builds there before announcing downloads. Update the plan information in `src/Routes/Plans.tsx` when prices and included features are finalized.
+The Downloads page currently links to the FaithStream Studio GitHub Releases page. Attach signed/release-ready desktop and Android builds there before announcing downloads. Update the plan information in `src/Routes/Plans.tsx` when prices and included features are finalized.

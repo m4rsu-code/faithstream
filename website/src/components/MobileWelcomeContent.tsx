@@ -2,7 +2,7 @@ export default function MobileWelcomeContent() {
   return (
     <>
       <div className="mobile-preview-brand-group">
-        <img className="mobile-preview-logo" src="/faithstream-logo.png" alt="FaithStream" />
+        <img className="mobile-preview-logo" src="/faithstream-logo.png" alt="FaithStream Studio" />
         <span className="mobile-preview-brand">FAITHSTREAM CAM</span>
       </div>
       <div className="mobile-preview-copy">

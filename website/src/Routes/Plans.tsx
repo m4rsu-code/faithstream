@@ -1,12 +1,14 @@
 import Icon from '../components/Icon'
+import LicensePaymentForm from '../components/LicensePaymentForm'
 
 export default function Plans() {
   return (
     <section className="inner-page plans-page">
       <div className="plans-glow" />
-      <div className="inner-page-hero plans-hero"><div className="eyebrow"><span className="eyebrow-line" /> FAITHSTREAM SUBSCRIPTIONS</div><h1>Simple plans.<br /><em>Room to grow.</em></h1><p>We’re shaping subscription options around the needs of church media teams. Plan features and pricing will be posted here before subscriptions launch.</p></div>
-      <div className="section-container plan-preview-card"><div className="plan-preview-icon"><Icon name="spark" size={22} /></div><div><span className="plan-status">PLAN DETAILS IN PROGRESS</span><h2>Subscriptions are coming soon.</h2><p>FaithStream’s account, cloud storage, and subscription services are still being prepared. No payment is required to use this page, and no plan is available to purchase yet.</p></div><a className="button button-primary" href="/download">Explore FaithStream <Icon name="arrow" size={16} /></a></div>
-      <div className="section-container plan-info-grid"><article><span>01</span><h3>Know what’s included</h3><p>We’ll show each plan’s features clearly before you subscribe.</p></article><article><span>02</span><h3>Choose a billing option</h3><p>Available billing periods and prices will be listed here once confirmed.</p></article><article><span>03</span><h3>Manage your account</h3><p>Account and subscription management details will be shared before launch.</p></article></div>
+      <div className="inner-page-hero plans-hero"><div className="eyebrow"><span className="eyebrow-line" /> FAITHSTREAM STUDIO PRICING</div><h1>Free to use.<br /><em>Built for your service.</em></h1><p>FaithStream Studio will be free for at least its first three months. We’ll share the paid license details and timing in advance.</p></div>
+      <div className="section-container plan-preview-card"><div className="plan-preview-icon"><Icon name="spark" size={22} /></div><div><span className="plan-status">FREE LAUNCH PERIOD</span><h2>Use FaithStream Studio for free.</h2><p>No payment is required during the launch period. A one-time license is planned afterward; there will be no monthly or annual subscription in the initial paid model.</p></div><a className="button button-primary" href="/download">Get FaithStream Studio <Icon name="arrow" size={16} /></a></div>
+      <div className="section-container plan-info-grid"><article><span>01</span><h3>Free for at least three months</h3><p>Try the app and use it for your church services during the launch period.</p></article><article><span>02</span><h3>One-time license planned</h3><p>Paid access is planned as a one-time purchase, not a recurring subscription.</p></article><article><span>03</span><h3>Details announced before launch</h3><p>Pricing and the date paid licenses begin will be posted here in advance.</p></article></div>
+      <div className="section-container"><LicensePaymentForm /></div>
     </section>
   )
 }
