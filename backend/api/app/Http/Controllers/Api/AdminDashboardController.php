@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Mail\AccountDeletedMail;
+use App\Models\LicensePaymentRequest;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -11,6 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Schema;
 use Throwable;
 
 class AdminDashboardController extends Controller
@@ -59,9 +61,9 @@ class AdminDashboardController extends Controller
                     'last_activity_at' => $user->last_activity_at,
                 ])
                 ->all(),
-            'subscriptions' => [
-                'configured' => false,
-                'message' => 'Subscription plans and billing are not connected to the backend yet.',
+            'licenses' => [
+                'configured' => (bool) config('license.sales_enabled') && (int) config('license.price') > 0 && count(config('license.payment_methods', [])) > 0 && trim((string) config('license.sales_starts_at', '')) !== '',
+                'message' => 'FaithStream Studio is free during its launch period. Submitted one-time license payments require manual review.',
             ],
             'generated_at' => $now->toIso8601String(),
         ])->header('Cache-Control', 'no-store');
@@ -169,10 +171,11 @@ class AdminDashboardController extends Controller
         }
 
         $profilePhotoPath = null;
+        $paymentProofPaths = [];
         $deletionRecipient = null;
         $recipientName = null;
         $message = '';
-        DB::transaction(function () use ($user, $validated, &$profilePhotoPath, &$deletionRecipient, &$recipientName, &$message): void {
+        DB::transaction(function () use ($user, $validated, &$profilePhotoPath, &$paymentProofPaths, &$deletionRecipient, &$recipientName, &$message): void {
             $account = User::query()->lockForUpdate()->findOrFail($user->id);
             if (! $account->deletion_requested_at) {
                 abort(409, 'This account has no pending deletion request.');
@@ -190,6 +193,9 @@ class AdminDashboardController extends Controller
             $deletionRecipient = $account->email;
             $recipientName = $account->name;
             $profilePhotoPath = $account->profile_photo_path;
+            if (Schema::hasTable('license_payment_requests')) {
+                $paymentProofPaths = LicensePaymentRequest::query()->where('user_id', $account->id)->pluck('proof_path')->all();
+            }
             $account->tokens()->delete();
             DB::table('sessions')->where('user_id', $account->id)->delete();
             DB::table('password_reset_tokens')->where('email', $account->email)->delete();
@@ -199,6 +205,9 @@ class AdminDashboardController extends Controller
 
         if ($profilePhotoPath) {
             Storage::disk('public')->delete($profilePhotoPath);
+        }
+        if ($paymentProofPaths !== []) {
+            Storage::disk('local')->delete($paymentProofPaths);
         }
 
         $notificationSent = null;
@@ -210,7 +219,7 @@ class AdminDashboardController extends Controller
                 ));
                 $notificationSent = true;
             } catch (Throwable $exception) {
-                Log::error('FaithStream account deletion confirmation email could not be sent.', [
+                Log::error('FaithStream Studio account deletion confirmation email could not be sent.', [
                     'recipient' => $deletionRecipient,
                     'exception_type' => $exception::class,
                 ]);

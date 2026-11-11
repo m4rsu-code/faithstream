@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Reset your FaithStream password</title>
+    <title>Reset your FaithStream Studio password</title>
     <style>
         * { box-sizing: border-box; }
         body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; background: #101923; color: #f6f2ec; font: 16px/1.5 system-ui, sans-serif; }
@@ -21,7 +21,7 @@
 <body>
 <main>
     <h1>Reset your password</h1>
-    <p>Choose a new password for your FaithStream account.</p>
+    <p>Choose a new password for your FaithStream Studio account.</p>
 
     @if ($errors->any())
         <div class="error" role="alert">{{ $errors->first() }}</div>

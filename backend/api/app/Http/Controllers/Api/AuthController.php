@@ -3,7 +3,9 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Middleware\EnsureLicenseActive;
 use App\Models\User;
+use App\Models\UserLicense;
 use Illuminate\Contracts\Auth\Factory as AuthFactory;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -27,7 +29,12 @@ class AuthController extends Controller
         ))($request);
 
         if (! $user instanceof User) {
-            return response()->json(['message' => 'Your FaithStream session is no longer active.'], 401);
+            return response()->json(['message' => 'Your FaithStream Studio session is no longer active.'], 401);
+        }
+
+        $isWebsiteSession = $user->currentAccessToken()?->name === 'faithstream-website';
+        if (config('license.license_required') && ! $isWebsiteSession && ! in_array(strtolower($user->email), config('admin.emails', []), true) && ! UserLicense::query()->where('user_id', $user->id)->where('status', 'active')->exists()) {
+            return EnsureLicenseActive::licenseRequiredResponse();
         }
 
         return response()->json(['authenticated' => true])->header('Cache-Control', 'no-store');
@@ -66,6 +73,7 @@ class AuthController extends Controller
         $validated = $request->validate([
             'email_address' => ['required', 'string', 'email', 'regex:/^[^@\s]+@gmail\.com$/i'],
             'password' => ['required', 'string'],
+            'client' => ['sometimes', 'string', 'in:desktop,website'],
         ], [
             'email_address.regex' => 'Use the Gmail address associated with your account.',
         ]);
@@ -85,9 +93,14 @@ class AuthController extends Controller
             ], 403);
         }
 
+        $client = $validated['client'] ?? 'desktop';
+        if (config('license.license_required') && $client !== 'website' && ! in_array(strtolower($user->email), config('admin.emails', []), true) && ! UserLicense::query()->where('user_id', $user->id)->where('status', 'active')->exists()) {
+            return EnsureLicenseActive::licenseRequiredResponse();
+        }
+
         return response()->json([
             'user' => $this->userData($user),
-            'token' => $user->createToken('faithstream-desktop')->plainTextToken,
+            'token' => $user->createToken($client === 'website' ? 'faithstream-website' : 'faithstream-desktop')->plainTextToken,
         ])->header('Cache-Control', 'no-store');
     }
 
@@ -130,6 +143,11 @@ class AuthController extends Controller
     public function user(Request $request): JsonResponse
     {
         return response()->json(['user' => $this->userData($request->user())]);
+    }
+
+    public function websiteAccount(Request $request): JsonResponse
+    {
+        return response()->json(['user' => $this->userData($request->user())])->header('Cache-Control', 'no-store');
     }
 
     public function updateUser(Request $request): JsonResponse

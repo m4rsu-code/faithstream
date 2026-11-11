@@ -21,7 +21,7 @@ class AccountDeletedMail extends Mailable
     public function envelope(): Envelope
     {
         return new Envelope(
-            subject: 'Your FaithStream account has been deleted',
+            subject: 'Your FaithStream Studio account has been deleted',
         );
     }
 

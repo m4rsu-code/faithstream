@@ -1,6 +1,6 @@
 Hello {{ $name }},
 
-Thanks for creating a FaithStream account. Confirm your email address by opening this link:
+Thanks for creating a FaithStream Studio account. Confirm your email address by opening this link:
 
 {{ $verificationUrl }}
 
