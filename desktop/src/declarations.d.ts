@@ -6,6 +6,7 @@ interface Window {
     saveStreamSettings: (settings: { serverUrl: string; streamKey: string }) => Promise<boolean>;
     saveAuthToken: (token: string) => Promise<boolean>;
     clearAuthToken: () => Promise<boolean>;
+    openExternalUrl: (url: string) => Promise<boolean>;
     getStudioDisplays: () => Promise<{ id: number; name: string; primary: boolean; bounds: { x: number; y: number; width: number; height: number } }[]>;
     registerStudioMusicFile: (file: File) => Promise<{ ok: boolean; asset?: { id: string; name: string; path: string; url: string }; message?: string }>;
     resolveStudioMusicFiles: (assets: { id: string; name: string; path: string; createdAt: number }[]) => Promise<{ id: string; name: string; path: string; createdAt: number; url: string; available: boolean }[]>;

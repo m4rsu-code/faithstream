@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, FormEvent, ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowRight, Eye, EyeOff, LockKeyhole, Mail, Minus, Square, X } from 'lucide-react';
 import FaithStreamLogo from '../assets/img/Logo.png';
 import LoadingAnimation from '../assets/img/loading.gif';
 import { API_BASE_URL } from '../utils/apiConfig';
+import LicenseLockedScreen from './LicenseLockedScreen';
+import { LICENSE_REQUIRED_EVENT, LICENSE_REQUIRED_MESSAGE, isLicenseRequiredPayload } from '../utils/license';
 
 const LEGACY_TOKEN_KEY = 'faithstream.api-token';
 const PROFILE_KEY = 'faithstream.user-profile';
@@ -37,6 +39,26 @@ const readJson = async (response: Response): Promise<any> => {
 };
 
 type AuthMode = 'login' | 'register' | 'forgot';
+
+type AccountAccess =
+  | { status: 'ok'; user: ApiUser }
+  | { status: 'license'; message: string }
+  | { status: 'signed-out' }
+  | { status: 'unreachable' };
+
+/**
+ * Checks the saved account once: signed in, refused for a missing one-time license,
+ * or unreachable. A license refusal keeps the local token so nothing stored on this
+ * computer is lost and the operator still sees what to do next.
+ */
+const checkAccountAccess = async (token: string): Promise<AccountAccess> => {
+  const response = await fetch(`${API_BASE_URL}/user`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+  const data = await readJson(response) as { user?: ApiUser; message?: string };
+  if (response.ok && data.user) return { status: 'ok', user: data.user };
+  if (isLicenseRequiredPayload(data)) return { status: 'license', message: data.message?.trim() || LICENSE_REQUIRED_MESSAGE };
+  if (response.status === 401 || response.status === 403) return { status: 'signed-out' };
+  return { status: 'unreachable' };
+};
 
 const getStoredAuthToken = async () => {
   const bridge = window.faithstreamWindow;
@@ -241,6 +263,9 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   const [canResendVerification, setCanResendVerification] = useState(false);
   const [busy, setBusy] = useState(false);
   const [startingUp, setStartingUp] = useState(false);
+  const [licenseMessage, setLicenseMessage] = useState('');
+  const [licenseDismissed, setLicenseDismissed] = useState(false);
+  const licenseDismissedRef = useRef(false);
 
   const switchAuthMode = (nextMode: AuthMode) => {
     setError('');
@@ -272,10 +297,24 @@ export default function AuthGate({ children }: { children: ReactNode }) {
         setError('');
         setNotice('');
         setCanResendVerification(false);
+        setLicenseMessage('');
+        setLicenseDismissed(false);
+        licenseDismissedRef.current = false;
       });
     };
     window.addEventListener('faithstream:logged-out', onSignOut);
     return () => window.removeEventListener('faithstream:logged-out', onSignOut);
+  }, []);
+
+  // Any account-sync call refused for a missing license opens this screen once.
+  useEffect(() => {
+    const onLicenseRequired = (event: Event) => {
+      if (licenseDismissedRef.current) return;
+      const detail = (event as CustomEvent<{ message?: string }>).detail;
+      setLicenseMessage(detail?.message?.trim() || LICENSE_REQUIRED_MESSAGE);
+    };
+    window.addEventListener(LICENSE_REQUIRED_EVENT, onLicenseRequired);
+    return () => window.removeEventListener(LICENSE_REQUIRED_EVENT, onLicenseRequired);
   }, []);
 
   useEffect(() => {
@@ -285,15 +324,19 @@ export default function AuthGate({ children }: { children: ReactNode }) {
         const token = await getStoredAuthToken();
         if (!token) return;
         try {
-          const response = await fetch(`${API_BASE_URL}/user`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
-          if (response.status === 401 || response.status === 403) {
+          const access = await checkAccountAccess(token);
+          if (access.status === 'signed-out') {
             await clearStoredAuthToken();
             return;
           }
-          if (response.ok) {
-            const data = await readJson(response) as { user: ApiUser };
-            saveUserProfile(data.user);
+          if (access.status === 'license') {
+            if (!cancelled) {
+              setLicenseMessage(access.message);
+              setSignedIn(true);
+            }
+            return;
           }
+          if (access.status === 'ok') saveUserProfile(access.user);
         } catch { /* Preserve the encrypted local token when the API is temporarily unreachable. */ }
         if (!cancelled) {
           setSignedIn(true);
@@ -474,9 +517,13 @@ export default function AuthGate({ children }: { children: ReactNode }) {
 
       await saveStoredAuthToken(data.token);
       saveUserProfile(data.user);
+      const access = await checkAccountAccess(data.token).catch((): AccountAccess => ({ status: 'unreachable' }));
+      licenseDismissedRef.current = false;
+      setLicenseDismissed(false);
+      setLicenseMessage(access.status === 'license' ? access.message : '');
       navigate('/');
       setSignedIn(true);
-      setStartingUp(true);
+      setStartingUp(access.status !== 'license');
       setPassword('');
       setConfirmPassword('');
     } catch (cause) {
@@ -489,6 +536,13 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   };
 
   if (checkingSession) return <div style={AUTH_THEME_STYLE} className="flex h-screen items-center justify-center bg-panel text-sm text-warm-white/60">Checking your account…</div>;
+
+  if (signedIn && licenseMessage && !licenseDismissed) return (
+    <LicenseLockedScreen
+      message={licenseMessage}
+      onContinue={() => { licenseDismissedRef.current = true; setLicenseDismissed(true); }}
+    />
+  );
 
   if (signedIn) return <>
     <div className={startingUp ? 'invisible pointer-events-none fixed inset-0' : ''} aria-hidden={startingUp}>{children}</div>

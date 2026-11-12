@@ -8,6 +8,7 @@
  */
 import { getAccountDatabaseName, getAccountStorageKey } from './accountStorage';
 import { API_BASE_URL } from './apiConfig';
+import { isLicenseRequiredPayload, notifyLicenseRequired } from './license';
 import { STANDARD_SONGBOOKS } from '../data/standardHymns';
 import { splitLyrics } from './slideLibrary';
 import { isCustomBackground } from './slideBackground';
@@ -99,8 +100,13 @@ const accountSongbookRequest = async (token: string, path: string, init: Request
     ...init,
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...init.headers },
   });
-  const data = await response.json().catch(() => ({})) as { message?: string; songbooks?: SyncedSongbook[]; songbook?: SyncedSongbook };
-  if (!response.ok) throw new Error(data.message ?? `Songbook sync failed (${response.status}).`);
+  const data = await response.json().catch(() => ({})) as { message?: string; songbooks?: SyncedSongbook[]; songbook?: SyncedSongbook; license_required?: boolean };
+  if (!response.ok) {
+    // A missing one-time license is not a sync failure to retry: tell the app shell
+    // so it can explain the lock, and leave the local library untouched.
+    if (isLicenseRequiredPayload(data)) notifyLicenseRequired(data.message);
+    throw new Error(data.message ?? `Songbook sync failed (${response.status}).`);
+  }
   return data;
 };
 

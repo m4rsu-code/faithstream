@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, protocol, safeStorage, screen, session } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, protocol, safeStorage, screen, session, shell } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -1001,6 +1001,18 @@ app.whenReady().then(() => {
     return true;
   });
   ipcMain.handle('window:close', (event) => BrowserWindow.fromWebContents(event.sender)?.close());
+  // The license screen links to the website; only http(s) is ever handed to the OS.
+  ipcMain.handle('shell:open-external', async (event, url: unknown) => {
+    if (!isTrustedMainSender(event) || typeof url !== 'string' || url.length > 2048) return false;
+    try {
+      const target = new URL(url);
+      if (target.protocol !== 'https:' && target.protocol !== 'http:') return false;
+      await shell.openExternal(target.toString());
+      return true;
+    } catch {
+      return false;
+    }
+  });
   ipcMain.handle('window:set-authenticated-mode', (event, authenticated: unknown) => {
     if (typeof authenticated !== 'boolean') return false;
     const window = BrowserWindow.fromWebContents(event.sender);

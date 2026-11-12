@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
   saveStreamSettings: (settings: { serverUrl: string; streamKey: string }) => ipcRenderer.invoke('stream-settings:save', settings) as Promise<boolean>,
   saveAuthToken: (token: string) => ipcRenderer.invoke('auth:token:set', token) as Promise<boolean>,
   clearAuthToken: () => ipcRenderer.invoke('auth:token:clear') as Promise<boolean>,
+  openExternalUrl: (url: string) => ipcRenderer.invoke('shell:open-external', url) as Promise<boolean>,
   getStudioDisplays: () => ipcRenderer.invoke('studio:get-displays'),
   registerStudioMusicFile: (file: File) => ipcRenderer.invoke('studio:music:register', webUtils.getPathForFile(file), file.name) as Promise<{ ok: boolean; asset?: { id: string; name: string; path: string; url: string }; message?: string }>,
   resolveStudioMusicFiles: (assets: { id: string; name: string; path: string; createdAt: number }[]) => ipcRenderer.invoke('studio:music:resolve', assets) as Promise<{ id: string; name: string; path: string; createdAt: number; url: string; available: boolean }[]>,
