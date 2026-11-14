@@ -11,6 +11,9 @@ interface Window {
     registerStudioMusicFile: (file: File) => Promise<{ ok: boolean; asset?: { id: string; name: string; path: string; url: string }; message?: string }>;
     resolveStudioMusicFiles: (assets: { id: string; name: string; path: string; createdAt: number }[]) => Promise<{ id: string; name: string; path: string; createdAt: number; url: string; available: boolean }[]>;
     removeStudioMusicFile: (id: string) => Promise<boolean>;
+    listPresentationBackgrounds: () => Promise<{ id: string; name: string; type: 'image' | 'video'; collection: string; url: string; size: number; thumbnailUrl?: string }[]>;
+    preparePresentationBackgroundThumbnails: () => Promise<boolean>;
+    onPresentationBackgroundsChanged: (callback: () => void) => () => void;
     startMobileCamPairing: (sourceId: number) => Promise<{ ok: boolean; sourceId?: number; port?: number; code?: string; expiresAt?: number; addresses?: string[]; message?: string }>;
     renewMobileCamPairingCode: (sourceId: number) => Promise<{ ok: boolean; sourceId?: number; code?: string; expiresAt?: number; message?: string }>;
     stopMobileCamPairing: (sourceId: number) => Promise<boolean>;

@@ -37,6 +37,7 @@ import ScripturePickerModal, { preloadBible, type SelectedScriptureVerse } from 
 import CountdownDisplay, { paintCountdown, type CountdownSettings } from '../components/CountdownDisplay';
 import StudioSongsPanel from '../components/StudioSongsPanel';
 import SongDesignPanel from '../components/SongDesignPanel';
+import SeamlessLoopVideo from '../components/SeamlessLoopVideo';
 import { hasLineAligns, lineAlignAt } from '../utils/lineAlign';
 import { backgroundClasses, backgroundStyle, customBackgroundStops } from '../utils/slideBackground';
 import { DEFAULT_SONG_STYLE, SHOW_SONG_EVENT, SONG_SAVED_EVENT, SONG_SLIDE_SETTINGS_EVENT, compareSongs, firstLine, loadLibrary, searchSongs, songLineKey, songSlideLayouts, type Song, type SongStyle, type SongTextLayout } from '../utils/songbooks';
@@ -58,9 +59,20 @@ type PresentationTextBox = {
   valign?: 'top' | 'middle' | 'bottom';
   /** Single lines aligned differently from the box (index = line number; null = follow the box). */
   lineAligns?: ('left' | 'center' | 'right' | 'justify' | null)[];
+  animation?: StudioAnimation;
+  animationDuration?: number;
+  animationDelay?: number;
+  animationEasing?: 'smooth' | 'linear' | 'snappy';
 };
-type PresentationPicture = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; layerOrder?: number | 'back' | 'front' };
-type PresentationShape = { id: number; kind: string; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number };
+type StudioAnimation = 'none' | 'fade' | 'rise' | 'pop' | 'typewriter' | 'slide-left' | 'slide-right' | 'slide-up' | 'slide-down' | 'zoom' | 'drift' | 'bounce' | 'spin' | 'blur';
+const studioAnimationStyle = (item: { animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' }) => ({
+  animationDuration: `${item.animationDuration ?? (item.animation === 'typewriter' ? 1500 : 700)}ms`,
+  animationDelay: `${item.animationDelay ?? 0}ms`,
+  animationTimingFunction: item.animationEasing === 'linear' ? 'linear' : item.animationEasing === 'snappy' ? 'cubic-bezier(.16,1,.3,1)' : 'cubic-bezier(.2,.75,.25,1)',
+  animationFillMode: 'both' as const,
+});
+type PresentationPicture = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; layerOrder?: number | 'back' | 'front'; animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' };
+type PresentationShape = { id: number; kind: string; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number; animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' };
 type PresentationDesign = {
   box?: PresentationTextBox | null;
   extraBoxes?: { id: number; box: PresentationTextBox }[];
@@ -77,6 +89,8 @@ type Scene = {
   bg: string; // tailwind gradient classes (placeholder until real media is wired in)
   slides: StudioSlide[];
   presentationId?: string;
+  /** Studio creates one presentation source for a linked deck the first time it is used. */
+  presentationSourceInitialized?: boolean;
   /** Set when this scene shows a song from the songbooks; editing the song updates the scene. */
   songId?: string;
 };
@@ -459,7 +473,7 @@ function Fit({
   );
 }
 
-function ProgramTextBox({ box, defaultLayerOrder = 3000 }: { box: PresentationTextBox; defaultLayerOrder?: number }) {
+function ProgramTextBox({ box, defaultLayerOrder = 3000, animate = false }: { box: PresentationTextBox; defaultLayerOrder?: number; animate?: boolean }) {
   const wrap = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
   const [fitScale, setFitScale] = useState(1);
@@ -478,7 +492,7 @@ function ProgramTextBox({ box, defaultLayerOrder = 3000 }: { box: PresentationTe
     return () => observer.disconnect();
   }, [box]);
   return (
-    <div ref={wrap} className={`absolute flex ${box.valign === 'top' ? 'items-start' : box.valign === 'bottom' ? 'items-end' : 'items-center'} overflow-hidden`} style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`, zIndex: typeof box.layerOrder === 'number' ? box.layerOrder : box.layerOrder === 'front' ? 5000 : box.layerOrder === 'back' ? 0 : defaultLayerOrder, background: box.boxBgOn ? box.boxBg : undefined, borderRadius: '1cqw' }}>
+    <div ref={wrap} className={`absolute flex ${box.valign === 'top' ? 'items-start' : box.valign === 'bottom' ? 'items-end' : 'items-center'} overflow-hidden ${animate && box.animation && box.animation !== 'none' ? `slide-content-${box.animation}` : ''}`} style={{ ...(animate && box.animation && box.animation !== 'none' ? studioAnimationStyle(box) : {}), left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`, zIndex: typeof box.layerOrder === 'number' ? box.layerOrder : box.layerOrder === 'front' ? 5000 : box.layerOrder === 'back' ? 0 : defaultLayerOrder, background: box.boxBgOn ? box.boxBg : undefined, borderRadius: '1cqw' }}>
       <div ref={inner} className="w-full whitespace-pre-wrap wrap-break-word" style={{ textAlign: box.align, textAlignLast: box.align === 'justify' ? 'left' : undefined, transform: `scale(${fitScale})`, transformOrigin: box.valign === 'top' ? 'top center' : box.valign === 'bottom' ? 'bottom center' : 'center', lineHeight: box.lineHeight, letterSpacing: `${(box.letterSpacing / 1280) * 100}cqw` }}>
         <div className="whitespace-pre-wrap" style={{ fontFamily: `"${box.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(box.size / 1280) * 100}cqw`, fontWeight: box.bold ? 800 : 500, fontStyle: box.italic ? 'italic' : 'normal', textDecoration: box.underline ? 'underline' : 'none', textTransform: box.uppercase ? 'uppercase' : undefined, color: box.color, textShadow: box.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : undefined }}>{hasLineAligns(box.lineAligns)
           ? box.text.split('\n').map((line, lineIndex) => {
@@ -498,12 +512,16 @@ function SlideView({
   scale,
   minRem = 0.75,
   maxRem = 2.25,
+  animate = false,
+  seamlessBackground = false,
 }: {
   bg: string;
   slide?: StudioSlide;
   scale?: number;
   minRem?: number;
   maxRem?: number;
+  animate?: boolean;
+  seamlessBackground?: boolean;
 }) {
   if (slide?.design) {
     const boxes = [slide.design.box, ...(slide.design.extraBoxes ?? []).map((item) => item.box)]
@@ -511,17 +529,19 @@ function SlideView({
     return (
        <div className={`relative isolate h-full w-full overflow-hidden bg-linear-to-br ${backgroundClasses(slide.bg ?? bg)}`} style={{ containerType: 'inline-size', ...backgroundStyle(slide.bg ?? bg) }}>
         {slide.bgImage && <img src={slide.bgImage} alt="" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />}
-        {slide.bgVideo && <video src={slide.bgVideo} autoPlay muted={slide.bgVideoMuted ?? true} loop playsInline className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />}
+        {slide.bgVideo && (seamlessBackground
+          ? <SeamlessLoopVideo key={slide.bgVideo} src={slide.bgVideo} muted={slide.bgVideoMuted ?? true} style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />
+          : <video src={slide.bgVideo} autoPlay muted={slide.bgVideoMuted ?? true} loop playsInline className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />)}
         <div className="absolute inset-0 bg-black" style={{ opacity: (slide.dim ?? 0) / 100 }} />
         {slide.design.pictures?.map((picture, index) => {
           const zIndex = typeof picture.layerOrder === 'number' ? picture.layerOrder : picture.layerOrder === 'front' ? 5000 : picture.layerOrder === 'back' ? 0 : 1000 + index;
-          const style = { left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, zIndex };
+          const style = { ...(animate && picture.animation && picture.animation !== 'none' ? studioAnimationStyle(picture) : {}), left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, zIndex };
           return picture.mediaType === 'video'
-            ? <video key={picture.id} src={picture.src} controls playsInline muted={picture.muted ?? false} className="absolute object-contain" style={style} />
-            : <img key={picture.id} src={picture.src} alt="" draggable={false} className="absolute object-contain" style={style} />;
+            ? <video key={picture.id} src={picture.src} controls playsInline muted={picture.muted ?? false} className={`absolute object-contain ${animate && picture.animation && picture.animation !== 'none' ? `slide-content-${picture.animation}` : ''}`} style={style} />
+            : <img key={picture.id} src={picture.src} alt="" draggable={false} className={`absolute object-contain ${animate && picture.animation && picture.animation !== 'none' ? `slide-content-${picture.animation}` : ''}`} style={style} />;
         })}
-        {slide.design.shapes?.map((shape, index) => <div key={shape.id} className="absolute" style={{ left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
-        {boxes.map((box, index) => <ProgramTextBox key={index} box={box} defaultLayerOrder={3000 + index} />)}
+        {slide.design.shapes?.map((shape, index) => <div key={shape.id} className={`absolute ${animate && shape.animation && shape.animation !== 'none' ? `slide-content-${shape.animation}` : ''}`} style={{ ...(animate && shape.animation && shape.animation !== 'none' ? studioAnimationStyle(shape) : {}), left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
+        {boxes.map((box, index) => <ProgramTextBox key={index} box={box} defaultLayerOrder={3000 + index} animate={animate} />)}
         {slide.countdown && <CountdownDisplay countdown={slide.countdown} />}
       </div>
     );
@@ -531,7 +551,9 @@ function SlideView({
        className={`relative isolate flex h-full w-full flex-col items-center justify-center overflow-hidden bg-linear-to-br p-2 text-center text-white ${backgroundClasses(slide?.bg ?? bg)}`}
       style={slide?.bgImage ? { backgroundImage: `linear-gradient(rgba(0,0,0,${(slide.dim ?? 20) / 100}), rgba(0,0,0,${(slide.dim ?? 20) / 100})), url("${slide.bgImage}")`, backgroundSize: 'cover', backgroundPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` } : backgroundStyle(slide?.bg ?? bg)}
     >
-      {slide?.bgVideo && <video src={slide.bgVideo} autoPlay muted={slide.bgVideoMuted ?? true} loop playsInline className="absolute inset-0 h-full w-full object-cover" />}
+      {slide?.bgVideo && (seamlessBackground
+        ? <SeamlessLoopVideo key={slide.bgVideo} src={slide.bgVideo} muted={slide.bgVideoMuted ?? true} />
+        : <video src={slide.bgVideo} autoPlay muted={slide.bgVideoMuted ?? true} loop playsInline className="absolute inset-0 h-full w-full object-cover" />)}
       {slide?.bgVideo && <div className="absolute inset-0 bg-black/20" />}
       {slide?.countdown && <CountdownDisplay countdown={slide.countdown} />}
       {slide && scale && (
@@ -648,7 +670,7 @@ function SourcePreview({
       ) : source.kind === 'media' && media?.type === 'image' ? (
         <img src={media.url} alt={source.name} className="h-full w-full object-cover" />
       ) : source.kind === 'presentation' ? (
-        <div data-program-slide-view className="h-full w-full"><SlideView bg={bg} slide={slide} scale={8} minRem={0.5} /></div>
+        <div data-program-slide-view className="h-full w-full"><SlideView key={slide?.id ?? 'empty'} bg={bg} slide={slide} scale={8} minRem={0.5} animate seamlessBackground /></div>
       ) : source.kind === 'text' ? (
          <div className="flex h-full items-center justify-center bg-linear-to-br from-slate-800 to-slate-950 p-3 text-center text-sm font-semibold text-white">{source.text || 'Text overlay'}</div>
       ) : (
@@ -967,6 +989,62 @@ type ProgramMediaUrls = Record<string, { type: 'image' | 'video'; url: string }>
 type ProgramTransition = { kind: 'Fade' | 'Slide'; startedAt: number; duration: number; from: StudioSlide; fromBg: string; to: StudioSlide; toBg: string };
 const safeStreamImages = new Map<string, Promise<HTMLImageElement | null>>();
 const safeStreamVideos = new Map<string, Promise<HTMLVideoElement | null>>();
+type StreamVideoLoop = { front: HTMLVideoElement; back: HTMLVideoElement; fadeStart: number | null; duration: number; swapping: boolean; callback?: number; timer?: number };
+const seamlessStreamLoops = new WeakMap<HTMLVideoElement, StreamVideoLoop>();
+const startSeamlessStreamLoop = (video: HTMLVideoElement) => {
+  if (seamlessStreamLoops.has(video)) return;
+  const back = document.createElement('video');
+  back.crossOrigin = 'anonymous'; back.muted = true; back.playsInline = true; back.preload = 'auto'; back.src = video.currentSrc || video.src; back.load();
+  const loop: StreamVideoLoop = { front: video, back, fadeStart: null, duration: 1500, swapping: false };
+  seamlessStreamLoops.set(video, loop);
+  video.loop = false;
+  const frameVideo = (target: HTMLVideoElement) => target as HTMLVideoElement & { requestVideoFrameCallback?: (callback: () => void) => number };
+  const schedule = () => {
+    const current = loop.front;
+    const requestFrame = frameVideo(current).requestVideoFrameCallback;
+    const advance = () => {
+      const remaining = loop.front.duration - loop.front.currentTime;
+      if (!loop.swapping && loop.fadeStart === null && loop.front.duration > loop.duration / 1000 + 0.25 && remaining <= loop.duration / 1000 + 0.15) {
+        loop.swapping = true;
+        loop.back.pause(); loop.back.currentTime = 0;
+        void loop.back.play().then(() => {
+          const reveal = () => { loop.fadeStart = performance.now(); schedule(); };
+          const requestBackFrame = frameVideo(loop.back).requestVideoFrameCallback;
+          if (requestBackFrame) requestBackFrame.call(loop.back, reveal); else window.setTimeout(reveal, 40);
+        }).catch(() => {
+          loop.front.currentTime = 0;
+          void loop.front.play().catch(() => undefined);
+          loop.swapping = false;
+        });
+        return;
+      }
+      if (loop.fadeStart !== null && performance.now() - loop.fadeStart >= loop.duration) {
+        const previous = loop.front;
+        loop.front = loop.back; loop.back = previous;
+        loop.fadeStart = null; loop.swapping = false;
+        previous.pause(); previous.currentTime = 0;
+      }
+      schedule();
+    };
+    if (requestFrame) loop.callback = requestFrame.call(current, advance);
+    else loop.timer = window.setTimeout(advance, 40);
+  };
+  schedule();
+};
+const drawSeamlessStreamVideo = (ctx: CanvasRenderingContext2D, video: HTMLVideoElement, x: number, y: number, width: number, height: number) => {
+  const loop = seamlessStreamLoops.get(video);
+  if (!loop || loop.fadeStart === null) { ctx.drawImage(loop?.front ?? video, x, y, width, height); return; }
+  const progress = Math.min(1, Math.max(0, (performance.now() - loop.fadeStart) / loop.duration));
+  if (progress >= 1) {
+    const previous = loop.front; loop.front = loop.back; loop.back = previous;
+    loop.fadeStart = null; loop.swapping = false;
+    previous.pause(); previous.currentTime = 0;
+    ctx.drawImage(loop.front, x, y, width, height);
+    return;
+  }
+  ctx.save(); const opacity = ctx.globalAlpha; ctx.globalAlpha = opacity * (1 - progress); ctx.drawImage(loop.front, x, y, width, height);
+  ctx.globalAlpha = opacity * progress; ctx.drawImage(loop.back, x, y, width, height); ctx.restore();
+};
 const loadSafeStreamImage = (url: string) => {
   let pending = safeStreamImages.get(url);
   if (!pending) {
@@ -1025,7 +1103,7 @@ const fillJustifiedLine = (context: CanvasRenderingContext2D, line: string, x: n
   let cursor = x;
   for (const word of words) { context.fillText(word, cursor, y); cursor += context.measureText(word).width + gap; }
 };
-const paintProgramSlide = async (ctx: CanvasRenderingContext2D, slide: StudioSlide, bg: string, w: number, h: number, assets: ProgramMediaUrls, fontScale: number) => {
+const paintProgramSlide = async (ctx: CanvasRenderingContext2D, slide: StudioSlide, bg: string, w: number, h: number, assets: ProgramMediaUrls, fontScale: number, animationElapsed = Number.POSITIVE_INFINITY) => {
   const gradient = ctx.createLinearGradient(0, 0, w, h);
   gradient.addColorStop(0, streamGradientColor(slide.bg ?? bg, true)); gradient.addColorStop(1, streamGradientColor(slide.bg ?? bg, false));
   ctx.fillStyle = gradient; ctx.fillRect(0, 0, w, h);
@@ -1033,7 +1111,7 @@ const paintProgramSlide = async (ctx: CanvasRenderingContext2D, slide: StudioSli
   const bgUrl = bgAsset?.url ?? slide.bgImage;
   if (bgAsset?.type === 'video' || slide.bgVideo) {
     const video = await loadSafeStreamVideo(bgAsset?.type === 'video' ? bgAsset.url : slide.bgVideo!);
-    if (video?.readyState && video.videoWidth) ctx.drawImage(video, 0, 0, w, h);
+    if (video?.readyState && video.videoWidth) { startSeamlessStreamLoop(video); drawSeamlessStreamVideo(ctx, video, 0, 0, w, h); }
   } else if (bgUrl) {
     const image = await loadSafeStreamImage(bgUrl);
     if (image) ctx.drawImage(image, 0, 0, w, h);
@@ -1049,6 +1127,33 @@ const paintProgramSlide = async (ctx: CanvasRenderingContext2D, slide: StudioSli
       ...boxes.map((item, index) => ({ order: typeof item.layerOrder === 'number' ? item.layerOrder : item.layerOrder === 'front' ? 5000 : item.layerOrder === 'back' ? 0 : 3000 + index, type: 'box' as const, index })),
     ].sort((a, b) => a.order - b.order);
     for (const layer of ordered) {
+      ctx.save();
+      try {
+      const item = layer.type === 'picture' ? pictures[layer.index] : layer.type === 'shape' ? shapes[layer.index] : boxes[layer.index];
+      const animation = item?.animation ?? 'none';
+      const duration = Math.max(150, item?.animationDuration ?? (animation === 'typewriter' ? 1500 : 700));
+      const rawProgress = animation === 'none' ? 1 : Math.min(1, Math.max(0, (animationElapsed - (item?.animationDelay ?? 0)) / duration));
+      const progress = item?.animationEasing === 'linear' ? rawProgress : item?.animationEasing === 'snappy' ? 1 - (1 - rawProgress) ** 3 : rawProgress * rawProgress * (3 - 2 * rawProgress);
+      const ix = (item?.x ?? 0) / 100 * w; const iy = (item?.y ?? 0) / 100 * h; const iw = (item?.w ?? 0) / 100 * w; const ih = (item?.h ?? 0) / 100 * h;
+      if (animation !== 'none') {
+        ctx.globalAlpha *= progress;
+        if (animation === 'rise') ctx.translate(0, (1 - progress) * ih * .18);
+        if (animation === 'drift') ctx.translate(0, (1 - progress) * ih * .14);
+        if (animation === 'slide-left') ctx.translate(-(1 - progress) * iw, 0);
+        if (animation === 'slide-right') ctx.translate((1 - progress) * iw, 0);
+        if (animation === 'slide-up') ctx.translate(0, (1 - progress) * ih);
+        if (animation === 'slide-down') ctx.translate(0, -(1 - progress) * ih);
+        if (animation === 'pop' || animation === 'zoom' || animation === 'bounce' || animation === 'spin') {
+          const scale = animation === 'zoom' ? .25 + progress * .75 : animation === 'bounce' ? .72 + progress * .28 + Math.sin(progress * Math.PI * 3) * .12 * (1 - progress) : .78 + progress * .22;
+          ctx.translate(ix + iw / 2, iy + ih / 2);
+          if (animation === 'spin') ctx.rotate((1 - progress) * -Math.PI * 2);
+          ctx.scale(scale, scale);
+          ctx.translate(-(ix + iw / 2), -(iy + ih / 2));
+        }
+        if (animation === 'blur') ctx.filter = `blur(${(1 - progress) * 14}px)`;
+        if (animation === 'typewriter') { ctx.beginPath(); ctx.rect(ix, iy, iw * progress, ih); ctx.clip(); }
+      }
+      if (animation !== 'none' && progress <= 0) continue;
       if (layer.type === 'picture') {
         const picture = pictures[layer.index]; if (!picture) continue;
         const x = picture.x / 100 * w; const y = picture.y / 100 * h; const pw = picture.w / 100 * w; const ph = picture.h / 100 * h;
@@ -1092,6 +1197,7 @@ const paintProgramSlide = async (ctx: CanvasRenderingContext2D, slide: StudioSli
           if (justify && !row.last) fillJustifiedLine(ctx, row.text, x, ly, bw); else ctx.fillText(row.text, tx, ly, bw);
         }); ctx.shadowBlur = 0;
       }
+      } finally { ctx.restore(); }
     }
     const countdown = slide.countdown ?? slide.design.countdown;
     if (countdown) paintCountdown(ctx, countdown, w, h);
@@ -1103,16 +1209,17 @@ const paintProgramSlide = async (ctx: CanvasRenderingContext2D, slide: StudioSli
     if (slide.ref) { ctx.font = `500 ${Math.max(14, 20 * fontScale)}px sans-serif`; ctx.fillText(slide.ref, w / 2, h / 2 + lines.length * lineHeight / 2, w * .9); }
   }
 };
-const renderProgramFrame = async (canvas: HTMLCanvasElement, stage: HTMLElement, composition: { slide: StudioSlide; bg: string; layers: ProgramLayer[]; mediaUrls: ProgramMediaUrls; transition: ProgramTransition | null }) => {
+const renderProgramFrame = async (canvas: HTMLCanvasElement, stage: HTMLElement, composition: { slide: StudioSlide; bg: string; layers: ProgramLayer[]; mediaUrls: ProgramMediaUrls; transition: ProgramTransition | null; animationStartedAt: number }) => {
   const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('Could not create the stream render canvas.');
   const w = canvas.width; const h = canvas.height; ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h);
+  const animationElapsed = performance.now() - composition.animationStartedAt;
   const stageWidth = Math.max(1, stage.getBoundingClientRect().width);
   const fontScale = w / stageWidth;
-  const paintLayerSlide = async (slide: StudioSlide, bg: string, x: number, y: number, layerWidth: number, layerHeight: number, opacity = 1, offset = 0) => {
+  const paintLayerSlide = async (slide: StudioSlide, bg: string, x: number, y: number, layerWidth: number, layerHeight: number, opacity = 1, offset = 0, layerAnimationElapsed = animationElapsed) => {
     ctx.save();
     ctx.beginPath(); ctx.rect(x, y, layerWidth, layerHeight); ctx.clip();
     ctx.translate(x + offset, y); ctx.globalAlpha *= opacity;
-    await paintProgramSlide(ctx, slide, bg, layerWidth, layerHeight, composition.mediaUrls, fontScale * layerWidth / w);
+    await paintProgramSlide(ctx, slide, bg, layerWidth, layerHeight, composition.mediaUrls, fontScale * layerWidth / w, layerAnimationElapsed);
     ctx.restore();
   };
   for (const { source, layout } of [...composition.layers].reverse()) {
@@ -1122,10 +1229,10 @@ const renderProgramFrame = async (canvas: HTMLCanvasElement, stage: HTMLElement,
       const transition = composition.transition;
       const progress = transition ? Math.min(1, Math.max(0, (performance.now() - transition.startedAt) / transition.duration)) : 1;
       if (transition && progress < 1 && transition.kind === 'Fade') {
-        await paintLayerSlide(transition.from, transition.fromBg, x, y, lw, lh, 1 - progress);
+        await paintLayerSlide(transition.from, transition.fromBg, x, y, lw, lh, 1 - progress, 0, Number.POSITIVE_INFINITY);
         await paintLayerSlide(transition.to, transition.toBg, x, y, lw, lh, progress);
       } else if (transition && progress < 1 && transition.kind === 'Slide') {
-        await paintLayerSlide(transition.from, transition.fromBg, x, y, lw, lh, 1, -progress * lw);
+        await paintLayerSlide(transition.from, transition.fromBg, x, y, lw, lh, 1, -progress * lw, Number.POSITIVE_INFINITY);
         await paintLayerSlide(transition.to, transition.toBg, x, y, lw, lh, 1, (1 - progress) * lw);
       } else {
         await paintLayerSlide(composition.slide, composition.bg, x, y, lw, lh);
@@ -1227,7 +1334,8 @@ export default function Studio() {
   const [previewSetupVisibility, setPreviewSetupVisibility] = useState<Record<number, boolean>>({});
   const [cameraOnlySnapshot, setCameraOnlySnapshot] = useState<{ sceneId: number; sources: { id: number; visible: boolean; layout?: Source['layout'] }[] } | null>(null);
   const programCanvasRef = useRef<HTMLDivElement>(null);
-  const streamCompositionRef = useRef<{ slide: StudioSlide; bg: string; layers: ProgramLayer[]; mediaUrls: ProgramMediaUrls; transition: ProgramTransition | null } | null>(null);
+  const streamCompositionRef = useRef<{ slide: StudioSlide; bg: string; layers: ProgramLayer[]; mediaUrls: ProgramMediaUrls; transition: ProgramTransition | null; animationStartedAt: number } | null>(null);
+  const streamAnimationStartedAt = useRef(performance.now());
   const streamFrameBusy = useRef(false);
   const previewSetupCanvasRef = useRef<HTMLDivElement>(null);
   const previewSetupDrag = useRef<{ id: number; mode: 'move' | 'resize'; startX: number; startY: number; layout: { x: number; y: number; width: number; height: number } } | null>(null);
@@ -1493,6 +1601,30 @@ export default function Studio() {
       window.removeEventListener('storage', onPresentationsStorage);
     };
   }, []);
+
+  // A linked deck needs a presentation source in the Program composition. Without it,
+  // changing the on-air slide reference updates state but the output canvas stays empty.
+  // Mark each linked scene once so a user can still intentionally remove its source later.
+  useEffect(() => {
+    const pendingScenes = scenes.filter((item) => (item.presentationId || item.songId) && !item.presentationSourceInitialized);
+    if (!pendingScenes.length) return;
+
+    const pendingIds = new Set(pendingScenes.map((item) => item.id));
+    setSources((current) => {
+      const next = [...current];
+      let nextId = Math.max(0, ...next.map((source) => source.id)) + 1;
+      for (const item of pendingScenes) {
+        const alreadyAvailable = next.some((source) => source.kind === 'presentation' && (source.shared || source.sceneId === item.id));
+        if (alreadyAvailable) continue;
+        next.push({
+          id: nextId++, sceneId: item.id, shared: false, name: 'Presentation slides', kind: 'presentation', visible: true,
+          layout: { x: 0, y: 0, width: 100, height: 100 },
+        });
+      }
+      return next;
+    });
+    setScenes((current) => current.map((item) => pendingIds.has(item.id) ? { ...item, presentationSourceInitialized: true } : item));
+  }, [scenes]);
 
   useEffect(() => {
     try { localStorage.setItem(STUDIO_OUTPUT_REF_KEY, JSON.stringify(offlineSlide)); } catch { /* Output window can still follow the current Studio session. */ }
@@ -1972,6 +2104,7 @@ export default function Studio() {
     const key = `${onAir.sceneId}:${onAir.slideIdx}`;
     const current = resolve(onAir);
     const previous = previousOnAirTransition.current;
+    if (!previous || previous.key !== key) streamAnimationStartedAt.current = performance.now();
     const durationMs = Number.parseFloat(duration) * 1000 || 1000;
     if (previous && previous.key !== key && transition !== 'Cut') {
       setStreamTransition({ kind: transition === 'Slide' ? 'Slide' : 'Fade', startedAt: performance.now(), duration: durationMs, from: previous.slide, fromBg: previous.bg, to: current.slide, toBg: current.bg });
@@ -2088,6 +2221,7 @@ export default function Studio() {
     layers: visibleProgramOverlays.map((source) => ({ source, layout: getProgramLayout(source)! })),
     mediaUrls,
     transition: streamTransition,
+    animationStartedAt: streamAnimationStartedAt.current,
   };
   const selectedProgramOverlay = previewSetupOverlays.find((source) => source.id === selectedProgramSource);
   const selectedProgramLayout = selectedProgramOverlay ? getPreviewSetupLayout(selectedProgramOverlay) : null;
@@ -2443,13 +2577,26 @@ export default function Studio() {
   };
 
   const takePreviewSetupOnAir = () => {
+    // Read the saved deck again at the moment it is sent to Program. This covers
+    // route changes and missed cross-page events, so the live scene always uses
+    // the latest saved slide design and media references.
+    const latestPresentations = new Map(readSavedPresentations().map((presentation) => [presentation.id, presentation]));
+    const latestScenes = scenes.map((item) => {
+      const presentation = item.presentationId ? latestPresentations.get(item.presentationId) : undefined;
+      return hydrateSceneMedia(presentation ? syncPresentationSlides(item, presentation) : item, mediaUrlsRef.current);
+    });
+    const targetScene = latestScenes.find((item) => item.id === previewSetupRef.sceneId);
+    const targetRef = targetScene
+      ? { sceneId: targetScene.id, slideIdx: Math.min(previewSetupRef.slideIdx, Math.max(0, targetScene.slides.length - 1)) }
+      : previewSetupRef;
+    setScenes(latestScenes);
     setSources((current) => current.map((source) => ({
       ...source,
       ...(previewSetupLayouts[source.id] ? { layout: previewSetupLayouts[source.id] } : {}),
       ...(previewSetupVisibility[source.id] !== undefined ? { visible: previewSetupVisibility[source.id] } : {}),
     })));
-    setPreview(previewSetupRef);
-    setOnAir(previewSetupRef);
+    setPreview(targetRef);
+    setOnAir(targetRef);
     setSelectedProgramSource(null);
   };
 
@@ -4171,7 +4318,7 @@ export function StudioDisplayOutput() {
 
   return (
     <main className="fixed inset-0 overflow-hidden bg-black" style={{ containerType: 'inline-size' }} aria-label="Slideshow output">
-      <SlideView bg={scene?.bg ?? 'from-black to-black'} slide={outputSlide} scale={10} minRem={0.75} maxRem={8} />
+      <SlideView key={`${currentRef.sceneId}:${currentRef.slideIdx}`} bg={scene?.bg ?? 'from-black to-black'} slide={outputSlide} scale={10} minRem={0.75} maxRem={8} animate seamlessBackground />
     </main>
   );
 }

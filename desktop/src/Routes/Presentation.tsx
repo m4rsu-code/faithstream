@@ -32,6 +32,7 @@ import {
   Loader2,
   FolderOpen,
   FolderPlus,
+  GripVertical,
   Lock,
   MoreHorizontal,
   Pencil,
@@ -83,11 +84,20 @@ import SlideTextEditor from '../components/SlideTextEditor';
 import { backgroundClasses, backgroundStyle, customBackground, parseCustomBackground } from '../utils/slideBackground';
 import { activeAlign, alignText, hasLineAligns, lineAlignAt, remapLineAligns, type TextRange } from '../utils/lineAlign';
 import BodyPortal from '../components/BodyPortal';
+import SeamlessLoopVideo from '../components/SeamlessLoopVideo';
 
 /* ---------- Types & data ---------- */
 
 type Align = 'left' | 'center' | 'right' | 'justify';
 type VAlign = 'top' | 'middle' | 'bottom';
+type EntranceAnimation = 'none' | 'fade' | 'rise' | 'pop' | 'typewriter' | 'slide-left' | 'slide-right' | 'slide-up' | 'slide-down' | 'zoom' | 'drift' | 'bounce' | 'spin' | 'blur';
+type AnimationEasing = 'smooth' | 'linear' | 'snappy';
+const animationCssStyle = (item: { animation?: EntranceAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: AnimationEasing }) => ({
+  animationDuration: `${item.animationDuration ?? (item.animation === 'typewriter' ? 1500 : 700)}ms`,
+  animationDelay: `${item.animationDelay ?? 0}ms`,
+  animationTimingFunction: item.animationEasing === 'linear' ? 'linear' : item.animationEasing === 'snappy' ? 'cubic-bezier(.16,1,.3,1)' : 'cubic-bezier(.2,.75,.25,1)',
+  animationFillMode: 'both' as const,
+});
 const VALIGN_ITEMS: Record<VAlign, string> = { top: 'items-start', middle: 'items-center', bottom: 'items-end' };
 const VALIGN_ORIGIN: Record<VAlign, string> = { top: 'top center', middle: 'center', bottom: 'bottom center' };
 
@@ -117,6 +127,10 @@ type TextBox = {
   valign?: VAlign;
   /** Alignment of single lines that differ from the box's `align` (index = line number; null = follow the box). */
   lineAligns?: (Align | null)[];
+  animation?: EntranceAnimation;
+  animationDuration?: number;
+  animationDelay?: number;
+  animationEasing?: AnimationEasing;
 };
 
 /** Applies a change to a text box; editing the text keeps each line's own alignment. */
@@ -126,10 +140,10 @@ const patchTextBox = (box: TextBox, patch: Partial<TextBox>): TextBox => {
   return next;
 };
 
-type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; aspectRatio?: number; lockAspectRatio?: boolean; layerOrder?: number | 'back' | 'front' };
-type ShapeT = { id: number; kind: 'rectangle' | 'circle' | 'triangle' | 'line' | 'star' | 'arrow'; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number };
-type MediaAsset = { id: string; name: string; type: 'image' | 'video'; category?: 'background' | 'slide'; collection?: string; blob: Blob; originalBlob?: Blob; optimized?: boolean; createdAt: number; url: string };
-type StoredMediaAsset = Omit<MediaAsset, 'url'>;
+type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; aspectRatio?: number; lockAspectRatio?: boolean; layerOrder?: number | 'back' | 'front'; animation?: EntranceAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: AnimationEasing };
+type ShapeT = { id: number; kind: 'rectangle' | 'circle' | 'triangle' | 'line' | 'star' | 'arrow'; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number; animation?: EntranceAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: AnimationEasing };
+type MediaAsset = { id: string; name: string; type: 'image' | 'video'; category?: 'background' | 'slide'; collection?: string; blob: Blob; thumbnailBlob?: Blob; originalBlob?: Blob; optimized?: boolean; createdAt: number; url: string; thumbnailUrl?: string; fromFolder?: boolean; protected?: boolean; byteSize?: number };
+type StoredMediaAsset = Omit<MediaAsset, 'url' | 'thumbnailUrl'>;
 
 type SlideT = {
   id: number;
@@ -372,6 +386,22 @@ const readMediaAssets = async (): Promise<StoredMediaAsset[]> => {
   });
 };
 
+type FolderBackgroundEntry = { id: string; name: string; type: 'image' | 'video'; collection: string; url: string; size: number; thumbnailUrl?: string };
+const folderBackgroundAssets = (items: FolderBackgroundEntry[]): MediaAsset[] => items.map((item) => ({
+  id: item.id,
+  name: item.name,
+  type: item.type,
+  category: 'background',
+  collection: item.collection,
+  blob: new Blob([], { type: item.type === 'video' ? 'video/mp4' : 'image/jpeg' }),
+  createdAt: 0,
+  url: item.url,
+  ...(item.thumbnailUrl ? { thumbnailUrl: item.thumbnailUrl } : {}),
+  fromFolder: true,
+  protected: item.collection === 'Built-in',
+  byteSize: item.size,
+}));
+
 /*
  * Kept between visits to the Presentations page so reopening it is instant: the media library
  * (with its preview URLs), which presentation versions the account already has, and when the
@@ -398,9 +428,51 @@ const prepareTemplateForAccountSync = (template: SlideTemplate): SyncedTemplate 
 };
 const ACCOUNT_CHECK_INTERVAL_MS = 60_000;
 
+const makeVideoThumbnail = async (blob: Blob): Promise<Blob | undefined> => new Promise((resolve) => {
+  const url = URL.createObjectURL(blob);
+  const video = document.createElement('video');
+  video.muted = true;
+  video.preload = 'metadata';
+  let finished = false;
+  const finish = (thumbnail?: Blob) => {
+    if (finished) return;
+    finished = true;
+    window.clearTimeout(timeout);
+    video.removeAttribute('src');
+    video.load();
+    URL.revokeObjectURL(url);
+    resolve(thumbnail);
+  };
+  const timeout = window.setTimeout(() => finish(), 8000);
+  video.onloadeddata = () => {
+    if (!video.videoWidth || !video.videoHeight) return finish();
+    const scale = Math.min(1, 480 / video.videoWidth, 270 / video.videoHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    try {
+      canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((thumbnail) => finish(thumbnail ?? undefined), 'image/jpeg', 0.72);
+    } catch { finish(); }
+  };
+  video.onerror = () => finish();
+  video.src = url;
+});
+
+const attachStoredMediaAsset = (asset: StoredMediaAsset): MediaAsset => ({
+  ...asset,
+  url: URL.createObjectURL(asset.blob),
+  ...(asset.thumbnailBlob ? { thumbnailUrl: URL.createObjectURL(asset.thumbnailBlob) } : {}),
+});
+const revokeMediaAssetUrls = (asset: MediaAsset) => {
+  if (asset.url.startsWith('blob:')) URL.revokeObjectURL(asset.url);
+  if (asset.thumbnailUrl?.startsWith('blob:')) URL.revokeObjectURL(asset.thumbnailUrl);
+};
+
 const saveMediaAsset = async (file: File, category: 'background' | 'slide' = 'background', collection?: string): Promise<StoredMediaAsset> => {
   const prepared = await prepareMediaFile(file);
-  const asset: StoredMediaAsset = { id: crypto.randomUUID(), name: file.name, type: file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(file.name) ? 'video' : 'image', category, ...(collection ? { collection } : {}), blob: prepared.file, originalBlob: prepared.originalFile, optimized: !!prepared.originalFile, createdAt: Date.now() };
+  const type = file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(file.name) ? 'video' : 'image';
+  const asset: StoredMediaAsset = { id: crypto.randomUUID(), name: file.name, type, category, ...(collection ? { collection } : {}), blob: prepared.file, ...(type === 'video' ? { thumbnailBlob: await makeVideoThumbnail(prepared.file) } : {}), originalBlob: prepared.originalFile, optimized: !!prepared.originalFile, createdAt: Date.now() };
   const db = await openMediaDb();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(MEDIA_STORE, 'readwrite');
@@ -471,9 +543,31 @@ const toLocalDateTimeInput = (value: string) => {
 };
 const slideName = (s: SlideT) => s.title;
 
+/** A still, lightweight version for library and slide-list cards. Video layers use cached posters when available. */
+function SlideThumbnail({ slide, assets }: { slide: SlideT; assets: MediaAsset[] }) {
+  let containsVideo = !!slide.bgVideo;
+  const backgroundAsset = assets.find((asset) => asset.id === slide.bgAssetId || asset.url === slide.bgVideo);
+  const thumbnailSlide: SlideT = {
+    ...slide,
+    bgImage: backgroundAsset?.type === 'video' ? backgroundAsset.thumbnailUrl : backgroundAsset?.type === 'image' ? backgroundAsset.url : slide.bgImage,
+    bgVideo: undefined,
+    bgAssetId: undefined,
+    pictures: (slide.pictures ?? []).flatMap((picture) => {
+      const asset = assets.find((item) => item.id === picture.assetId || item.url === picture.src);
+      if (picture.mediaType !== 'video') return [asset?.type === 'image' ? { ...picture, src: asset.url } : picture];
+      containsVideo = true;
+      return asset?.thumbnailUrl ? [{ ...picture, src: asset.thumbnailUrl, mediaType: 'image' as const, assetId: undefined }] : [];
+    }),
+  };
+  return <div className="absolute inset-0">
+    <SlideRender slide={thumbnailSlide} />
+    {containsVideo && <span className="absolute bottom-1.5 right-1.5 z-10 rounded bg-black/70 px-1.5 py-1 text-white/90" aria-label="Contains video"><Video size={11} /></span>}
+  </div>;
+}
+
 /* ---------- Slide rendering (used by the canvas, thumbnails, templates and preview) ---------- */
 
-function TextBoxView({ box, defaultLayerOrder = 3000 }: { box: TextBox; defaultLayerOrder?: number }) {
+function TextBoxView({ box, defaultLayerOrder = 3000, animate = false }: { box: TextBox; defaultLayerOrder?: number; animate?: boolean }) {
   const wrap = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
@@ -501,8 +595,9 @@ function TextBoxView({ box, defaultLayerOrder = 3000 }: { box: TextBox; defaultL
   return (
     <div
       ref={wrap}
-      className={`absolute flex ${VALIGN_ITEMS[box.valign ?? 'middle']} overflow-hidden`}
+      className={`absolute flex ${VALIGN_ITEMS[box.valign ?? 'middle']} overflow-hidden ${animate && box.animation && box.animation !== 'none' ? `slide-content-${box.animation}` : ''}`}
       style={{
+        ...(animate && box.animation && box.animation !== 'none' ? animationCssStyle(box) : {}),
         left: `${box.x}%`,
         top: `${box.y}%`,
         width: `${box.w}%`,
@@ -550,13 +645,14 @@ function TextBoxView({ box, defaultLayerOrder = 3000 }: { box: TextBox; defaultL
 }
 
 /** Fills its (relative, 16:9) parent. Everything inside scales with the slide's width. */
-function SlideRender({ slide, onVideoSelect, editingTextBoxId }: { slide: SlideT; onVideoSelect?: (id: number) => void; editingTextBoxId?: number | null }) {
+function SlideRender({ slide, onVideoSelect, editingTextBoxId, animate = false, seamlessBackground = false }: { slide: SlideT; onVideoSelect?: (id: number) => void; editingTextBoxId?: number | null; animate?: boolean; seamlessBackground?: boolean }) {
   const renderPicture = (picture: PictureT, index: number) => {
     const zIndex = typeof picture.layerOrder === 'number' ? picture.layerOrder : picture.layerOrder === 'front' ? 5000 : picture.layerOrder === 'back' ? 0 : 1000 + index;
-    const style = { left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, zIndex };
+    const style = { ...(animate && picture.animation && picture.animation !== 'none' ? animationCssStyle(picture) : {}), left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, zIndex };
+    const animationClass = animate && picture.animation && picture.animation !== 'none' ? `slide-content-${picture.animation}` : '';
     return picture.mediaType === 'video'
-      ? <video key={picture.id} data-slide-video-id={picture.id} src={picture.src} controls playsInline muted={picture.muted ?? false} onPointerDown={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} onClick={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} className="pointer-events-auto absolute object-contain" style={style} />
-      : <img key={picture.id} src={picture.src} alt="" draggable={false} className="absolute object-contain" style={style} />;
+      ? <video key={picture.id} data-slide-video-id={picture.id} src={picture.src} controls playsInline muted={picture.muted ?? false} onPointerDown={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} onClick={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} className={`pointer-events-auto absolute object-contain ${animationClass}`} style={style} />
+      : <img key={picture.id} src={picture.src} alt="" loading="lazy" decoding="async" draggable={false} className={`absolute object-contain ${animationClass}`} style={style} />;
   };
 
   return (
@@ -565,24 +661,18 @@ function SlideRender({ slide, onVideoSelect, editingTextBoxId }: { slide: SlideT
       style={{ containerType: 'inline-size', ...backgroundStyle(slide.bg) }}
     >
       {slide.bgImage && (
-        <img src={slide.bgImage} alt="" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />
+        <img src={slide.bgImage} alt="" loading="lazy" decoding="async" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />
       )}
       {slide.bgVideo && (
-        <video
-          src={slide.bgVideo}
-          autoPlay
-          loop
-          muted={slide.bgVideoMuted ?? true}
-          playsInline
-          className="absolute inset-0 h-full w-full object-cover"
-          style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }}
-        />
+        seamlessBackground
+          ? <SeamlessLoopVideo key={slide.bgVideo} src={slide.bgVideo} muted={slide.bgVideoMuted ?? true} style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />
+          : <video src={slide.bgVideo} autoPlay loop muted={slide.bgVideoMuted ?? true} playsInline className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />
       )}
       <div className="absolute inset-0 bg-black" style={{ opacity: slide.dim / 100 }} />
       {slide.pictures?.map(renderPicture)}
-      {slide.shapes?.map((shape, index) => <div key={shape.id} className="absolute" style={{ left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
-      {slide.box && editingTextBoxId !== null && <TextBoxView box={slide.box} />}
-      {slide.extraBoxes?.filter(({ id }) => editingTextBoxId !== id).map(({ id, box }, index) => <TextBoxView key={id} box={box} defaultLayerOrder={3001 + index} />)}
+      {slide.shapes?.map((shape, index) => <div key={shape.id} className={`absolute ${animate && shape.animation && shape.animation !== 'none' ? `slide-content-${shape.animation}` : ''}`} style={{ ...(animate && shape.animation && shape.animation !== 'none' ? animationCssStyle(shape) : {}), left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
+      {slide.box && editingTextBoxId !== null && <TextBoxView box={slide.box} animate={animate} />}
+      {slide.extraBoxes?.filter(({ id }) => editingTextBoxId !== id).map(({ id, box }, index) => <TextBoxView key={id} box={box} defaultLayerOrder={3001 + index} animate={animate} />)}
       {slide.countdown && <CountdownDisplay countdown={slide.countdown} />}
     </div>
   );
@@ -782,7 +872,7 @@ function PreviewOverlay({
         className="relative"
         style={{ width: 'min(100vw, calc(100vh * 16 / 9))', aspectRatio: '16 / 9' }}
       >
-        <SlideRender slide={slides[i]} />
+        <SlideRender key={`${slides[i]?.id ?? i}-${i}`} slide={slides[i]} animate seamlessBackground />
       </div>
       <button
         aria-label="Close preview"
@@ -821,7 +911,7 @@ function PreviewOverlay({
 
 type Mode = 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w';
 /** Format: everything about the selected text, shape, video or countdown. Media: add pictures and videos. */
-type PropsTab = 'Format' | 'Media' | 'Background';
+type PropsTab = 'Format' | 'Media' | 'Background' | 'Animation';
 type Dock = 'Templates' | 'Text' | 'Scripture' | 'Media' | 'Shapes';
 
 const DOCK: { key: Dock; icon: LucideIcon; hint: string }[] = [
@@ -894,6 +984,8 @@ export default function Presentation() {
   const [alignmentGuides, setAlignmentGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
   const [fontPickerOpen, setFontPickerOpen] = useState(false);
   const [fontSearch, setFontSearch] = useState('');
+  const [fontPreview, setFontPreview] = useState<{ slideId: number; boxId: number | null; family: string } | null>(null);
+  const [fontSizeDraft, setFontSizeDraft] = useState<string | null>(null);
   const [accountSyncStatus, setAccountSyncStatus] = useState('Connecting to your account…');
   // Library organisation (kept on this device).
   const [projectCategories, setProjectCategories] = useState<Record<string, string>>(loadPresentationCategories);
@@ -1062,12 +1154,27 @@ export default function Presentation() {
     };
     const dbName = getAccountDatabaseName(MEDIA_DB);
     if (mediaLibraryCache?.db === dbName) {
-      attach(mediaLibraryCache.assets);
+      const cachedAssets = mediaLibraryCache.assets;
+      attach(cachedAssets);
+      void window.faithstreamWindow?.listPresentationBackgrounds().then((items) => {
+        if (cancelled) return;
+        const assets = [...cachedAssets.filter((asset) => !asset.fromFolder), ...folderBackgroundAssets(items)];
+        mediaLibraryCache = { db: dbName, assets };
+        mediaReadyRef.current = true;
+        setMediaAssets(assets);
+        attach(assets);
+      }).catch(() => { /* Existing cached backgrounds stay usable if folder refresh fails. */ });
       return () => { cancelled = true; };
     }
-    readMediaAssets().then((stored) => {
-      const assets = stored.map((asset) => ({ ...asset, url: URL.createObjectURL(asset.blob) }));
-      if (cancelled) { assets.forEach((asset) => URL.revokeObjectURL(asset.url)); return; }
+    Promise.all([
+      readMediaAssets(),
+      window.faithstreamWindow?.listPresentationBackgrounds().catch(() => []) ?? Promise.resolve([]),
+    ]).then(([stored, folderItems]) => {
+      const assets = [
+        ...stored.map(attachStoredMediaAsset),
+        ...folderBackgroundAssets(folderItems),
+      ];
+      if (cancelled) { assets.forEach(revokeMediaAssetUrls); return; }
       mediaLibraryCache = { db: dbName, assets };
       mediaReadyRef.current = true;
       setMediaAssets(assets);
@@ -1081,6 +1188,30 @@ export default function Presentation() {
   useEffect(() => {
     if (mediaReadyRef.current) mediaLibraryCache = { db: getAccountDatabaseName(MEDIA_DB), assets: mediaAssets };
   }, [mediaAssets]);
+
+  useEffect(() => {
+    let refreshTimer: number | undefined;
+    const unsubscribe = window.faithstreamWindow?.onPresentationBackgroundsChanged(() => {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        void window.faithstreamWindow?.listPresentationBackgrounds().then((items) => {
+          const folderAssets = folderBackgroundAssets(items);
+          setMediaAssets((current) => [...current.filter((asset) => !asset.fromFolder), ...folderAssets]);
+        }).catch(() => setStatus('Could not refresh the backgrounds folder'));
+      }, 450);
+    });
+    return () => {
+      window.clearTimeout(refreshTimer);
+      unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const view = new URLSearchParams(location.search).get('view');
+    if ((!activeProjectId && view === 'backgrounds' && backgroundCollection === 'Built-in') || (activeProjectId && backgroundEditing)) {
+      void window.faithstreamWindow?.preparePresentationBackgroundThumbnails();
+    }
+  }, [activeProjectId, backgroundCollection, backgroundEditing, location.search]);
 
   useEffect(() => {
     slides.forEach((slide) => {
@@ -1121,10 +1252,16 @@ export default function Presentation() {
   useEffect(() => {
     if (!fontPickerOpen) return;
     const closeOnOutsideClick = (event: PointerEvent) => {
-      if (!fontPickerRef.current?.contains(event.target as Node)) setFontPickerOpen(false);
+      if (!fontPickerRef.current?.contains(event.target as Node)) {
+        setFontPickerOpen(false);
+        setFontPreview(null);
+      }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setFontPickerOpen(false);
+      if (event.key === 'Escape') {
+        setFontPickerOpen(false);
+        setFontPreview(null);
+      }
     };
     document.addEventListener('pointerdown', closeOnOutsideClick);
     window.addEventListener('keydown', closeOnEscape);
@@ -1183,7 +1320,7 @@ export default function Presentation() {
         if (Math.abs(wanted - box.h) > 0.2) updateBoxById(selectedBoxId, { h: wanted });
       }
     }
-  }, [box?.valign, box?.text, box?.size, box?.lineHeight, box?.letterSpacing, box?.font, box?.w, box?.h, box?.autoSize, canvasTextScale, isBoxSelected, selectedBoxId, zoom]);
+  }, [box?.valign, box?.text, box?.size, box?.lineHeight, box?.letterSpacing, box?.font, fontPreview?.family, box?.w, box?.h, box?.autoSize, canvasTextScale, isBoxSelected, selectedBoxId, zoom]);
 
   useLayoutEffect(() => {
     if (!isBoxSelected) return;
@@ -1201,7 +1338,7 @@ export default function Presentation() {
   const backgroundAssets = mediaAssets.filter((asset) => asset.category !== 'slide'
     && !legacyImportedSlideAssetIds.has(asset.id)
     && !/^slide\s+\d+\.png$/i.test(asset.name));
-  const contentAssets = backgroundAssets;
+  const contentAssets = backgroundAssets.filter((asset) => !asset.fromFolder);
   const allBoxes: { id: number | null; box: TextBox }[] = [
     ...(cur.box ? [{ id: null, box: cur.box }] : []),
     ...(cur.extraBoxes ?? []),
@@ -1210,7 +1347,22 @@ export default function Presentation() {
     .filter((family) => family.toLocaleLowerCase().includes(fontSearch.trim().toLocaleLowerCase()))
     .slice(0, 60);
 
-  useEffect(() => { setSelectedBoxId(null); setIsBoxSelected(false); setSelectedPictureId(null); setPictureMenu(null); setSelectedShapeId(null); setSelectedCountdown(false); setBackgroundEditing(false); setMenuFor(null); }, [index, activeProjectId]);
+  useEffect(() => {
+    // Keep the text properties ready when a slide opens, including imported/template
+    // slides that store their first text box in `extraBoxes` instead of `box`.
+    setSelectedBoxId(cur.box ? null : cur.extraBoxes?.[0]?.id ?? null);
+    setIsBoxSelected(false);
+    setSelectedPictureId(null);
+    setPictureMenu(null);
+    setSelectedShapeId(null);
+    setSelectedCountdown(false);
+    setBackgroundEditing(false);
+    setFontPreview(null);
+    setFontSizeDraft(null);
+    setMenuFor(null);
+    // Only reset the active object when navigating to a different slide.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index, activeProjectId]);
 
   /* ----- editing helpers ----- */
 
@@ -1242,6 +1394,15 @@ export default function Presentation() {
   const shownAlign = (id: number | null, target: TextBox) => activeAlign(target.text, target.align, target.lineAligns, selectionIn(id));
 
   const updatePicture = (id: number, patch: Partial<PictureT>) => !cur.locked && setSlides((l) => l.map((s, i) => i === index ? { ...s, pictures: (s.pictures ?? []).map((picture) => picture.id === id ? { ...picture, ...patch } : picture) } : s));
+  const clearCanvasSelection = () => {
+    const selectedExtraStillExists = cur.extraBoxes?.some((item) => item.id === selectedBoxId);
+    setSelectedBoxId(cur.box ? null : selectedExtraStillExists ? selectedBoxId : cur.extraBoxes?.[0]?.id ?? null);
+    setIsBoxSelected(false);
+    setSelectedPictureId(null);
+    setSelectedShapeId(null);
+    setSelectedCountdown(false);
+    setPictureMenu(null);
+  };
   const setPictureAsBackground = (id: number) => {
     const picture = cur.pictures?.find((item) => item.id === id);
     if (!picture || cur.locked) return;
@@ -1523,7 +1684,7 @@ export default function Presentation() {
     setMediaImporting(file.name);
     try {
       const stored = await saveMediaAsset(file);
-      const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
+      const asset: MediaAsset = attachStoredMediaAsset(stored);
       setMediaAssets((items) => [asset, ...items.filter((item) => item.id !== asset.id)]);
       const aspectRatio = await getImageAspectRatio(asset.url);
       const slideRatio = mediaRatioOnSlide(aspectRatio);
@@ -1547,7 +1708,7 @@ export default function Presentation() {
     setMediaImporting(file.name);
     try {
       const stored = await saveMediaAsset(file);
-      const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
+      const asset: MediaAsset = attachStoredMediaAsset(stored);
       setMediaAssets((items) => [asset, ...items.filter((item) => item.id !== asset.id)]);
       const aspectRatio = await new Promise<number>((resolve) => {
         const probe = document.createElement('video');
@@ -2227,7 +2388,7 @@ export default function Presentation() {
     for (const file of group.images) {
       report(`Saving ${file.name}`);
       const stored = await saveMediaAsset(file, 'slide');
-      const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
+      const asset: MediaAsset = attachStoredMediaAsset(stored);
       assetsOut.push(asset);
       slidesOut.push(asSlide(asset, file.name.replace(/\.[^.]+$/, '').trim() || `Slide ${slidesOut.length + 1}`));
       step();
@@ -2242,7 +2403,7 @@ export default function Presentation() {
         for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
         const png = new File([bytes], `${renderedSlide.name}.png`, { type: 'image/png' });
         const stored = await saveMediaAsset(png, 'slide');
-        const asset: MediaAsset = { ...stored, url: URL.createObjectURL(stored.blob) };
+        const asset: MediaAsset = attachStoredMediaAsset(stored);
         assetsOut.push(asset);
         slidesOut.push(asSlide(asset, renderedSlide.name));
         report(`Saving ${renderedSlide.name}`);
@@ -2398,6 +2559,25 @@ export default function Presentation() {
   /* ----- background collections ----- */
 
   const collectionOf = (asset: MediaAsset) => asset.collection || 'Uploads';
+  const mediaSizeOf = (asset: MediaAsset) => formatMediaSizeInKb(asset.byteSize ?? asset.blob.size);
+const backgroundOriginLabel = (asset: MediaAsset) => {
+  const collection = collectionOf(asset);
+  if (asset.protected) return 'Built-in';
+  if (asset.fromFolder) return 'Imported';
+  if (collection === 'Uploads') return 'Imported';
+  return `Imported · ${collection}`;
+};
+
+  const refreshFolderBackgrounds = async () => {
+    try {
+      const items = await window.faithstreamWindow?.listPresentationBackgrounds() ?? [];
+      const folderAssets = folderBackgroundAssets(items);
+      setMediaAssets((current) => [...current.filter((asset) => !asset.fromFolder), ...folderAssets]);
+      flash(`Background folders refreshed · ${folderAssets.filter((asset) => asset.type === 'video').length} videos available`);
+    } catch {
+      flash('Could not refresh the background folders.');
+    }
+  };
 
   /** Adds backgrounds. Each imported folder becomes a collection named after it. */
   const importBackgrounds = async (files: PathedFile[], asFolder: boolean) => {
@@ -2406,7 +2586,7 @@ export default function Presentation() {
       flash('No images or videos were found there.');
       return;
     }
-    const namedTarget = backgroundCollection !== 'All' && backgroundCollection !== 'Uploads' ? backgroundCollection : undefined;
+    const namedTarget = backgroundCollection !== 'All' && backgroundCollection !== 'Uploads' && backgroundCollection !== 'Built-in' && backgroundCollection !== 'Imported' ? backgroundCollection : undefined;
     const plan = asFolder
       ? groupByFolder(media).flatMap((folder) => folder.files.map((file) => ({ file, collection: cleanCategoryName(folder.name) || namedTarget })))
       : media.map(({ file }) => ({ file, collection: namedTarget }));
@@ -2416,7 +2596,7 @@ export default function Presentation() {
       setBackgroundImportProgress({ message: `Adding ${item.file.name}`, current: position, total: plan.length });
       try {
         const stored = await saveMediaAsset(item.file, 'background', item.collection);
-        added.push({ ...stored, url: URL.createObjectURL(stored.blob) });
+        added.push(attachStoredMediaAsset(stored));
       } catch {
         failed += 1;
       }
@@ -2429,6 +2609,7 @@ export default function Presentation() {
   };
 
   const renameBackgroundCollection = async (from: string, to: string) => {
+    if (from === 'Built-in') return;
     const name = cleanCategoryName(to);
     setRenamingCollection(null);
     if (!name || name === from || from === 'Uploads') return;
@@ -2444,6 +2625,10 @@ export default function Presentation() {
   };
 
   const deleteBackgroundCollection = (name: string) => {
+    if (name === 'Built-in') {
+      flash('Manage these files from their folder on this computer.');
+      return;
+    }
     const doomed = backgroundAssets.filter((asset) => collectionOf(asset) === name);
     setDeleteConfirmation({
       title: `Delete “${name}”?`,
@@ -2452,7 +2637,7 @@ export default function Presentation() {
         void (async () => {
           const ids = new Set<string>();
           for (const asset of doomed) {
-            try { await deleteMediaAssetFromDb(asset.id); ids.add(asset.id); URL.revokeObjectURL(asset.url); } catch { /* keep the ones that could not be removed */ }
+            try { await deleteMediaAssetFromDb(asset.id); ids.add(asset.id); revokeMediaAssetUrls(asset); } catch { /* keep the ones that could not be removed */ }
           }
           const clearSlide = (slide: SlideT): SlideT => ({
             ...(slide.bgAssetId && ids.has(slide.bgAssetId) ? { ...slide, bgAssetId: undefined, bgImage: undefined, bgVideo: undefined } : slide),
@@ -2542,9 +2727,13 @@ export default function Presentation() {
   };
 
   const deleteMediaAsset = async (asset: MediaAsset) => {
+    if (asset.fromFolder) {
+      flash('Remove this file from its folder to remove it from the library.');
+      return;
+    }
     try {
       await deleteMediaAssetFromDb(asset.id);
-      URL.revokeObjectURL(asset.url);
+      revokeMediaAssetUrls(asset);
       setMediaAssets((current) => current.filter((item) => item.id !== asset.id));
       setSlides((current) => {
         const next = current.map((slide) => ({
@@ -2657,7 +2846,7 @@ export default function Presentation() {
     const requestedView = new URLSearchParams(location.search).get('view');
     const libraryView = requestedView === 'songbooks' || requestedView === 'backgrounds' ? requestedView : 'presentations';
     const libraryTabs = (
-      <div role="tablist" aria-label="Library" className="mt-3 inline-flex gap-1 rounded-xl border border-white/10 bg-panel p-1">
+      <div role="tablist" aria-label="Library" className="inline-flex gap-1 rounded-xl border border-white/10 bg-panel p-1">
         {([['presentations', 'Presentations', FolderOpen], ['backgrounds', 'Backgrounds', ImageIcon], ['songbooks', 'Songbooks', BookMarked]] as const).map(([key, label, Icon]) => (
           <button key={key} role="tab" aria-selected={libraryView === key} onClick={() => navigate(key === 'songbooks' || key === 'backgrounds' ? `/presentations?view=${key}` : '/presentations', { replace: true })} className={`flex items-center gap-2 rounded-lg px-3.5 py-1.5 text-sm font-semibold transition ${libraryView === key ? 'bg-brand text-navy' : 'text-warm-white/65 hover:bg-white/5 hover:text-white'}`}>
             <Icon size={15} /> {label}
@@ -2667,7 +2856,7 @@ export default function Presentation() {
     );
     if (libraryView === 'songbooks') {
       return (
-        <div className="flex h-full min-h-0 flex-col p-6 md:p-8">
+        <div className="flex h-full min-h-0 flex-col bg-navy p-6 md:p-8">
           <div className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col">
             <div className="mb-5 flex shrink-0 items-center gap-3">
               <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-brand/15 text-brand"><BookMarked size={22} /></span>
@@ -2683,54 +2872,65 @@ export default function Presentation() {
       );
     }
     if (libraryView === 'backgrounds') {
-      const names = [...new Set(backgroundAssets.map(collectionOf))].sort((a, b) => (a === 'Uploads' ? 1 : b === 'Uploads' ? -1 : naturalCompare(a, b)));
-      const chips = ['All', ...names];
-      const active = chips.includes(backgroundCollection) ? backgroundCollection : 'All';
-      const visibleBackgrounds = backgroundAssets.filter((asset) => (active === 'All' || collectionOf(asset) === active));
+      const folderDefinitions = [
+        { id: 'Built-in', title: 'Built-in backgrounds', description: 'The backgrounds included with FaithStream.', assets: backgroundAssets.filter((asset) => asset.protected) },
+        { id: 'Imported', title: 'Imported backgrounds', description: 'Images and videos you added, kept separate from built-in backgrounds.', assets: backgroundAssets.filter((asset) => !asset.protected) },
+      ];
+      const active = folderDefinitions.some((folder) => folder.id === backgroundCollection) ? backgroundCollection : 'All';
+      const activeFolder = folderDefinitions.find((folder) => folder.id === active);
+      const visibleBackgrounds = active === 'Imported'
+        ? folderDefinitions[1].assets
+        : activeFolder?.assets ?? [];
       return (
-        <div className="flex h-full min-h-0 flex-col overflow-y-auto p-6 md:p-8">
+        <div className="h-full min-h-0 overflow-y-auto bg-navy px-6 pb-6 md:px-8 md:pb-8">
           <div className="mx-auto flex w-full max-w-6xl flex-col">
-            <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
+            <div className="sticky top-0 z-30 -mx-0 mb-5 flex flex-col gap-3 bg-navy pb-4 pt-6 md:pt-8">
               <div className="flex items-center gap-3">
                 <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-brand/15 text-brand"><ImageIcon size={22} /></span>
                 <div>
                   <h1 className="text-2xl font-bold text-warm-white">Backgrounds</h1>
-                  <p className="mt-1 text-sm text-warm-white/55">Import and organize local images and videos for presentations and songbooks.</p>
+                  <p className="mt-1 text-sm text-warm-white/55">Built-in backgrounds are ready to use. Add your own images and videos to keep them in a separate Imported library.</p>
                 </div>
               </div>
-              <div className="flex gap-2">
+              <div>{libraryTabs}</div>
+              <div className="flex flex-wrap justify-end gap-2">
+                <button type="button" onClick={() => { void refreshFolderBackgrounds(); }} title="Refresh background library" className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-2.5 text-sm font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5"><ImageIcon size={16} /> Refresh</button>
                 <button type="button" disabled={backgroundImportProgress !== null} title="Add every picture and video in a folder (its subfolders become collections)" onClick={() => backgroundFolderInput.current?.click()} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-2.5 text-sm font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><FolderPlus size={16} /> Add a folder</button>
                 <button type="button" disabled={backgroundImportProgress !== null} title="Pick one picture or video, or select several (Ctrl+click)" onClick={() => backgroundFilesInput.current?.click()} className="flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-bold text-navy hover:brightness-110 disabled:opacity-50"><Upload size={16} /> Add pictures or videos</button>
               </div>
             </div>
-            {libraryTabs}
             <input ref={(element) => { backgroundFolderInput.current = element; markFolderInput(element); }} type="file" multiple hidden onChange={(event) => { const picked = pathedFilesFromInput(event.target.files); event.target.value = ''; void importBackgrounds(picked, true); }} />
             <input ref={backgroundFilesInput} type="file" accept="image/*,video/*" multiple hidden onChange={(event) => { const picked = pathedFilesFromInput(event.target.files); event.target.value = ''; void importBackgrounds(picked, false); }} />
             {backgroundImportProgress && <div role="status" aria-live="polite" className="my-4 rounded-xl border border-brand/25 bg-brand/5 p-3 text-sm text-warm-white/75"><div className="flex items-center gap-2"><Loader2 size={16} className="animate-spin text-brand" /><span className="min-w-0 flex-1 truncate">{backgroundImportProgress.message}</span><span className="tabular-nums text-warm-white/50">{backgroundImportProgress.current}/{backgroundImportProgress.total}</span></div><div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full bg-brand transition-[width]" style={{ width: `${backgroundImportProgress.total ? backgroundImportProgress.current / backgroundImportProgress.total * 100 : 0}%` }} /></div></div>}
-            <div className="my-5 flex flex-wrap items-center justify-between gap-3">
-              <div role="tablist" aria-label="Background collections" className="flex max-w-full flex-wrap gap-1.5">
-                {chips.map((name) => <button key={name} role="tab" aria-selected={active === name} onClick={() => { setBackgroundCollection(name); setRenamingCollection(null); }} className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${active === name ? 'border-brand bg-brand/15 text-white' : 'border-white/10 text-warm-white/60 hover:text-white'}`}>{name}<span className="ml-1.5 tabular-nums text-brand/80">{name === 'All' ? backgroundAssets.length : backgroundAssets.filter((asset) => collectionOf(asset) === name).length}</span></button>)}
-              </div>
-              <span className="text-xs text-warm-white/45">{visibleBackgrounds.length} saved locally</span>
-            </div>
-            {active !== 'All' && active !== 'Uploads' && <div className="mb-4 flex items-center justify-end gap-1 text-xs">
+            {active === 'All' ? <div className="my-6 grid grid-cols-1 gap-4 md:grid-cols-3" aria-label="Background library folders">
+              {folderDefinitions.map((folder) => {
+                const videoCount = folder.assets.filter((asset) => asset.type === 'video').length;
+                return <button key={folder.id} type="button" onClick={() => { setBackgroundCollection(folder.id); setRenamingCollection(null); }} className="group flex min-h-36 items-start gap-4 rounded-2xl border border-white/10 bg-panel p-5 text-left transition hover:border-brand/50 hover:bg-white/[0.04]">
+                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-brand transition group-hover:bg-brand/20"><FolderOpen size={23} /></span>
+                  <span className="min-w-0"><span className="block text-sm font-semibold text-warm-white">{folder.title}</span><span className="mt-1 block text-xs leading-relaxed text-warm-white/50">{folder.description}</span><span className="mt-4 block text-xs font-medium text-brand">{folder.assets.length} items · {videoCount} videos <span aria-hidden="true">→</span></span></span>
+                </button>;
+              })}
+            </div> : <div className="my-5 flex items-center justify-between gap-3 border-b border-white/10 pb-4">
+              <div><button type="button" onClick={() => setBackgroundCollection('All')} className="mb-2 flex items-center gap-1.5 text-xs font-medium text-brand hover:text-warm-white"><ChevronLeft size={14} /> All background folders</button><h2 className="text-lg font-semibold text-warm-white">{activeFolder?.title}</h2><p className="mt-1 text-xs text-warm-white/45">{visibleBackgrounds.length} items · {visibleBackgrounds.filter((asset) => asset.type === 'video').length} videos</p></div>
+            </div>}
+            {active !== 'All' && active !== 'Uploads' && active !== 'Built-in' && active !== 'Imported' && <div className="mb-4 flex items-center justify-end gap-1 text-xs">
               {renamingCollection === active ? <form onSubmit={(event) => { event.preventDefault(); void renameBackgroundCollection(active, collectionNameDraft); }} className="flex gap-1.5"><input autoFocus value={collectionNameDraft} onChange={(event) => setCollectionNameDraft(event.target.value)} aria-label="Collection name" maxLength={40} className="rounded-md border border-white/10 bg-panel px-2 py-1 text-white outline-none focus:border-brand" /><button type="submit" className="rounded-md bg-brand/20 p-1.5 text-brand"><Check size={14} /></button><button type="button" onClick={() => setRenamingCollection(null)} className="rounded-md p-1.5 text-warm-white/50"><X size={14} /></button></form> : <><button type="button" onClick={() => { setRenamingCollection(active); setCollectionNameDraft(active); }} className="flex items-center gap-1 rounded-md px-2 py-1 text-warm-white/60 hover:bg-white/10"><Pencil size={12} /> Rename collection</button><button type="button" onClick={() => deleteBackgroundCollection(active)} className="flex items-center gap-1 rounded-md px-2 py-1 text-red-300/80 hover:bg-red-500/10"><Trash2 size={12} /> Delete collection</button></>}
             </div>}
-            {visibleBackgrounds.length ? <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+            {active !== 'All' && (visibleBackgrounds.length ? <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
               {visibleBackgrounds.map((asset) => <article key={asset.id} className="group relative overflow-hidden rounded-xl border border-white/10 bg-panel transition hover:border-brand/50">
                 <button type="button" onClick={() => setVideoPreviewAsset(asset.type === 'video' ? asset : null)} title={asset.type === 'video' ? `Preview ${asset.name}` : asset.name} className="block w-full text-left">
-                  <span className="relative block aspect-video overflow-hidden bg-navy">{asset.type === 'image' ? <img src={asset.url} alt={asset.name} loading="lazy" className="h-full w-full object-cover" /> : <video src={`${asset.url}#t=0.5`} muted preload="metadata" className="h-full w-full object-cover" />}<span className="absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white">{asset.type === 'video' ? 'VIDEO' : 'IMAGE'}</span></span>
-                  <span className="block truncate px-2 pt-2 text-xs font-semibold text-warm-white">{asset.name}</span><span className="block truncate px-2 pb-2 text-[10px] text-warm-white/45">{collectionOf(asset)} · {formatMediaSizeInKb(asset.blob.size)}</span>
+                  <span className="relative flex aspect-video items-center justify-center overflow-hidden bg-navy">{asset.type === 'image' || asset.thumbnailUrl ? <img src={asset.type === 'image' ? asset.url : asset.thumbnailUrl} alt={asset.type === 'image' ? asset.name : ''} loading="lazy" decoding="async" className="absolute inset-0 h-full w-full object-cover" /> : <Video size={24} className="text-warm-white/30" />}<span className="absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white">{asset.type === 'video' ? 'VIDEO' : 'IMAGE'}</span></span>
+                  <span className="block truncate px-2 pt-2 text-xs font-semibold text-warm-white">{backgroundOriginLabel(asset)} background</span><span className="block truncate px-2 pb-2 text-[10px] text-warm-white/45">{asset.type === 'video' ? 'Video' : 'Image'} · {mediaSizeOf(asset)}</span>
                 </button>
                 {asset.type === 'video' && <button type="button" aria-label={`Play ${asset.name}`} onClick={() => setVideoPreviewAsset(asset)} className="absolute left-2 top-2 rounded-md bg-black/75 p-1.5 text-white opacity-0 transition group-hover:opacity-100 focus:opacity-100"><Play size={13} /></button>}
-                <button type="button" aria-label={`Delete ${asset.name}`} title="Remove from background library" onClick={() => setDeleteConfirmation({ title: 'Delete uploaded background?', message: `Delete “${asset.name}” from saved uploads? Slides using it will switch back to their color background.`, onConfirm: () => { void deleteMediaAsset(asset); } })} className="absolute right-2 top-2 rounded-md border border-white/15 bg-black/75 p-1.5 text-white/80 opacity-0 transition hover:bg-red-600 group-hover:opacity-100 focus:opacity-100"><Trash2 size={13} /></button>
+                {!asset.fromFolder && <button type="button" aria-label={`Delete ${asset.name}`} title="Remove from background library" onClick={() => setDeleteConfirmation({ title: 'Delete uploaded background?', message: `Delete “${asset.name}” from saved uploads? Slides using it will switch back to their color background.`, onConfirm: () => { void deleteMediaAsset(asset); } })} className="absolute right-2 top-2 rounded-md border border-white/15 bg-black/75 p-1.5 text-white/80 opacity-0 transition hover:bg-red-600 group-hover:opacity-100 focus:opacity-100"><Trash2 size={13} /></button>}
               </article>)}
-            </div> : <div className="mt-2 rounded-2xl border border-dashed border-white/15 px-6 py-14 text-center"><FolderPlus size={30} className="mx-auto text-warm-white/35" /><p className="mt-3 font-semibold text-warm-white">No backgrounds in this collection yet</p><p className="mt-1 text-sm text-warm-white/50">Import a folder of up to your whole background library, or add individual image and video files.</p><p className="mt-3 text-xs text-warm-white/40">Choose a background on a slide from its Background panel, or in a songbook from Design → Background.</p></div>}
-            <p className="mt-5 text-xs leading-relaxed text-warm-white/40">Backgrounds are stored on this computer and shared by the presentation editor and songbook designer. Imported folders are organized as collections.</p>
+            </div> : <div className="mt-2 rounded-2xl border border-dashed border-white/15 px-6 py-14 text-center"><FolderPlus size={30} className="mx-auto text-warm-white/35" /><p className="mt-3 font-semibold text-warm-white">This folder is empty</p><p className="mt-1 text-sm text-warm-white/50">Add backgrounds here, or choose a different folder.</p><p className="mt-3 text-xs text-warm-white/40">Choose a background on a slide from its Background panel, or in a songbook from Design → Background.</p></div>)}
+            <p className="mt-5 text-xs leading-relaxed text-warm-white/40">Built-in backgrounds ship with FaithStream. Add your own pictures or videos with <b className="font-medium text-warm-white/60">Add a folder</b> or <b className="font-medium text-warm-white/60">Add pictures or videos</b>; they appear under Imported.</p>
           </div>
           {videoPreviewAsset && <BodyPortal><div className="fixed inset-0 z-130 flex items-center justify-center bg-black/85 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoPreviewAsset(null); }}>
             <section role="dialog" aria-modal="true" aria-label={`Preview ${videoPreviewAsset.name}`} className="w-full max-w-4xl rounded-2xl border border-white/10 bg-[#101d2a] p-4 shadow-2xl">
-              <div className="mb-3 flex items-center justify-between gap-3"><h2 className="truncate text-sm font-semibold text-warm-white">{videoPreviewAsset.name}</h2><button type="button" onClick={() => setVideoPreviewAsset(null)} aria-label="Close video preview" className="rounded-lg p-2 text-warm-white/60 hover:bg-white/10 hover:text-white"><X size={17} /></button></div>
+              <div className="mb-3 flex items-center justify-between gap-3"><h2 className="truncate text-sm font-semibold text-warm-white">{backgroundOriginLabel(videoPreviewAsset)} video background</h2><button type="button" onClick={() => setVideoPreviewAsset(null)} aria-label="Close video preview" className="rounded-lg p-2 text-warm-white/60 hover:bg-white/10 hover:text-white"><X size={17} /></button></div>
               <video src={videoPreviewAsset.url} controls autoPlay playsInline className="max-h-[70vh] w-full rounded-lg bg-black" />
               <p className="mt-3 text-xs text-warm-white/50">To use this background, open a presentation and choose it from the Background panel, or select it in a songbook’s Design → Background.</p>
             </section>
@@ -2759,7 +2959,7 @@ export default function Presentation() {
     const countIn = (category: string) => projects.filter((project) => inCategory(project, category)).length;
     return (
       <div
-        className="relative h-full min-h-0 overflow-y-auto p-6 md:p-8"
+        className="relative h-full min-h-0 overflow-y-auto bg-navy px-6 pb-6 md:px-8 md:pb-8"
         onDragOver={(event) => { if (!dragHasFiles(event) || slideImportProgress) return; event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setLibraryDragOver(true); }}
         onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setLibraryDragOver(false); }}
         onDrop={(event) => {
@@ -2771,13 +2971,13 @@ export default function Presentation() {
           void readDroppedFiles(transfer).then((files) => importSlideFolder(files)).catch(() => flash('Could not read the dropped files.'));
         }}
       >
-        {libraryDragOver && <div className="pointer-events-none absolute inset-3 z-40 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-brand bg-studio/85 text-center backdrop-blur-sm">
+        {libraryDragOver && <div className="pointer-events-none absolute inset-3 z-40 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-brand bg-navy/85 text-center backdrop-blur-sm">
           <FolderPlus size={40} className="text-brand" />
           <p className="mt-3 text-lg font-semibold text-warm-white">Drop to import slides</p>
           <p className="mt-1 max-w-sm text-sm text-warm-white/60">Each folder of images becomes a presentation. PowerPoint files are converted too.</p>
         </div>}
         <div className="mx-auto max-w-6xl">
-          <div className="mb-7 flex flex-wrap items-center justify-between gap-4">
+          <div className="sticky top-0 z-30 mb-5 flex flex-col gap-3 bg-navy pb-4 pt-6 md:pt-8">
             <div>
               <div className="flex items-center gap-3">
                 <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-brand/15 text-brand"><FolderOpen size={22} /></span>
@@ -2787,9 +2987,9 @@ export default function Presentation() {
                   <p className="mt-1 text-xs text-warm-white/40">{accountSyncStatus}</p>
                 </div>
               </div>
-              {libraryTabs}
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div>{libraryTabs}</div>
+            <div className="flex flex-wrap justify-end gap-2">
               <div className="relative">
               <button disabled={slideImportProgress !== null} aria-haspopup="menu" aria-expanded={importMenuOpen} onClick={() => setImportMenuOpen((open) => !open)} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-3 text-sm font-semibold text-warm-white transition hover:bg-white/5 disabled:cursor-wait disabled:opacity-70">
                 {slideImportProgress ? <Loader2 size={17} className="animate-spin" /> : <Upload size={17} />} {slideImportProgress ? 'Importing…' : 'Import'} {!slideImportProgress && <ChevronDown size={15} className={`transition ${importMenuOpen ? 'rotate-180' : ''}`} />}
@@ -2878,13 +3078,11 @@ export default function Presentation() {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {visibleProjects.map((project) => {
                 const firstSlide = project.slides[0];
-                const asset = mediaAssets.find((item) => item.id === firstSlide?.bgAssetId);
-                const cover = firstSlide ? { ...firstSlide, bgImage: asset?.type === 'image' ? asset.url : firstSlide.bgImage, bgVideo: asset?.type === 'video' ? asset.url : firstSlide.bgVideo } : null;
                 return (
                   <div key={project.id} className="group relative overflow-hidden rounded-2xl border border-white/10 bg-panel text-left transition hover:-translate-y-0.5 hover:border-brand/70 hover:shadow-xl hover:shadow-black/20">
                     <button onClick={() => openProject(project)} aria-label={`Open ${project.name}`} className="block w-full text-left">
                       <div className="relative aspect-video overflow-hidden bg-navy">
-                        {cover ? <SlideRender slide={cover} /> : <div className="absolute inset-0 flex items-center justify-center text-warm-white/30"><FolderOpen size={38} /></div>}
+                        {firstSlide ? <SlideThumbnail slide={firstSlide} assets={mediaAssets} /> : <div className="absolute inset-0 flex items-center justify-center text-warm-white/30"><FolderOpen size={38} /></div>}
                         <span className="absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-lg bg-black/55 px-2.5 py-1.5 text-xs font-semibold text-white backdrop-blur"><FolderOpen size={14} /> Presentation</span>
                         {project.locked && <span className="absolute bottom-3 left-3 z-10 flex items-center gap-1.5 rounded-lg bg-black/65 px-2.5 py-1.5 text-xs font-semibold text-amber-200 backdrop-blur"><Lock size={13} /> Locked</span>}
                       </div>
@@ -3002,7 +3200,7 @@ export default function Presentation() {
                       : 'border-white/10 hover:border-white/40'
                   }`}
                 >
-                  <SlideRender slide={s} />
+                  <SlideThumbnail slide={s} assets={mediaAssets} />
                   <span className="absolute left-1.5 top-1.5 z-10 rounded bg-black/65 px-1.5 text-xs font-semibold text-white">
                     {i + 1}
                   </span>
@@ -3069,31 +3267,17 @@ export default function Presentation() {
         {/* Canvas */}
         <section className="flex min-h-0 flex-col rounded-xl border border-white/10 bg-panel p-3">
           <p className="mb-2 shrink-0 text-xs text-warm-white/60">
-            Select a text box to edit it. Drag to move it; drag a corner to resize it.
+            Text controls stay ready for this slide. Click an item to select and move it; drag a corner to resize it.
           </p>
           <div
             className="flex min-h-0 flex-1 items-center justify-center"
-            onClick={() => {
-              setSelectedBoxId(null);
-              setIsBoxSelected(false);
-              setSelectedPictureId(null);
-              setSelectedShapeId(null);
-              setSelectedCountdown(false);
-              setPictureMenu(null);
-            }}
+            onClick={clearCanvasSelection}
             style={{ containerType: 'size' }}
           >
             <div
               ref={stageRef}
               tabIndex={0}
-              onClick={() => {
-                setSelectedBoxId(null);
-                setIsBoxSelected(false);
-                setSelectedPictureId(null);
-                setSelectedShapeId(null);
-                setSelectedCountdown(false);
-                setPictureMenu(null);
-              }}
+              onClick={clearCanvasSelection}
               onDoubleClick={(event) => {
                 if (cur.locked || !cur.bgImage || (event.target as HTMLElement).closest('[data-slide-object]')) return;
                 event.preventDefault();
@@ -3113,7 +3297,7 @@ export default function Presentation() {
               }}
             >
               <div className="absolute inset-0 overflow-hidden rounded-lg border border-white/10">
-                <SlideRender slide={cur} onVideoSelect={selectPicture} editingTextBoxId={isBoxSelected ? selectedBoxId : undefined} />
+                <SlideRender slide={cur} onVideoSelect={selectPicture} editingTextBoxId={isBoxSelected ? selectedBoxId : undefined} seamlessBackground />
               </div>
 
               {alignmentGuides.x !== null && <div aria-hidden className="pointer-events-none absolute inset-y-0 z-30 border-l border-dashed border-cyan-300 shadow-[0_0_5px_rgba(103,232,249,.8)]" style={{ left: `${alignmentGuides.x}%` }} />}
@@ -3190,9 +3374,10 @@ export default function Presentation() {
                 const currentAlign = shownAlign(id, textBox);
                 const valign = (value: VAlign) => updateBoxById(id, { valign: value });
                 const boxValign = textBox.valign ?? 'middle';
+                const previewFont = fontPreview?.slideId === cur.id && fontPreview.boxId === id ? fontPreview.family : textBox.font;
                 return <div data-slide-object key={id ?? 'main'} onPointerDown={startDrag('move', id, textBox)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); if (cur.locked) return; setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); setPictureMenu({ kind: 'text', id, x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 220) }); }} className={`absolute z-10 cursor-move ${selected ? 'border border-white' : 'border border-transparent'}`} onClick={(e) => { e.stopPropagation(); setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); }} style={{ left: `${textBox.x}%`, top: `${textBox.y}%`, width: `${textBox.w}%`, height: `${textBox.h}%`, zIndex: typeof textBox.layerOrder === 'number' ? textBox.layerOrder : textBox.layerOrder === 'front' ? 5000 : textBox.layerOrder === 'back' ? 0 : id === null ? 3000 : 3001 + (cur.extraBoxes ?? []).findIndex((item) => item.id === id), touchAction: 'none' }}>
                   {selected && <div className="absolute inset-0 z-0 overflow-hidden" style={{ background: textBox.boxBgOn ? textBox.boxBg : undefined }}>
-                    <div ref={canvasTextMeasureRef} aria-hidden className="pointer-events-none invisible absolute left-0 top-0 w-full whitespace-pre-wrap" style={{ overflowWrap: 'anywhere', fontFamily: FONTS[textBox.font] ?? `"${textBox.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(textBox.size / 1280) * 100}cqw`, fontWeight: textBox.bold ? 800 : 500, fontStyle: textBox.italic ? 'italic' : 'normal', textTransform: textBox.uppercase ? 'uppercase' : undefined, lineHeight: textBox.lineHeight, letterSpacing: `${(textBox.letterSpacing / 1280) * 100}cqw` }}>{textBox.text || ' '}</div>
+                    <div ref={canvasTextMeasureRef} aria-hidden className="pointer-events-none invisible absolute left-0 top-0 w-full whitespace-pre-wrap" style={{ overflowWrap: 'anywhere', fontFamily: FONTS[previewFont] ?? `"${previewFont.replaceAll('"', '')}", sans-serif`, fontSize: `${(textBox.size / 1280) * 100}cqw`, fontWeight: textBox.bold ? 800 : 500, fontStyle: textBox.italic ? 'italic' : 'normal', textTransform: textBox.uppercase ? 'uppercase' : undefined, lineHeight: textBox.lineHeight, letterSpacing: `${(textBox.letterSpacing / 1280) * 100}cqw` }}>{textBox.text || ' '}</div>
                     <SlideTextEditor
                       editorRef={canvasTextRef}
                       label="Edit text on slide"
@@ -3207,7 +3392,7 @@ export default function Presentation() {
                       style={{
                         whiteSpace: 'pre-wrap',
                         overflowWrap: 'anywhere',
-                        fontFamily: FONTS[textBox.font] ?? `"${textBox.font.replaceAll('"', '')}", sans-serif`,
+                        fontFamily: FONTS[previewFont] ?? `"${previewFont.replaceAll('"', '')}", sans-serif`,
                         fontSize: `${(textBox.size * canvasTextScale / 1280) * 100}cqw`,
                         fontWeight: textBox.bold ? 800 : 500,
                         fontStyle: textBox.italic ? 'italic' : 'normal',
@@ -3225,6 +3410,7 @@ export default function Presentation() {
                   {selected && (Object.keys(HANDLES) as (keyof typeof HANDLES)[]).map((h) => <span key={h} onPointerDown={startDrag(h, id, textBox)} className={`absolute z-20 h-2.5 w-2.5 rounded-sm border border-slate-400 bg-white ${HANDLES[h]}`} />)}
                   {selected && (Object.keys(TEXT_SIDE_HANDLES) as (keyof typeof TEXT_SIDE_HANDLES)[]).map((h) => <span key={h} onPointerDown={startDrag(h, id, textBox)} className={`absolute z-20 rounded-full border border-slate-400 bg-white ${TEXT_SIDE_HANDLES[h]}`} />)}
                   {selected && <div onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} className={`absolute left-1/2 z-20 flex -translate-x-1/2 cursor-default items-center gap-0.5 rounded-lg border border-white/10 bg-navy/95 p-1 shadow-xl ${toolbarBelow ? 'top-full mt-3' : 'bottom-full mb-3'}`}>
+                    <button type="button" aria-label="Drag to move text box" title="Drag to move text box" onPointerDown={startDrag('move', id, textBox)} className="flex h-7 w-7 touch-none items-center justify-center rounded text-warm-white/70 cursor-move hover:bg-white/10 hover:text-white"><GripVertical size={15} /></button>
                     <IconBtn label="Add text box" onClick={addText}><Plus size={15} /></IconBtn>
                     <IconBtn label="Align left" active={currentAlign === 'left'} onClick={() => align('left')}><AlignLeft size={15} /></IconBtn>
                     <IconBtn label="Align center" active={currentAlign === 'center'} onClick={() => align('center')}><AlignCenter size={15} /></IconBtn>
@@ -3289,12 +3475,13 @@ export default function Presentation() {
 
         {/* Properties */}
         <section className="relative flex min-h-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-panel">
-          <div className="flex shrink-0 border-b border-white/10 text-sm">
-            {(['Format', 'Media', 'Background'] as const).map((t) => (
+          <div className="grid shrink-0 grid-cols-4 border-b border-white/10">
+            {(['Format', 'Media', 'Background', 'Animation'] as const).map((t) => (
               <button
                 key={t}
+                title={t}
                 onClick={() => setTab(t)}
-                className={`-mb-px flex-1 border-b-2 px-1 py-2.5 transition-colors ${
+                className={`-mb-px min-w-0 whitespace-nowrap border-b-2 px-0.5 py-2.5 text-center text-[10px] transition-colors ${
                   tab === t
                     ? 'border-brand font-medium text-brand'
                     : 'border-transparent text-warm-white/60 hover:text-warm-white'
@@ -3306,6 +3493,48 @@ export default function Presentation() {
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            {tab === 'Animation' && (() => {
+              const target = selectedPicture ? 'media' : selectedShape ? 'shape' : box ? 'text' : null;
+              const targetItem = selectedPicture ?? selectedShape ?? box;
+              const currentAnimation = targetItem?.animation ?? 'none';
+              const animationOptions: { id: EntranceAnimation; label: string }[] = [
+                { id: 'none', label: 'None' }, { id: 'fade', label: 'Fade' }, { id: 'rise', label: 'Rise' },
+                { id: 'pop', label: 'Pop' }, { id: 'zoom', label: 'Zoom' }, { id: 'drift', label: 'Drift' },
+                { id: 'slide-left', label: 'Slide from left' }, { id: 'slide-right', label: 'Slide from right' },
+                { id: 'slide-up', label: 'Slide from below' }, { id: 'slide-down', label: 'Slide from above' },
+                { id: 'bounce', label: 'Bounce' }, { id: 'spin', label: 'Spin' }, { id: 'blur', label: 'Blur in' },
+                ...(target === 'text' ? [{ id: 'typewriter' as const, label: 'Typewriter' }] : []),
+              ];
+              const timing = { duration: targetItem?.animationDuration ?? (currentAnimation === 'typewriter' ? 1500 : 700), delay: targetItem?.animationDelay ?? 0, easing: targetItem?.animationEasing ?? 'smooth' as AnimationEasing };
+              const patchAnimation = (patch: Partial<{ animation: EntranceAnimation; animationDuration: number; animationDelay: number; animationEasing: AnimationEasing }>) => {
+                if (selectedPicture) updatePicture(selectedPicture.id, patch);
+                else if (selectedShape) updateSlide({ shapes: (cur.shapes ?? []).map((shape) => shape.id === selectedShape.id ? { ...shape, ...patch } : shape) });
+                else if (box) updateBox(patch);
+              };
+              return <div className="flex flex-col gap-3">
+                <SectionTitle>Entrance animation</SectionTitle>
+                <p className="text-xs leading-relaxed text-warm-white/55">Animate this {target ?? 'slide item'} when its slide appears. Timing is saved for this item and used in Preview and Studio.</p>
+                {!target ? <p className="rounded-lg border border-dashed border-white/15 p-3 text-xs text-warm-white/55">Select a text box, image, video, or shape on the slide to add an animation.</p> : <div className="grid grid-cols-2 gap-2">
+                  {animationOptions.map((option) => <button key={option.id} type="button" aria-pressed={currentAnimation === option.id} onClick={() => patchAnimation({ animation: option.id })} className={`rounded-lg border px-2 py-2 text-left text-[11px] font-medium transition ${currentAnimation === option.id ? 'border-brand bg-brand/10 text-brand' : 'border-white/10 text-warm-white/75 hover:border-white/25 hover:bg-white/5'}`}>{option.label}</button>)}
+                </div>}
+                {target && currentAnimation !== 'none' && <>
+                  <div className="mt-1 border-t border-white/10 pt-3">
+                    <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-warm-white/50">Timing</p>
+                    <label className="mb-3 block text-xs text-warm-white/75">Duration <span className="float-right tabular-nums">{(timing.duration / 1000).toFixed(2)} sec</span>
+                      <input type="range" min="200" max="4000" step="100" value={timing.duration} onChange={(event) => patchAnimation({ animationDuration: Number(event.target.value) })} className="mt-1 w-full accent-brand" />
+                    </label>
+                    <label className="mb-3 block text-xs text-warm-white/75">Delay <span className="float-right tabular-nums">{(timing.delay / 1000).toFixed(2)} sec</span>
+                      <input type="range" min="0" max="3000" step="100" value={timing.delay} onChange={(event) => patchAnimation({ animationDelay: Number(event.target.value) })} className="mt-1 w-full accent-brand" />
+                    </label>
+                    <label className="block text-xs text-warm-white/75">Motion
+                      <select value={timing.easing} onChange={(event) => patchAnimation({ animationEasing: event.target.value as AnimationEasing })} className={`${fieldClass} mt-1`}>
+                        <option value="smooth">Smooth</option><option value="linear">Even speed</option><option value="snappy">Quick finish</option>
+                      </select>
+                    </label>
+                  </div>
+                </>}
+              </div>;
+            })()}
             {tab === 'Media' && <div className="mb-5">
               <button type="button" disabled={mediaImporting !== null || cur.locked} onClick={() => contentInput.current?.click()} className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2.5 text-xs font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:cursor-wait disabled:opacity-50"><Plus size={15} /> Add image or video</button>
               <p className="mt-2 text-[10px] leading-relaxed text-warm-white/50">Images and videos you add here can also be reused as backgrounds.</p>
@@ -3315,7 +3544,7 @@ export default function Presentation() {
                 {contentAssets.length === 0 ? <p className="rounded-lg border border-dashed border-white/15 p-3 text-center text-[11px] text-warm-white/50">Your added images and videos will appear here.</p> : <div className="grid max-h-48 grid-cols-2 gap-2 overflow-y-auto pr-1">
                   {contentAssets.map((asset) => <div key={asset.id} className="group relative overflow-hidden rounded-lg border border-white/10 transition hover:border-brand/60">
                     <button type="button" disabled={cur.locked} onClick={() => addRecentContentMedia(asset)} title={`Add ${asset.name} to this slide`} className="block w-full text-left disabled:opacity-50">
-                      <span className="relative block aspect-video overflow-hidden bg-navy">{asset.type === 'image' ? <img src={asset.url} alt="" className="h-full w-full object-cover" /> : <video src={asset.url} muted className="h-full w-full object-cover" />}<span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white">{asset.type === 'video' ? 'VIDEO' : 'IMAGE'}</span></span>
+                      <span className="relative block aspect-video overflow-hidden bg-navy">{asset.type === 'image' ? <img src={asset.url} alt="" className="h-full w-full object-cover" /> : <video src={asset.url} muted preload="metadata" className="h-full w-full object-cover" />}<span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white">{asset.type === 'video' ? 'VIDEO' : 'IMAGE'}</span></span>
                       <span className="block truncate px-1.5 pt-1 text-[10px] text-warm-white/75">{asset.name}</span><span className="block px-1.5 pb-1 text-[9px] text-warm-white/45">{formatMediaSizeInKb(asset.blob.size)}</span>
                     </button>
                     <button type="button" aria-label={`Delete ${asset.name}`} title={`Delete ${asset.name}`} onClick={() => setDeleteConfirmation({ title: 'Delete uploaded file?', message: `Delete “${asset.name}” from Recent Uploads? It will also be removed from any slides and backgrounds using this file.`, onConfirm: () => { void deleteMediaAsset(asset); } })} className="absolute right-1 top-1 z-10 rounded-md border border-white/15 bg-black/75 p-1.5 text-white/75 opacity-0 shadow transition hover:bg-red-600 hover:text-white focus:opacity-100 group-hover:opacity-100"><Trash2 size={12} /></button>
@@ -3559,41 +3788,66 @@ export default function Presentation() {
                         aria-controls="font-picker-options"
                         placeholder="Search fonts…"
                         value={fontPickerOpen ? fontSearch : box.font}
-                        onFocus={() => { setFontSearch(''); setFontPickerOpen(true); }}
-                        onChange={(event) => { setFontSearch(event.target.value); setFontPickerOpen(true); }}
+                        onFocus={() => { setFontSearch(''); setFontPreview(null); setFontPickerOpen(true); }}
+                        onChange={(event) => { setFontSearch(event.target.value); setFontPreview(null); setFontPickerOpen(true); }}
                         onKeyDown={(event) => {
                           if (event.key === 'Enter' && fontOptions[0]) {
                             event.preventDefault();
                             updateBox({ font: fontOptions[0] });
                             loadGoogleFont(fontOptions[0]);
+                            setFontSearch('');
+                            setFontPreview(null);
                             setFontPickerOpen(false);
                           }
                         }}
-                        className={fieldClass}
+                        className={`${fieldClass} pr-8`}
                       />
-                      {fontPickerOpen && <div id="font-picker-options" role="listbox" className="absolute left-0 top-full z-50 mt-1 max-h-64 w-[min(280px,70vw)] overflow-y-auto rounded-lg border border-white/10 bg-[#101d2a] p-1 shadow-2xl">
-                        {fontOptions.length ? fontOptions.map((family) => <button key={family} type="button" role="option" aria-selected={box.font === family} onMouseDown={(event) => event.preventDefault()} onClick={() => {
+                      <button type="button" aria-label={fontPickerOpen ? 'Close font list' : 'Open font list'} aria-expanded={fontPickerOpen} onMouseDown={(event) => event.preventDefault()} onClick={() => {
+                        if (fontPickerOpen) {
+                          setFontPickerOpen(false);
+                          setFontSearch('');
+                          setFontPreview(null);
+                        } else {
+                          setFontSearch('');
+                          setFontPickerOpen(true);
+                        }
+                      }} className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-warm-white/55 transition hover:bg-white/10 hover:text-white"><ChevronDown size={14} className={`transition-transform ${fontPickerOpen ? 'rotate-180' : ''}`} /></button>
+                      {fontPickerOpen && <div id="font-picker-options" role="listbox" onMouseLeave={() => setFontPreview(null)} className="absolute left-0 top-full z-50 mt-1 max-h-64 w-[min(280px,70vw)] overflow-y-auto rounded-lg border border-white/10 bg-[#101d2a] p-1 shadow-2xl">
+                        {fontOptions.length ? fontOptions.map((family) => <button key={family} type="button" role="option" aria-selected={box.font === family} onMouseEnter={() => {
+                          setFontPreview({ slideId: cur.id, boxId: selectedBoxId, family });
+                          loadGoogleFont(family);
+                        }} onMouseDown={(event) => event.preventDefault()} onClick={() => {
                           updateBox({ font: family });
                           loadGoogleFont(family);
                           setFontSearch('');
+                          setFontPreview(null);
                           setFontPickerOpen(false);
                         }} className={`block w-full truncate rounded px-2.5 py-2 text-left text-sm ${box.font === family ? 'bg-brand/15 text-brand' : 'text-warm-white hover:bg-white/10'}`} style={{ fontFamily: FONTS[family] ?? `"${family.replaceAll('"', '')}", sans-serif` }}>{family}</button>)
                           : <p className="px-2.5 py-3 text-xs text-warm-white/50">No fonts found.</p>}
                         {fontOptions.length === 60 && <p className="px-2.5 py-2 text-[10px] text-warm-white/45">Showing first 60 matches. Type more to narrow the list.</p>}
                       </div>}
                     </div>
-                    <select
+                    <input
+                      type="number"
                       aria-label="Font size"
-                      value={box.size}
-                      onChange={(e) => updateBox({ size: Number(e.target.value), autoSize: false })}
+                      min={1}
+                      step="any"
+                      value={fontSizeDraft ?? String(box.size)}
+                      onFocus={() => setFontSizeDraft(String(box.size))}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setFontSizeDraft(value);
+                        const size = Number(value);
+                        if (value.trim() && Number.isFinite(size) && size > 0) updateBox({ size, autoSize: false });
+                      }}
+                      onBlur={() => {
+                        const size = Number(fontSizeDraft);
+                        if (fontSizeDraft?.trim() && Number.isFinite(size) && size > 0) updateBox({ size, autoSize: false });
+                        setFontSizeDraft(null);
+                      }}
+                      onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
                       className={fieldClass}
-                    >
-                      {[...new Set([32, 48, 64, 72, 96, 120, 144, box.size])]
-                        .sort((a, b) => a - b)
-                        .map((n) => (
-                          <option key={n}>{n}</option>
-                        ))}
-                    </select>
+                    />
                   </div>
 
                   <SectionTitle>Spacing</SectionTitle>
@@ -3751,30 +4005,33 @@ export default function Presentation() {
                 >
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <p className="text-xs font-semibold text-warm-white/80">Background library</p>
-                    <span className="text-[10px] text-warm-white/45">{backgroundAssets.length} saved</span>
+                    <span className="text-[10px] text-warm-white/45">{backgroundAssets.length} available · {backgroundAssets.filter((asset) => asset.type === 'video').length} videos</span>
                   </div>
                   <div className="mb-2 grid grid-cols-2 gap-1.5">
                     <button type="button" disabled={backgroundImportProgress !== null} title="Add every picture and video in a folder (its subfolders become collections)" onClick={() => backgroundFolderInput.current?.click()} className="flex items-center justify-center gap-1.5 rounded-lg border border-white/15 px-2 py-2 text-[11px] font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><FolderPlus size={14} /> Import folder</button>
                     <button type="button" disabled={backgroundImportProgress !== null} title="Pick one picture or video, or select several (Ctrl+click)" onClick={() => backgroundFilesInput.current?.click()} className="flex items-center justify-center gap-1.5 rounded-lg border border-white/15 px-2 py-2 text-[11px] font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><Upload size={14} /> Add files</button>
+                  </div>
+                  <div className="mb-2">
+                    <button type="button" onClick={() => { void refreshFolderBackgrounds(); }} className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-white/15 px-2 py-2 text-[11px] font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5"><ImageIcon size={14} /> Refresh library</button>
                   </div>
                   {backgroundImportProgress && <div role="status" aria-live="polite" className="mb-2 rounded-lg border border-brand/20 bg-brand/5 px-3 py-2 text-[11px] text-warm-white/75">
                     <div className="flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-2"><Loader2 size={13} className="shrink-0 animate-spin text-brand" /><span className="truncate">{backgroundImportProgress.message}</span></span><span className="shrink-0 tabular-nums text-warm-white/50">{backgroundImportProgress.current}/{backgroundImportProgress.total}</span></div>
                     <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-brand transition-[width]" style={{ width: `${backgroundImportProgress.total ? backgroundImportProgress.current / backgroundImportProgress.total * 100 : 0}%` }} /></div>
                   </div>}
                   {backgroundAssets.length > 0 && (() => {
-                    const names = [...new Set(backgroundAssets.map(collectionOf))].sort((a, b) => (a === 'Uploads' ? 1 : b === 'Uploads' ? -1 : naturalCompare(a, b)));
+                    const names = [...new Set(backgroundAssets.map(collectionOf))].sort((a, b) => (a === 'Built-in' ? -1 : b === 'Built-in' ? 1 : a === 'Uploads' ? 1 : b === 'Uploads' ? -1 : naturalCompare(a, b)));
                     const chips = ['All', ...names];
                     const active = chips.includes(backgroundCollection) ? backgroundCollection : 'All';
                     return (
                       <>
-                        <div role="tablist" aria-label="Background collections" className="mb-2 flex max-h-18 flex-wrap gap-1 overflow-y-auto">
+                        <div role="tablist" aria-label="Background folders" className="mb-2 grid max-h-18 grid-cols-2 gap-1 overflow-y-auto">
                           {chips.map((name) => (
-                            <button key={name} role="tab" aria-selected={active === name} onClick={() => { setBackgroundCollection(name); setRenamingCollection(null); }} className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold transition ${active === name ? 'border-brand bg-brand/15 text-white' : 'border-white/10 text-warm-white/55 hover:text-warm-white'}`}>
-                              {name} <span className={active === name ? 'text-brand' : 'text-warm-white/35'}>{name === 'All' ? backgroundAssets.length : backgroundAssets.filter((asset) => collectionOf(asset) === name).length}</span>
+                            <button key={name} type="button" role="tab" aria-selected={active === name} onClick={() => { setBackgroundCollection(name); setRenamingCollection(null); }} className={`flex min-w-0 items-center gap-1.5 rounded-md border px-2 py-1.5 text-left text-[10px] font-semibold transition ${active === name ? 'border-brand bg-brand/15 text-white' : 'border-white/10 text-warm-white/55 hover:border-white/25 hover:text-warm-white'}`}>
+                              <FolderOpen size={12} className="shrink-0 text-brand/80" /><span className="min-w-0 flex-1 truncate">{name === 'All' ? 'All backgrounds' : name}</span><span className={active === name ? 'shrink-0 text-brand' : 'shrink-0 text-warm-white/35'}>{name === 'All' ? backgroundAssets.length : backgroundAssets.filter((asset) => collectionOf(asset) === name).length}</span>
                             </button>
                           ))}
                         </div>
-                        {active !== 'All' && active !== 'Uploads' && (renamingCollection === active ? (
+                        {active !== 'All' && active !== 'Uploads' && active !== 'Built-in' && (renamingCollection === active ? (
                           <form onSubmit={(event) => { event.preventDefault(); void renameBackgroundCollection(active, collectionNameDraft); }} className="mb-2 flex items-center gap-1.5">
                             <input autoFocus value={collectionNameDraft} onChange={(event) => setCollectionNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setRenamingCollection(null); } }} aria-label="Collection name" maxLength={40} className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/20 px-2 py-1 text-xs text-white outline-none focus:border-brand" />
                             <button type="submit" aria-label="Save collection name" className="rounded-md bg-brand/20 p-1.5 text-brand"><Check size={13} /></button>
@@ -3791,20 +4048,20 @@ export default function Presentation() {
                           <div key={asset.id} className={`group relative overflow-hidden rounded-lg border transition ${cur.bgAssetId === asset.id ? 'border-brand ring-1 ring-brand/40' : 'border-white/10 hover:border-white/40'}`}>
                             <button onClick={() => applyMediaAsset(asset)} title={`Set ${asset.name} as the slide background`} className="block w-full text-left">
                               <span className="relative block aspect-video overflow-hidden bg-navy">
-                                {asset.type === 'image' ? <img src={asset.url} alt={asset.name} className="h-full w-full object-cover" /> : <video src={asset.url} muted className="h-full w-full object-cover" />}
+                                {asset.type === 'image' || asset.thumbnailUrl ? <img src={asset.type === 'image' ? asset.url : asset.thumbnailUrl} alt={asset.type === 'image' ? asset.name : ''} loading="lazy" decoding="async" className="h-full w-full object-cover" /> : <span className="flex h-full w-full items-center justify-center bg-navy"><Video size={20} className="text-warm-white/30" /></span>}
                                 {asset.type === 'video' && <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white">VIDEO</span>}
                               </span>
-                              <span className="block truncate px-1.5 pt-1 text-[10px] text-warm-white/75">{asset.name}</span>
-                              <span className="block truncate px-1.5 pb-1 text-[9px] text-warm-white/45">{asset.optimized && asset.originalBlob ? `${formatMediaSizeInKb(asset.originalBlob.size)} → ` : ''}{formatMediaSizeInKb(asset.blob.size)}{asset.optimized ? ' · optimized copy' : ''}</span>
+                              <span className="block truncate px-1.5 pt-1 text-[10px] font-medium text-warm-white/75">{backgroundOriginLabel(asset)} background</span>
+                              <span className="block truncate px-1.5 pb-1 text-[9px] text-warm-white/45">{asset.optimized && asset.originalBlob ? `${formatMediaSizeInKb(asset.originalBlob.size)} → ` : ''}{mediaSizeOf(asset)}{asset.optimized ? ' · optimized copy' : ''}</span>
                             </button>
                             {asset.type === 'video' && <button type="button" aria-label={`Preview ${asset.name}`} title={`Play preview of ${asset.name}`} onClick={() => setVideoPreviewAsset(asset)} className="absolute bottom-2 right-2 z-10 rounded-md bg-black/80 p-1.5 text-white hover:bg-brand"><Play size={13} /></button>}
-                            <button type="button" aria-label={`Delete ${asset.name}`} title={`Delete ${asset.name}`} onClick={() => setDeleteConfirmation({
+                            {!asset.fromFolder && <button type="button" aria-label={`Delete ${asset.name}`} title={`Delete ${asset.name}`} onClick={() => setDeleteConfirmation({
                               title: 'Delete uploaded background?',
                               message: `Delete “${asset.name}” from saved uploads? Slides using this file will switch back to their color background.`,
                               onConfirm: () => { void deleteMediaAsset(asset); },
                             })} className="absolute right-1 top-1 z-10 rounded-md border border-white/15 bg-black/75 p-1.5 text-white/75 opacity-0 shadow transition hover:bg-red-600 hover:text-white focus:opacity-100 group-hover:opacity-100">
                               <Trash2 size={12} />
-                            </button>
+                            </button>}
                           </div>
                           ))}
                         </div>
@@ -3817,7 +4074,7 @@ export default function Presentation() {
                       Import a folder of backgrounds, or drag one here. Each folder becomes a collection, like “Christmas” or “Motion loops”.
                     </div>
                   )}
-                  <p className="mt-2 text-[10px] leading-relaxed text-warm-white/40">Images and videos added in Content also appear under Uploads. Smaller high-quality copies are used when they save space.</p>
+                  <p className="mt-2 text-[10px] leading-relaxed text-warm-white/40">Built-in backgrounds are included with FaithStream. Your imported images and videos appear in the Imported folder. Content uploads also appear under Uploads.</p>
                   <input ref={(element) => { backgroundFolderInput.current = element; markFolderInput(element); }} type="file" multiple hidden onChange={(event) => { const picked = pathedFilesFromInput(event.target.files); event.target.value = ''; void importBackgrounds(picked, true); }} />
                   <input ref={backgroundFilesInput} type="file" accept="image/*,video/*" multiple hidden onChange={(event) => { const picked = pathedFilesFromInput(event.target.files); event.target.value = ''; void importBackgrounds(picked, false); }} />
                 </div>
@@ -3998,7 +4255,7 @@ export default function Presentation() {
 
       {videoPreviewAsset && <BodyPortal><div className="fixed inset-0 z-130 flex items-center justify-center bg-black/85 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoPreviewAsset(null); }}>
         <section role="dialog" aria-modal="true" aria-label={`Preview ${videoPreviewAsset.name}`} className="w-full max-w-4xl rounded-2xl border border-white/10 bg-[#101d2a] p-4 shadow-2xl">
-          <div className="mb-3 flex items-center justify-between gap-3"><h2 className="truncate text-sm font-semibold text-warm-white">{videoPreviewAsset.name}</h2><button type="button" onClick={() => setVideoPreviewAsset(null)} aria-label="Close video preview" className="rounded-lg p-2 text-warm-white/60 hover:bg-white/10 hover:text-white"><X size={17} /></button></div>
+          <div className="mb-3 flex items-center justify-between gap-3"><h2 className="truncate text-sm font-semibold text-warm-white">{backgroundOriginLabel(videoPreviewAsset)} video background</h2><button type="button" onClick={() => setVideoPreviewAsset(null)} aria-label="Close video preview" className="rounded-lg p-2 text-warm-white/60 hover:bg-white/10 hover:text-white"><X size={17} /></button></div>
           <video src={videoPreviewAsset.url} controls autoPlay playsInline className="max-h-[70vh] w-full rounded-lg bg-black" />
           <p className="mt-3 text-xs text-warm-white/55">This upload is from the background library. Add videos that need player controls from the Content tab.</p>
           <div className="mt-2 flex justify-end"><button type="button" onClick={() => { applyMediaAsset(videoPreviewAsset); setVideoPreviewAsset(null); }} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy">Use as background</button></div>

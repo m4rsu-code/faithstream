@@ -12,6 +12,13 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
   registerStudioMusicFile: (file: File) => ipcRenderer.invoke('studio:music:register', webUtils.getPathForFile(file), file.name) as Promise<{ ok: boolean; asset?: { id: string; name: string; path: string; url: string }; message?: string }>,
   resolveStudioMusicFiles: (assets: { id: string; name: string; path: string; createdAt: number }[]) => ipcRenderer.invoke('studio:music:resolve', assets) as Promise<{ id: string; name: string; path: string; createdAt: number; url: string; available: boolean }[]>,
   removeStudioMusicFile: (id: string) => ipcRenderer.invoke('studio:music:remove', id) as Promise<boolean>,
+  listPresentationBackgrounds: () => ipcRenderer.invoke('presentation:backgrounds:list') as Promise<{ id: string; name: string; type: 'image' | 'video'; collection: string; url: string; size: number; thumbnailUrl?: string }[]>,
+  preparePresentationBackgroundThumbnails: () => ipcRenderer.invoke('presentation:backgrounds:prepare-thumbnails') as Promise<boolean>,
+  onPresentationBackgroundsChanged: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on('presentation:backgrounds:changed', listener);
+    return () => ipcRenderer.removeListener('presentation:backgrounds:changed', listener);
+  },
   startMobileCamPairing: (sourceId: number) => ipcRenderer.invoke('mobile-cam:start-pairing', sourceId) as Promise<{ ok: boolean; sourceId?: number; port?: number; code?: string; expiresAt?: number; addresses?: string[]; message?: string }>,
   renewMobileCamPairingCode: (sourceId: number) => ipcRenderer.invoke('mobile-cam:renew-code', sourceId) as Promise<{ ok: boolean; sourceId?: number; code?: string; expiresAt?: number; message?: string }>,
   stopMobileCamPairing: (sourceId: number) => ipcRenderer.invoke('mobile-cam:stop-pairing', sourceId) as Promise<boolean>,

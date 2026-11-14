@@ -1,12 +1,12 @@
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, protocol, safeStorage, screen, session, shell } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { createReadStream } from 'node:fs';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { createReadStream, existsSync, watch as watchDirectory, type FSWatcher } from 'node:fs';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
-import { randomInt, randomUUID } from 'node:crypto';
+import { createHash, randomInt, randomUUID } from 'node:crypto';
 import started from 'electron-squirrel-startup';
 import ffmpegStaticPath from 'ffmpeg-static';
 import type { RecordingStatusEvent, StreamStatus } from './shared/streamContracts';
@@ -61,10 +61,62 @@ const MAX_MOBILE_CAMERAS = 3;
 type MobileCamRoom = { sourceId: number; code: string; expiresAt: number; studio: any | null; phone: any | null; phoneAddress: string | null; invalidAttempts: number };
 const mobileCamRooms = new Map<number, { server: any; room: MobileCamRoom }>();
 const studioMusicPaths = new Map<string, string>();
+const studioBackgroundPaths = new Map<string, string>();
+const studioBackgroundWatchers: FSWatcher[] = [];
+const backgroundThumbnailQueue: { sourcePath: string; thumbnailPath: string }[] = [];
+const backgroundThumbnailJobs = new Set<string>();
+let backgroundThumbnailWorkers = 0;
+let backgroundThumbnailsSinceNotify = 0;
+const STUDIO_BACKGROUND_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.png', '.jpg', '.jpeg', '.webp']);
+const bundledBackgroundsPath = () => {
+  if (app.isPackaged) return path.join(process.resourcesPath, 'backgrounds');
+  const buildRelative = path.resolve(__dirname, '..', '..', 'backgrounds');
+  const appRelative = path.join(app.getAppPath(), 'backgrounds');
+  return existsSync(buildRelative) ? buildRelative : appRelative;
+};
 const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const normalizeAddress = (address: string | undefined) => (address ?? '').replace(/^::ffff:/, '');
 const authTokenPath = () => path.join(app.getPath('userData'), 'auth-token.bin');
 const streamSettingsPath = () => path.join(app.getPath('userData'), 'stream-settings.bin');
+const backgroundThumbnailsPath = () => path.join(app.getPath('userData'), 'background-thumbnails');
+
+const sendBackgroundLibraryChanged = () => {
+  if (authWindow && !authWindow.isDestroyed()) authWindow.webContents.send('presentation:backgrounds:changed');
+};
+
+const processBackgroundThumbnailQueue = () => {
+  while (backgroundThumbnailWorkers < 2 && backgroundThumbnailQueue.length) {
+    const job = backgroundThumbnailQueue.shift()!;
+    backgroundThumbnailWorkers += 1;
+    const child = spawn(ffmpegPath!, [
+      '-hide_banner', '-loglevel', 'error', '-ss', '0.5', '-i', job.sourcePath,
+      '-frames:v', '1', '-vf', 'scale=480:270:force_original_aspect_ratio=decrease',
+      '-q:v', '6', '-y', job.thumbnailPath,
+    ], { windowsHide: true, stdio: 'ignore' });
+    let finished = false;
+    const finish = (success: boolean) => {
+      if (finished) return;
+      finished = true;
+      backgroundThumbnailWorkers -= 1;
+      backgroundThumbnailJobs.delete(job.thumbnailPath);
+      if (success) backgroundThumbnailsSinceNotify += 1;
+      if (backgroundThumbnailsSinceNotify >= 6 || (success && backgroundThumbnailWorkers === 0 && backgroundThumbnailQueue.length === 0)) {
+        backgroundThumbnailsSinceNotify = 0;
+        sendBackgroundLibraryChanged();
+      }
+      processBackgroundThumbnailQueue();
+    };
+    child.once('error', () => finish(false));
+    child.once('close', (code) => finish(code === 0));
+  }
+};
+
+const queueBackgroundThumbnail = (sourcePath: string, thumbnailPath: string) => {
+  if (!ffmpegPath || existsSync(thumbnailPath) || backgroundThumbnailJobs.has(thumbnailPath)) return;
+  backgroundThumbnailJobs.add(thumbnailPath);
+  backgroundThumbnailQueue.push({ sourcePath, thumbnailPath });
+  processBackgroundThumbnailQueue();
+};
 
 const isAuthWindow = (sender: Electron.WebContents) => authWindow?.webContents === sender;
 
@@ -702,9 +754,18 @@ const createWindow = () => {
 };
 
 app.whenReady().then(() => {
+  const backgroundsFolder = bundledBackgroundsPath();
+  void mkdir(backgroundsFolder, { recursive: true }).then(() => {
+    const watcher = watchDirectory(backgroundsFolder, { persistent: false }, () => {
+      if (authWindow && !authWindow.isDestroyed()) authWindow.webContents.send('presentation:backgrounds:changed');
+    });
+    watcher.on('error', () => watcher.close());
+    studioBackgroundWatchers.push(watcher);
+  }).catch(() => { /* Folder access is retried when the library asks for its contents. */ });
   protocol.handle('faithstream-local', async (request) => {
-    const id = new URL(request.url).pathname.replace(/^\//, '');
-    const filePath = studioMusicPaths.get(id);
+    const mediaUrl = new URL(request.url);
+    const id = decodeURIComponent(mediaUrl.pathname.replace(/^\//, ''));
+    const filePath = mediaUrl.hostname === 'backgrounds' ? studioBackgroundPaths.get(id) : mediaUrl.hostname === 'music' ? studioMusicPaths.get(id) : undefined;
     if (!filePath || (request.method !== 'GET' && request.method !== 'HEAD')) return new Response('Not found', { status: 404 });
     try {
       const info = await stat(filePath);
@@ -723,7 +784,7 @@ app.whenReady().then(() => {
         status = 206;
       }
       const ext = path.extname(filePath).toLowerCase();
-      const contentType: Record<string, string> = { '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.flac': 'audio/flac', '.wma': 'audio/x-ms-wma', '.webm': 'audio/webm' };
+      const contentType: Record<string, string> = { '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.flac': 'audio/flac', '.wma': 'audio/x-ms-wma' };
       const headers = new Headers({ 'Accept-Ranges': 'bytes', 'Content-Type': contentType[ext] ?? 'application/octet-stream', 'Content-Length': String(Math.max(0, end - start + 1)), 'Access-Control-Allow-Origin': '*' });
       if (status === 206) headers.set('Content-Range', `bytes ${start}-${end}/${info.size}`);
       if (request.method === 'HEAD') return new Response(null, { status, headers });
@@ -818,6 +879,59 @@ app.whenReady().then(() => {
   ipcMain.handle('studio:music:remove', (event, id: unknown) => {
     if (!isTrustedMainSender(event) || typeof id !== 'string') return false;
     return studioMusicPaths.delete(id);
+  });
+  ipcMain.handle('presentation:backgrounds:list', async (event) => {
+    if (!isTrustedMainSender(event)) return [];
+    const roots = [{ folder: bundledBackgroundsPath(), collection: 'Built-in' }];
+    const items: { id: string; name: string; type: 'image' | 'video'; collection: string; url: string; size: number; thumbnailUrl?: string }[] = [];
+    studioBackgroundPaths.clear();
+    await mkdir(backgroundThumbnailsPath(), { recursive: true });
+    for (const root of roots) {
+      try {
+        await mkdir(root.folder, { recursive: true });
+        const files = await readdir(root.folder, { withFileTypes: true });
+        for (const entry of files) {
+          if (!entry.isFile() || !STUDIO_BACKGROUND_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
+          const filePath = path.join(root.folder, entry.name);
+          const info = await stat(filePath);
+          if (!info.isFile()) continue;
+          const id = createHash('sha256').update(`${root.collection}:${entry.name}`).digest('hex').slice(0, 24);
+          studioBackgroundPaths.set(id, filePath);
+          const extension = path.extname(entry.name).toLowerCase();
+          const type = ['.png', '.jpg', '.jpeg', '.webp'].includes(extension) ? 'image' : 'video';
+          const thumbnailKey = createHash('sha256').update(`${filePath}:${info.size}:${info.mtimeMs}`).digest('hex');
+          const thumbnailPath = path.join(backgroundThumbnailsPath(), `${thumbnailKey}.jpg`);
+          const thumbnailId = `thumbnail-${id}`;
+          const thumbnailUrl = type === 'video' && existsSync(thumbnailPath) ? `faithstream-local://backgrounds/${thumbnailId}` : undefined;
+          if (thumbnailUrl) studioBackgroundPaths.set(thumbnailId, thumbnailPath);
+          items.push({ id: `folder-default-${id}`, name: entry.name, type, collection: root.collection, url: `faithstream-local://backgrounds/${id}`, size: info.size, ...(thumbnailUrl ? { thumbnailUrl } : {}) });
+        }
+      } catch {
+        // An absent or unreadable background folder should not prevent the editor opening.
+      }
+    }
+    return items.sort((a, b) => a.collection.localeCompare(b.collection) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+  });
+  ipcMain.handle('presentation:backgrounds:prepare-thumbnails', async (event) => {
+    if (!isTrustedMainSender(event) || !ffmpegPath) return false;
+    try {
+      const folder = bundledBackgroundsPath();
+      const cacheFolder = backgroundThumbnailsPath();
+      await Promise.all([mkdir(folder, { recursive: true }), mkdir(cacheFolder, { recursive: true })]);
+      const files = await readdir(folder, { withFileTypes: true });
+      for (const entry of files) {
+        const extension = path.extname(entry.name).toLowerCase();
+        if (!entry.isFile() || !STUDIO_BACKGROUND_EXTENSIONS.has(extension) || ['.png', '.jpg', '.jpeg', '.webp'].includes(extension)) continue;
+        const sourcePath = path.join(folder, entry.name);
+        const info = await stat(sourcePath);
+        if (!info.isFile()) continue;
+        const key = createHash('sha256').update(`${sourcePath}:${info.size}:${info.mtimeMs}`).digest('hex');
+        queueBackgroundThumbnail(sourcePath, path.join(cacheFolder, `${key}.jpg`));
+      }
+      return true;
+    } catch {
+      return false;
+    }
   });
   ipcMain.handle('presentation:render-pptx', async (event, sourcePath: unknown) => {
     if (!isTrustedMainSender(event) || typeof sourcePath !== 'string' || sourcePath.length > 32_768) {

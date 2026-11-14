@@ -15,6 +15,7 @@ const config: ForgeConfig = {
   name: 'FaithStream Studio',
   executableName: 'faithstream',
   icon: './src/assets/icons/win/camera-logo',
+  extraResource: ['./backgrounds'],
 },
 
 

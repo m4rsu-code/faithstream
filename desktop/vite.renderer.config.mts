@@ -18,10 +18,10 @@ const contentSecurityPolicy = (apiUrl: string): Plugin => {
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' data: https://fonts.gstatic.com",
-    `img-src 'self' data: blob: https: ${apiOrigin}`.trim(),
-    `media-src 'self' data: blob: https: ${apiOrigin}`.trim(),
+    `img-src 'self' data: blob: https: faithstream-local: ${apiOrigin}`.trim(),
+    `media-src 'self' data: blob: https: faithstream-local: ${apiOrigin}`.trim(),
     // https: is allowed so Studio can embed remote slide images into the stream output.
-    `connect-src 'self' data: blob: https: ${apiOrigin} ws://127.0.0.1:*`.replace(/\s+/g, ' ').trim(),
+    `connect-src 'self' data: blob: https: faithstream-local: ${apiOrigin} ws://127.0.0.1:*`.replace(/\s+/g, ' ').trim(),
     "worker-src 'self' blob:",
     "object-src 'none'",
     "frame-src 'none'",

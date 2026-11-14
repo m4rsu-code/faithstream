@@ -144,6 +144,33 @@ body,
   margin: 0;
 }
 
+@keyframes faithstream-content-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes faithstream-content-rise { from { opacity: 0; transform: translateY(18%); } to { opacity: 1; transform: translateY(0); } }
+@keyframes faithstream-content-pop { from { opacity: 0; transform: scale(.82); } to { opacity: 1; transform: scale(1); } }
+@keyframes faithstream-content-typewriter { from { opacity: 0; clip-path: inset(0 100% 0 0); } to { opacity: 1; clip-path: inset(0 0 0 0); } }
+@keyframes faithstream-content-slide-left { from { opacity: 0; transform: translateX(-100%); } to { opacity: 1; transform: translateX(0); } }
+@keyframes faithstream-content-slide-right { from { opacity: 0; transform: translateX(100%); } to { opacity: 1; transform: translateX(0); } }
+@keyframes faithstream-content-slide-up { from { opacity: 0; transform: translateY(100%); } to { opacity: 1; transform: translateY(0); } }
+@keyframes faithstream-content-slide-down { from { opacity: 0; transform: translateY(-100%); } to { opacity: 1; transform: translateY(0); } }
+@keyframes faithstream-content-zoom { from { opacity: 0; transform: scale(.25); } to { opacity: 1; transform: scale(1); } }
+@keyframes faithstream-content-drift { from { opacity: 0; transform: translateY(14%); } to { opacity: 1; transform: translateY(0); } }
+@keyframes faithstream-content-bounce { 0% { opacity: 0; transform: scale(.72); } 65% { opacity: 1; transform: scale(1.08); } 82% { transform: scale(.97); } 100% { transform: scale(1); } }
+@keyframes faithstream-content-spin { from { opacity: 0; transform: rotate(-360deg) scale(.78); } to { opacity: 1; transform: rotate(0) scale(1); } }
+@keyframes faithstream-content-blur { from { opacity: 0; filter: blur(14px); } to { opacity: 1; filter: blur(0); } }
+.slide-content-fade { animation: faithstream-content-fade 700ms ease-out both; }
+.slide-content-rise { animation: faithstream-content-rise 700ms cubic-bezier(.2,.75,.25,1) both; }
+.slide-content-pop { animation: faithstream-content-pop 650ms cubic-bezier(.2,.8,.25,1.15) both; }
+.slide-content-typewriter { animation: faithstream-content-typewriter 1.5s steps(24, end) both; }
+.slide-content-slide-left { animation: faithstream-content-slide-left 700ms both; }
+.slide-content-slide-right { animation: faithstream-content-slide-right 700ms both; }
+.slide-content-slide-up { animation: faithstream-content-slide-up 700ms both; }
+.slide-content-slide-down { animation: faithstream-content-slide-down 700ms both; }
+.slide-content-zoom { animation: faithstream-content-zoom 700ms both; }
+.slide-content-drift { animation: faithstream-content-drift 900ms both; }
+.slide-content-bounce { animation: faithstream-content-bounce 900ms both; }
+.slide-content-spin { animation: faithstream-content-spin 900ms both; }
+.slide-content-blur { animation: faithstream-content-blur 800ms both; }
+
 body {
   min-width: 800px;
   background: var(--color-studio);
