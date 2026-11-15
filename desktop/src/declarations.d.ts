@@ -1,4 +1,5 @@
 /// <reference types="@electron-forge/plugin-vite/forge-vite-env" />
+declare const __FAITHSTREAM_UPDATE_FEED_URL__: string;
 interface Window {
   faithstreamWindow?: {
     getAuthToken: () => Promise<string | null>;
@@ -57,6 +58,10 @@ interface Window {
     stopRecording: () => Promise<boolean>;
     onRecordingStatus: (callback: (event: import('./shared/streamContracts').RecordingStatusEvent) => void) => () => void;
     onStreamStatus: (callback: (event: import('./shared/streamContracts').StreamStatusEvent) => void) => () => void;
+    checkForAppUpdates: () => Promise<boolean>;
+    installAppUpdate: () => Promise<boolean>;
+    getAppUpdateStatus: () => Promise<import('./shared/updateContracts').UpdateStatusEvent>;
+    onAppUpdateStatus: (callback: (event: import('./shared/updateContracts').UpdateStatusEvent) => void) => () => void;
   };
 }
 declare module '*.css';

@@ -597,6 +597,8 @@ export type SongStyle = {
   backgroundAssetId?: string;
   /** Darken the background, 0–80 %. */
   dim: number;
+  /** Transparency of the picture or video itself, 0–100 %. */
+  backgroundOpacity: number;
 };
 /** Kept for older code: the song slide settings are the default song style. */
 export type SongSlideSettings = SongStyle;
@@ -615,7 +617,7 @@ export const SONG_BACKGROUNDS = [
 export const DEFAULT_SONG_STYLE: SongStyle = {
   font: 'Segoe UI', fontSize: 68, autoFit: true, lineHeight: 1.2, bold: true, italic: false, underline: false, caps: false,
   align: 'center', valign: 'middle', color: '#FFFFFF', shadow: true, position: 'middle', linesPerSlide: 4, titleSlide: true,
-  background: SONG_BACKGROUNDS[0], dim: 0,
+  background: SONG_BACKGROUNDS[0], dim: 0, backgroundOpacity: 100,
 };
 export const DEFAULT_SONG_SLIDE_SETTINGS = DEFAULT_SONG_STYLE;
 export const SONG_SLIDE_SETTINGS_EVENT = 'faithstream:song-slide-settings';
@@ -663,6 +665,7 @@ export const cleanSongStyle = (value: unknown, base: SongStyle = DEFAULT_SONG_ST
     background: pick(raw.background, (bg) => typeof bg === 'string' && (SONG_BACKGROUNDS.includes(bg) || isCustomBackground(bg)), base.background),
     backgroundAssetId: pick(raw.backgroundAssetId, (id) => typeof id === 'string' && id.length > 0 && id.length < 100, undefined),
     dim: Math.round(pick(raw.dim, isNum(0, 80), base.dim)),
+    backgroundOpacity: Math.round(pick(raw.backgroundOpacity, isNum(0, 100), base.backgroundOpacity)),
   };
 };
 
@@ -678,6 +681,11 @@ export const loadSongSlideSettings = (): SongStyle => {
 export const saveSongSlideSettings = (settings: SongStyle) => {
   try { localStorage.setItem(SONG_SLIDE_SETTINGS_KEY, JSON.stringify(cleanSongStyle(settings))); } catch { /* keep for this session */ }
   window.dispatchEvent(new CustomEvent(SONG_SLIDE_SETTINGS_EVENT, { detail: settings }));
+};
+
+/** A chosen background is reused automatically for the next song or scripture design. */
+export const rememberSongBackground = (patch: Pick<SongStyle, 'background' | 'backgroundAssetId' | 'dim' | 'backgroundOpacity'>) => {
+  saveSongSlideSettings({ ...loadSongSlideSettings(), ...patch });
 };
 
 /** The style a song is shown with: its own design, or the default song style. */
@@ -739,6 +747,7 @@ export type SongSlideLayout = {
   background: string;
   backgroundAssetId?: string;
   dim: number;
+  backgroundOpacity: number;
 };
 
 /** Turns a song and its style into slide layouts. Studio, the song editor preview and "Make a presentation" all use this. */
@@ -751,7 +760,7 @@ export const songSlideLayouts = (song: Pick<Song, 'lyrics' | 'title' | 'author' 
     color: style.color, shadow: style.shadow, ...area,
   });
   return screens.map((screen) => {
-    const common = { kind: screen.kind, label: screen.label, text: screen.text, background: style.background, backgroundAssetId: style.backgroundAssetId, dim: style.dim };
+    const common = { kind: screen.kind, label: screen.label, text: screen.text, background: style.background, backgroundAssetId: style.backgroundAssetId, dim: style.dim, backgroundOpacity: style.backgroundOpacity };
     if (screen.kind === 'title') {
       const titleSize = Math.min(112, Math.max(72, Math.round(size * 1.5)));
       return {

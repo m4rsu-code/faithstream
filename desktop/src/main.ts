@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, protocol, safeStorage, screen, session, shell } from 'electron';
+import { app, autoUpdater, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, protocol, safeStorage, screen, session, shell } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createReadStream, existsSync, watch as watchDirectory, type FSWatcher } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
@@ -10,6 +10,7 @@ import { createHash, randomInt, randomUUID } from 'node:crypto';
 import started from 'electron-squirrel-startup';
 import ffmpegStaticPath from 'ffmpeg-static';
 import type { RecordingStatusEvent, StreamStatus } from './shared/streamContracts';
+import type { UpdateStatusEvent } from './shared/updateContracts';
 protocol.registerSchemesAsPrivileged([{ scheme: 'faithstream-local', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } }]);
 // In a packaged app the binary is unpacked next to app.asar (see forge.config.mts).
 // The OS cannot execute a file from inside the archive, so point spawn() at the unpacked copy.
@@ -56,6 +57,8 @@ let recordingSession: RecordingSession | null = null;
 const studioDisplayWindows = new Map<number, BrowserWindow>();
 const STUDIO_AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac', '.wma', '.webm']);
 let authWindow: BrowserWindow | null = null;
+let updateStatus: UpdateStatusEvent = { status: 'idle' };
+let updateCheckInProgress = false;
 const MOBILE_CAM_PAIRING_LIFETIME_MS = 3 * 60 * 1000;
 const MAX_MOBILE_CAMERAS = 3;
 type MobileCamRoom = { sourceId: number; code: string; expiresAt: number; studio: any | null; phone: any | null; phoneAddress: string | null; invalidAttempts: number };
@@ -83,6 +86,35 @@ const backgroundThumbnailsPath = () => path.join(app.getPath('userData'), 'backg
 const sendBackgroundLibraryChanged = () => {
   if (authWindow && !authWindow.isDestroyed()) authWindow.webContents.send('presentation:backgrounds:changed');
 };
+
+const sendUpdateStatus = (status: UpdateStatusEvent['status'], message?: string) => {
+  updateStatus = { status, ...(message ? { message } : {}) };
+  if (authWindow && !authWindow.isDestroyed()) authWindow.webContents.send('app:update-status', updateStatus);
+};
+
+const checkForAppUpdates = () => {
+  if (!isUpdateFeedConfigured) {
+    sendUpdateStatus('not-configured', 'Updates will be available after the release feed is configured.');
+    return false;
+  }
+  if (!app.isPackaged || process.platform !== 'win32') {
+    sendUpdateStatus('not-configured', 'Updates are available in the installed Windows app.');
+    return false;
+  }
+  if (updateCheckInProgress || updateStatus.status === 'downloading' || updateStatus.status === 'downloaded') return true;
+  try {
+    updateCheckInProgress = true;
+    sendUpdateStatus('checking', 'Checking for updates…');
+    autoUpdater.checkForUpdates();
+    return true;
+  } catch (error) {
+    updateCheckInProgress = false;
+    sendUpdateStatus('error', error instanceof Error ? error.message : 'Could not check for updates.');
+    return false;
+  }
+};
+
+const isUpdateFeedConfigured = typeof __FAITHSTREAM_UPDATE_FEED_URL__ !== 'undefined' && Boolean(__FAITHSTREAM_UPDATE_FEED_URL__.trim());
 
 const processBackgroundThumbnailQueue = () => {
   while (backgroundThumbnailWorkers < 2 && backgroundThumbnailQueue.length) {
@@ -144,6 +176,12 @@ const isAppUrl = (rawUrl: string | undefined | null) => {
 /** IPC that touches files, the encoder, or the network must come from the main Studio window's own page. */
 const isTrustedMainSender = (event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent) =>
   isAuthWindow(event.sender) && isAppUrl(event.senderFrame?.url);
+
+/** Monitor output windows need read access to the same built-in background library as Studio. */
+const isStudioDisplayWindow = (sender: Electron.WebContents) =>
+  [...studioDisplayWindows.values()].some((window) => !window.isDestroyed() && window.webContents === sender);
+const isTrustedBackgroundLibrarySender = (event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent) =>
+  (isAuthWindow(event.sender) || isStudioDisplayWindow(event.sender)) && isAppUrl(event.senderFrame?.url);
 
 const ALLOWED_PERMISSIONS = new Set(['media', 'display-capture', 'fullscreen', 'clipboard-sanitized-write']);
 
@@ -754,6 +792,28 @@ const createWindow = () => {
 };
 
 app.whenReady().then(() => {
+  if (app.isPackaged && process.platform === 'win32' && isUpdateFeedConfigured) {
+    autoUpdater.setFeedURL({ url: __FAITHSTREAM_UPDATE_FEED_URL__.trim().replace(/\/$/, '') });
+    autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking', 'Checking for updates…'));
+    autoUpdater.on('update-available', () => sendUpdateStatus('downloading', 'A new update is downloading.'));
+    autoUpdater.on('update-not-available', () => {
+      updateCheckInProgress = false;
+      sendUpdateStatus('not-available', 'You’re using the latest version.');
+    });
+    autoUpdater.on('update-downloaded', () => {
+      updateCheckInProgress = false;
+      sendUpdateStatus('downloaded', 'The update is ready. Restart FaithStream Studio to install it.');
+    });
+    autoUpdater.on('error', (error) => {
+      updateCheckInProgress = false;
+      sendUpdateStatus('error', error.message || 'Could not download the update.');
+    });
+  } else if (process.platform === 'win32') {
+    sendUpdateStatus('not-configured', app.isPackaged
+      ? 'Updates will be available after the release feed is configured.'
+      : 'Updates can be checked in the installed Windows app.');
+  }
+
   const backgroundsFolder = bundledBackgroundsPath();
   void mkdir(backgroundsFolder, { recursive: true }).then(() => {
     const watcher = watchDirectory(backgroundsFolder, { persistent: false }, () => {
@@ -801,6 +861,13 @@ app.whenReady().then(() => {
     } catch {
       return null;
     }
+  });
+  ipcMain.handle('app:update:status', (event) => isTrustedMainSender(event) ? updateStatus : { status: 'error', message: 'Open FaithStream Studio to check for updates.' });
+  ipcMain.handle('app:update:check', (event) => isTrustedMainSender(event) ? checkForAppUpdates() : false);
+  ipcMain.handle('app:update:install', (event) => {
+    if (!isTrustedMainSender(event) || updateStatus.status !== 'downloaded') return false;
+    setTimeout(() => autoUpdater.quitAndInstall(), 100);
+    return true;
   });
   ipcMain.handle('auth:token:set', async (event, token: unknown) => {
     if (!isTrustedMainSender(event) || !safeStorage.isEncryptionAvailable() || typeof token !== 'string' || token.length > 4096) return false;
@@ -881,7 +948,7 @@ app.whenReady().then(() => {
     return studioMusicPaths.delete(id);
   });
   ipcMain.handle('presentation:backgrounds:list', async (event) => {
-    if (!isTrustedMainSender(event)) return [];
+    if (!isTrustedBackgroundLibrarySender(event)) return [];
     const roots = [{ folder: bundledBackgroundsPath(), collection: 'Built-in' }];
     const items: { id: string; name: string; type: 'image' | 'video'; collection: string; url: string; size: number; thumbnailUrl?: string }[] = [];
     studioBackgroundPaths.clear();
@@ -1180,6 +1247,11 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
 
   createWindow();
+
+  // Squirrel holds a file lock briefly on the first run after installation.
+  if (app.isPackaged && process.platform === 'win32' && isUpdateFeedConfigured && !process.argv.includes('--squirrel-firstrun')) {
+    setTimeout(checkForAppUpdates, 10_000);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

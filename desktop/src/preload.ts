@@ -54,6 +54,14 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   close: () => ipcRenderer.invoke('window:close'),
   setAuthenticatedMode: (authenticated: boolean) => ipcRenderer.invoke('window:set-authenticated-mode', authenticated),
+  checkForAppUpdates: () => ipcRenderer.invoke('app:update:check') as Promise<boolean>,
+  installAppUpdate: () => ipcRenderer.invoke('app:update:install') as Promise<boolean>,
+  getAppUpdateStatus: () => ipcRenderer.invoke('app:update:status') as Promise<import('./shared/updateContracts').UpdateStatusEvent>,
+  onAppUpdateStatus: (callback: (event: import('./shared/updateContracts').UpdateStatusEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: import('./shared/updateContracts').UpdateStatusEvent) => callback(payload);
+    ipcRenderer.on('app:update-status', listener);
+    return () => ipcRenderer.removeListener('app:update-status', listener);
+  },
   startStream: (options: {
     serverUrl: string;
     streamKey: string;

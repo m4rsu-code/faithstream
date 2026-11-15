@@ -11,11 +11,14 @@ import {
   Timer,
   Trash2,
   LogOut,
+  RefreshCw,
+  Download,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import Logo from '../assets/img/Logo.png';
 import { saveAccountServiceTitle, signOutLocalAccount } from './AuthGate';
 import { getAccountStorageKey } from '../utils/accountStorage';
+import type { UpdateStatusEvent } from '../shared/updateContracts';
 
 /** The header title is saved per account: on this computer, and on the account so it shows on every device. */
 const SERVICE_TITLE_KEY = 'faithstream.service-title';
@@ -95,6 +98,7 @@ const Header: React.FC<HeaderProps> = ({
   const [studioSession, setStudioSession] = useState<StudioSession>(readStudioSession);
   const [notifications, setNotifications] = useState<AppNotification[]>(readNotifications);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatusEvent>({ status: 'idle' });
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const notificationPanelRef = useRef<HTMLDivElement>(null);
   const profileMenuRef = useRef<HTMLDivElement>(null);
@@ -118,6 +122,28 @@ const Header: React.FC<HeaderProps> = ({
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    const unsubscribe = window.faithstreamWindow?.onAppUpdateStatus(setUpdateStatus);
+    void window.faithstreamWindow?.getAppUpdateStatus().then(setUpdateStatus);
+    return () => unsubscribe?.();
+  }, []);
+
+  const updateButtonLabel = updateStatus.status === 'checking'
+    ? 'Checking…'
+    : updateStatus.status === 'downloading'
+      ? 'Downloading…'
+      : updateStatus.status === 'downloaded'
+        ? 'Restart to update'
+        : updateStatus.status === 'not-available'
+          ? 'Up to date'
+          : updateStatus.status === 'error'
+            ? 'Retry update'
+            : 'Check updates';
+  const handleUpdateButton = () => {
+    if (updateStatus.status === 'downloaded') void window.faithstreamWindow?.installAppUpdate();
+    else void window.faithstreamWindow?.checkForAppUpdates();
+  };
 
   useEffect(() => {
     try { localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(notifications)); } catch { /* Keep notifications visible for this session if storage is full. */ }
@@ -259,7 +285,7 @@ const Header: React.FC<HeaderProps> = ({
         className="flex h-10 items-center justify-between bg-navy px-3"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
       >
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
           <img
             src={Logo}
             alt="FaithStream Studio"
@@ -269,6 +295,17 @@ const Header: React.FC<HeaderProps> = ({
           <span className="select-none text-sm font-semibold tracking-wide text-white">
             FaithStream Studio
           </span>
+          <button
+            type="button"
+            onClick={handleUpdateButton}
+            disabled={updateStatus.status === 'checking' || updateStatus.status === 'downloading'}
+            title={updateStatus.message || 'Check for FaithStream Studio updates'}
+            aria-label={updateButtonLabel}
+            className={`ml-2 inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition disabled:cursor-wait disabled:opacity-70 ${updateStatus.status === 'downloaded' ? 'border-brand/60 bg-brand text-navy hover:bg-brand/90' : 'border-white/15 bg-white/5 text-white/75 hover:border-white/25 hover:bg-white/10 hover:text-white'}`}
+          >
+            {updateStatus.status === 'downloaded' ? <Download size={12} /> : <RefreshCw size={12} className={updateStatus.status === 'checking' || updateStatus.status === 'downloading' ? 'animate-spin' : ''} />}
+            <span>{updateButtonLabel}</span>
+          </button>
         </div>
         <div className="flex h-full" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
           <button aria-label="Minimize window" onClick={() => void window.faithstreamWindow?.minimize()} className="flex w-11 items-center justify-center text-white/70 hover:bg-white/10 hover:text-white"><Minus size={14} /></button>

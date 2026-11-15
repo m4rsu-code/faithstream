@@ -14,15 +14,19 @@ export default function SeamlessLoopVideo({
   muted = true,
   className = '',
   style,
+  poster,
 }: {
   src: string;
   muted?: boolean;
   className?: string;
   style?: CSSProperties;
+  poster?: string;
 }) {
   const refs = useRef<[HTMLVideoElement | null, HTMLVideoElement | null]>([null, null]);
   const activeRef = useRef(0);
   const [active, setActive] = useState(0);
+  const [ready, setReady] = useState(false);
+  const [hasStarted, setHasStarted] = useState(false);
 
   useEffect(() => {
     const videos = refs.current;
@@ -104,15 +108,23 @@ export default function SeamlessLoopVideo({
   }, [src]);
 
   return <div className={`absolute inset-0 overflow-hidden ${className}`} style={style} aria-hidden="true">
+    {poster && <img src={poster} alt="" decoding="async" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: style?.objectPosition, opacity: ready ? 0 : 1, transition: 'opacity 120ms linear' }} />}
     {[0, 1].map((index) => <video
       key={`${src}:${index}`}
       ref={(video) => { refs.current[index] = video; }}
       src={src}
+      poster={poster}
       muted={muted || active !== index}
       playsInline
       preload="auto"
+      onLoadedData={() => {
+        if (index !== activeRef.current) return;
+        setReady(true);
+        // Show the first decoded frame immediately; use the longer crossfade only for loop swaps.
+        requestAnimationFrame(() => setHasStarted(true));
+      }}
       className="absolute inset-0 h-full w-full object-cover"
-      style={{ opacity: index === active ? 1 : 0, transition: `opacity ${LOOP_FADE_MS}ms linear`, objectPosition: style?.objectPosition }}
+      style={{ opacity: ready && index === active ? 1 : 0, transition: hasStarted ? `opacity ${LOOP_FADE_MS}ms linear` : 'none', objectPosition: style?.objectPosition }}
     />)}
   </div>;
 }

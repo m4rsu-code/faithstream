@@ -37,16 +37,17 @@ import ScripturePickerModal, { preloadBible, type SelectedScriptureVerse } from 
 import CountdownDisplay, { paintCountdown, type CountdownSettings } from '../components/CountdownDisplay';
 import StudioSongsPanel from '../components/StudioSongsPanel';
 import SongDesignPanel from '../components/SongDesignPanel';
-import SeamlessLoopVideo from '../components/SeamlessLoopVideo';
+import SlideBackgroundLayer from '../components/SlideBackgroundLayer';
+import { readBackgroundLibrary } from '../utils/mediaLibrary';
 import { hasLineAligns, lineAlignAt } from '../utils/lineAlign';
 import { backgroundClasses, backgroundStyle, customBackgroundStops } from '../utils/slideBackground';
-import { DEFAULT_SONG_STYLE, SHOW_SONG_EVENT, SONG_SAVED_EVENT, SONG_SLIDE_SETTINGS_EVENT, compareSongs, firstLine, loadLibrary, searchSongs, songLineKey, songSlideLayouts, type Song, type SongStyle, type SongTextLayout } from '../utils/songbooks';
+import { SHOW_SONG_EVENT, SONG_SAVED_EVENT, SONG_SLIDE_SETTINGS_EVENT, compareSongs, firstLine, loadLibrary, loadSongSlideSettings, searchSongs, songLineKey, songSlideLayouts, songStyleFor, type Song, type SongStyle, type SongTextLayout } from '../utils/songbooks';
 import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimization';
 import { getAccountDatabaseName, getAccountStorageKey } from '../utils/accountStorage';
 
 /* ---------- Data ---------- */
 
-type Slide = { text: string; ref?: string; bg?: string; bgImage?: string; bgPosition?: { x: number; y: number }; bgVideo?: string; bgVideoMuted?: boolean; bgAssetId?: string; dim?: number; textColor?: string; title?: string; countdown?: CountdownSettings };
+type Slide = { text: string; ref?: string; bg?: string; bgImage?: string; bgPosition?: { x: number; y: number }; bgVideo?: string; bgVideoMuted?: boolean; bgAssetId?: string; dim?: number; backgroundOpacity?: number; textColor?: string; title?: string; countdown?: CountdownSettings };
 
 type PresentationTextBox = {
   text: string; font: string; size: number; color: string; bold: boolean; italic: boolean;
@@ -71,7 +72,7 @@ const studioAnimationStyle = (item: { animation?: StudioAnimation; animationDura
   animationTimingFunction: item.animationEasing === 'linear' ? 'linear' : item.animationEasing === 'snappy' ? 'cubic-bezier(.16,1,.3,1)' : 'cubic-bezier(.2,.75,.25,1)',
   animationFillMode: 'both' as const,
 });
-type PresentationPicture = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; layerOrder?: number | 'back' | 'front'; animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' };
+type PresentationPicture = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; poster?: string; muted?: boolean; layerOrder?: number | 'back' | 'front'; animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' };
 type PresentationShape = { id: number; kind: string; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number; animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' };
 type PresentationDesign = {
   box?: PresentationTextBox | null;
@@ -116,23 +117,35 @@ const songLayoutBox = (layout: SongTextLayout): PresentationTextBox => ({
  * Builds a song's Studio slides from its style (its own design, or the default song style):
  * an optional title slide, then the lyrics at one shared size, on the chosen background.
  */
-const songSceneSlides = (song: Song, mediaUrls: StudioMediaUrlMap = {}): StudioSlide[] => songSlideLayouts(song).map((layout, index) => {
-  const asset = layout.backgroundAssetId ? mediaUrls[layout.backgroundAssetId] : undefined;
-  return {
-    text: layout.text,
-    title: layout.label ?? `Part ${index + 1}`,
-    bg: layout.background,
-    dim: layout.dim,
-    bgAssetId: layout.backgroundAssetId,
-    bgImage: asset?.type === 'image' ? asset.url : undefined,
-    bgVideo: asset?.type === 'video' ? asset.url : undefined,
-    bgVideoMuted: asset?.type === 'video' ? true : undefined,
-    design: {
-      box: songLayoutBox(layout.box),
-      extraBoxes: layout.subtitleBox ? [{ id: 1, box: songLayoutBox(layout.subtitleBox) }] : [],
-    },
+const songSceneSlides = (song: Song, mediaUrls: StudioMediaUrlMap = {}): StudioSlide[] => {
+  const sharedBackground = loadSongSlideSettings();
+  const style = {
+    ...songStyleFor(song),
+    // Keep the shared background choice in sync even when this song has an older saved style.
+    background: sharedBackground.background,
+    backgroundAssetId: sharedBackground.backgroundAssetId,
+    dim: sharedBackground.dim,
+    backgroundOpacity: sharedBackground.backgroundOpacity,
   };
-});
+  return songSlideLayouts(song, style).map((layout, index) => {
+    const asset = layout.backgroundAssetId ? mediaUrls[layout.backgroundAssetId] : undefined;
+    return {
+      text: layout.text,
+      title: layout.label ?? `Part ${index + 1}`,
+      bg: layout.background,
+      dim: layout.dim,
+      backgroundOpacity: layout.backgroundOpacity,
+      bgAssetId: layout.backgroundAssetId,
+      bgImage: asset?.type === 'image' ? asset.url : asset?.type === 'video' ? asset.thumbnailUrl : undefined,
+      bgVideo: asset?.type === 'video' ? asset.url : undefined,
+      bgVideoMuted: asset?.type === 'video' ? true : undefined,
+      design: {
+        box: songLayoutBox(layout.box),
+        extraBoxes: layout.subtitleBox ? [{ id: 1, box: songLayoutBox(layout.subtitleBox) }] : [],
+      },
+    };
+  });
+};
 /** Upgrades song scenes saved before songs used fitted text boxes. */
 const upgradeSongScenes = (list: Scene[]) => (list.some((scene) => scene.songId && scene.slides.some((slide) => !slide.design))
   ? list.map((scene) => (scene.songId ? { ...scene, slides: scene.slides.map((slide) => (slide.design ? slide : { ...slide, dim: slide.dim ?? 0, design: { box: songTextBox(slide.text) } })) } : scene))
@@ -159,6 +172,7 @@ type SavedPresentationSlide = {
   title?: string;
   bg?: string;
   dim?: number;
+  backgroundOpacity?: number;
   bgImage?: string;
   bgPosition?: { x: number; y: number };
   bgVideo?: string;
@@ -171,8 +185,8 @@ type SavedPresentationSlide = {
   countdown?: CountdownSettings;
 };
 type SavedPresentation = { id: string; name: string; slides: SavedPresentationSlide[]; locked?: boolean };
-type StudioMedia = { id: string; type: 'image' | 'video'; blob: Blob; originalBlob?: Blob; optimized?: boolean };
-type StudioMediaUrlMap = Record<string, { type: 'image' | 'video'; url: string; sizeBytes?: number; originalBytes?: number; optimized?: boolean }>;
+type StudioMedia = { id: string; type: 'image' | 'video'; blob: Blob; thumbnailBlob?: Blob; originalBlob?: Blob; optimized?: boolean };
+type StudioMediaUrlMap = Record<string, { type: 'image' | 'video'; url: string; thumbnailUrl?: string; sizeBytes?: number; originalBytes?: number; optimized?: boolean }>;
 type StudioMusicAsset = { id: string; name: string; path: string; createdAt: number };
 type StudioMusicAssetWithUrl = StudioMusicAsset & { url: string; available?: boolean };
 const STUDIO_SCENES_KEY = 'faithstream.studio-scenes';
@@ -212,6 +226,7 @@ const syncPresentationSlides = (scene: Scene, presentation: SavedPresentation): 
       bgVideoMuted: savedSlide.bgVideoMuted ?? existing?.bgVideoMuted,
       bgAssetId: savedSlide.bgAssetId,
       dim: savedSlide.dim,
+      backgroundOpacity: savedSlide.backgroundOpacity,
       textColor: savedSlide.box?.color ?? existing?.textColor,
       countdown: savedSlide.countdown,
       design: { box: savedSlide.box, extraBoxes: savedSlide.extraBoxes, pictures: savedSlide.pictures, shapes: savedSlide.shapes, countdown: savedSlide.countdown },
@@ -228,13 +243,14 @@ const hydrateSceneMedia = (scene: Scene, mediaUrls: StudioMediaUrlMap): Scene =>
       ...slide.design,
       pictures: slide.design.pictures?.map((picture) => {
         const pictureAsset = picture.assetId ? mediaUrls[picture.assetId] : undefined;
-        return pictureAsset ? { ...picture, src: pictureAsset.url } : picture;
+        return pictureAsset ? { ...picture, src: pictureAsset.url, poster: pictureAsset.thumbnailUrl } : picture;
       }),
     } : undefined;
     return {
       ...slide,
       ...(backgroundAsset ? {
-        bgImage: backgroundAsset.type === 'image' ? backgroundAsset.url : undefined,
+        // Keep a still frame visible while the video decoder starts on the next slide.
+        bgImage: backgroundAsset.type === 'image' ? backgroundAsset.url : backgroundAsset.thumbnailUrl,
         bgVideo: backgroundAsset.type === 'video' ? backgroundAsset.url : undefined,
       } : {}),
       design,
@@ -294,6 +310,34 @@ const readStudioMedia = async (): Promise<StudioMedia[]> => {
     query.onerror = () => reject(query.error);
     query.transaction?.addEventListener('complete', () => db.close(), { once: true });
   });
+};
+
+/** Resolve slide backgrounds from the same library used by the Presentation and Songbook designers. */
+const readStudioMediaUrlMap = async () => {
+  const [mediaResult, backgroundResult] = await Promise.allSettled([readStudioMedia(), readBackgroundLibrary()]);
+  const urls: string[] = [];
+  const mediaUrls: StudioMediaUrlMap = {};
+  if (mediaResult.status === 'fulfilled') {
+    for (const asset of mediaResult.value) {
+      const url = URL.createObjectURL(asset.blob);
+      urls.push(url);
+      const thumbnailUrl = asset.thumbnailBlob ? URL.createObjectURL(asset.thumbnailBlob) : undefined;
+      if (thumbnailUrl) urls.push(thumbnailUrl);
+      mediaUrls[asset.id] = { type: asset.type, url, thumbnailUrl, sizeBytes: asset.blob.size, originalBytes: asset.originalBlob?.size, optimized: asset.optimized };
+    }
+  }
+  let releaseBackgrounds: () => void = () => {};
+  if (backgroundResult.status === 'fulfilled') {
+    releaseBackgrounds = backgroundResult.value.release;
+    for (const item of backgroundResult.value.items) {
+      // Use the exact background URL selected in the Presentation/Songbook design library.
+      mediaUrls[item.id] = { type: item.type, url: item.url, thumbnailUrl: item.thumbnailUrl };
+    }
+  }
+  return {
+    mediaUrls,
+    release: () => { urls.forEach(URL.revokeObjectURL); releaseBackgrounds(); },
+  };
 };
 
 const saveStudioMedia = async (asset: StudioMedia) => {
@@ -514,6 +558,7 @@ function SlideView({
   maxRem = 2.25,
   animate = false,
   seamlessBackground = false,
+  deferMedia = false,
 }: {
   bg: string;
   slide?: StudioSlide;
@@ -522,26 +567,24 @@ function SlideView({
   maxRem?: number;
   animate?: boolean;
   seamlessBackground?: boolean;
+  deferMedia?: boolean;
 }) {
+  const animationSlideKey = slide?.presentationSlideId ?? slide?.title ?? slide?.ref ?? slide?.text ?? 'empty';
   if (slide?.design) {
     const boxes = [slide.design.box, ...(slide.design.extraBoxes ?? []).map((item) => item.box)]
       .filter((box): box is PresentationTextBox => !!box);
     return (
        <div className={`relative isolate h-full w-full overflow-hidden bg-linear-to-br ${backgroundClasses(slide.bg ?? bg)}`} style={{ containerType: 'inline-size', ...backgroundStyle(slide.bg ?? bg) }}>
-        {slide.bgImage && <img src={slide.bgImage} alt="" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />}
-        {slide.bgVideo && (seamlessBackground
-          ? <SeamlessLoopVideo key={slide.bgVideo} src={slide.bgVideo} muted={slide.bgVideoMuted ?? true} style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />
-          : <video src={slide.bgVideo} autoPlay muted={slide.bgVideoMuted ?? true} loop playsInline className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />)}
-        <div className="absolute inset-0 bg-black" style={{ opacity: (slide.dim ?? 0) / 100 }} />
+        <SlideBackgroundLayer imageUrl={slide.bgImage} videoUrl={slide.bgVideo} posterUrl={slide.bgImage} opacity={slide.backgroundOpacity ?? 100} dim={slide.dim ?? 0} muted={slide.bgVideoMuted ?? true} position={`${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%`} seamless={seamlessBackground} eager={!deferMedia} />
         {slide.design.pictures?.map((picture, index) => {
           const zIndex = typeof picture.layerOrder === 'number' ? picture.layerOrder : picture.layerOrder === 'front' ? 5000 : picture.layerOrder === 'back' ? 0 : 1000 + index;
           const style = { ...(animate && picture.animation && picture.animation !== 'none' ? studioAnimationStyle(picture) : {}), left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, zIndex };
           return picture.mediaType === 'video'
-            ? <video key={picture.id} src={picture.src} controls playsInline muted={picture.muted ?? false} className={`absolute object-contain ${animate && picture.animation && picture.animation !== 'none' ? `slide-content-${picture.animation}` : ''}`} style={style} />
-            : <img key={picture.id} src={picture.src} alt="" draggable={false} className={`absolute object-contain ${animate && picture.animation && picture.animation !== 'none' ? `slide-content-${picture.animation}` : ''}`} style={style} />;
+            ? <video key={`${animationSlideKey}:${picture.id}`} src={picture.src} poster={picture.poster} controls playsInline muted={picture.muted ?? false} className={`absolute object-contain ${animate && picture.animation && picture.animation !== 'none' ? `slide-content-${picture.animation}` : ''}`} style={style} />
+            : <img key={`${animationSlideKey}:${picture.id}`} src={picture.src} alt="" loading={deferMedia ? 'lazy' : 'eager'} decoding="async" draggable={false} className={`absolute object-contain ${animate && picture.animation && picture.animation !== 'none' ? `slide-content-${picture.animation}` : ''}`} style={style} />;
         })}
-        {slide.design.shapes?.map((shape, index) => <div key={shape.id} className={`absolute ${animate && shape.animation && shape.animation !== 'none' ? `slide-content-${shape.animation}` : ''}`} style={{ ...(animate && shape.animation && shape.animation !== 'none' ? studioAnimationStyle(shape) : {}), left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
-        {boxes.map((box, index) => <ProgramTextBox key={index} box={box} defaultLayerOrder={3000 + index} animate={animate} />)}
+        {slide.design.shapes?.map((shape, index) => <div key={`${animationSlideKey}:${shape.id}`} className={`absolute ${animate && shape.animation && shape.animation !== 'none' ? `slide-content-${shape.animation}` : ''}`} style={{ ...(animate && shape.animation && shape.animation !== 'none' ? studioAnimationStyle(shape) : {}), left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
+        {boxes.map((box, index) => <ProgramTextBox key={`${animationSlideKey}:${index}`} box={box} defaultLayerOrder={3000 + index} animate={animate} />)}
         {slide.countdown && <CountdownDisplay countdown={slide.countdown} />}
       </div>
     );
@@ -549,12 +592,9 @@ function SlideView({
   return (
     <div
        className={`relative isolate flex h-full w-full flex-col items-center justify-center overflow-hidden bg-linear-to-br p-2 text-center text-white ${backgroundClasses(slide?.bg ?? bg)}`}
-      style={slide?.bgImage ? { backgroundImage: `linear-gradient(rgba(0,0,0,${(slide.dim ?? 20) / 100}), rgba(0,0,0,${(slide.dim ?? 20) / 100})), url("${slide.bgImage}")`, backgroundSize: 'cover', backgroundPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` } : backgroundStyle(slide?.bg ?? bg)}
+      style={backgroundStyle(slide?.bg ?? bg)}
     >
-      {slide?.bgVideo && (seamlessBackground
-        ? <SeamlessLoopVideo key={slide.bgVideo} src={slide.bgVideo} muted={slide.bgVideoMuted ?? true} />
-        : <video src={slide.bgVideo} autoPlay muted={slide.bgVideoMuted ?? true} loop playsInline className="absolute inset-0 h-full w-full object-cover" />)}
-      {slide?.bgVideo && <div className="absolute inset-0 bg-black/20" />}
+      <SlideBackgroundLayer imageUrl={slide?.bgImage} videoUrl={slide?.bgVideo} posterUrl={slide?.bgImage} opacity={slide?.backgroundOpacity ?? 100} dim={slide ? slide.dim ?? 20 : 0} muted={slide?.bgVideoMuted ?? true} seamless={seamlessBackground} eager={!deferMedia} />
       {slide?.countdown && <CountdownDisplay countdown={slide.countdown} />}
       {slide && scale && (
         <div className="relative z-10" style={{ fontSize: `clamp(${minRem}rem, ${scale}cqw, ${maxRem}rem)`, color: slide.textColor ?? '#fff' }}>
@@ -564,6 +604,36 @@ function SlideView({
       )}
     </div>
   );
+}
+
+/** Lightweight slide card: use poster images for video layers so a long deck does not
+ * start a video decoder for every thumbnail in Studio. Actual slide/output views still play video. */
+function StudioSlideThumbnail({ bg, slide, mediaUrls, scale = 8, minRem = 0.5 }: {
+  bg: string;
+  slide?: StudioSlide;
+  mediaUrls: StudioMediaUrlMap;
+  scale?: number;
+  minRem?: number;
+}) {
+  if (!slide) return <SlideView bg={bg} slide={slide} scale={scale} minRem={minRem} deferMedia />;
+  const background = slide.bgAssetId ? mediaUrls[slide.bgAssetId] : undefined;
+  const hasVideo = background?.type === 'video' || !!slide.bgVideo
+    || (slide.design?.pictures ?? []).some((picture) => picture.mediaType === 'video');
+  const pictures = slide.design?.pictures?.flatMap((picture) => {
+    if (picture.mediaType !== 'video') return [picture];
+    const poster = picture.assetId ? mediaUrls[picture.assetId]?.thumbnailUrl : undefined;
+    return poster ? [{ ...picture, src: poster, mediaType: 'image' as const }] : [];
+  });
+  const thumbnailSlide: StudioSlide = {
+    ...slide,
+    bgImage: background?.type === 'video' ? background.thumbnailUrl : slide.bgImage,
+    bgVideo: undefined,
+    design: slide.design ? { ...slide.design, pictures } : slide.design,
+  };
+  return <div className="relative h-full w-full">
+    <SlideView bg={bg} slide={thumbnailSlide} scale={scale} minRem={minRem} deferMedia />
+    {hasVideo && <span className="absolute bottom-1 right-1 z-20 rounded bg-black/70 p-1 text-white/90" aria-label="Contains video"><Play size={10} /></span>}
+  </div>;
 }
 
 function ScriptureDesignModal({
@@ -577,7 +647,7 @@ function ScriptureDesignModal({
   onClose: () => void;
   onAdd: (style: SongStyle, verses: SelectedScriptureVerse[]) => void;
 }) {
-  const [style, setStyle] = useState<SongStyle>({ ...DEFAULT_SONG_STYLE, titleSlide: false });
+  const [style, setStyle] = useState<SongStyle>(() => ({ ...loadSongSlideSettings(), titleSlide: false }));
   const [editedVerses, setEditedVerses] = useState(verses);
   const song = {
     title: reference,
@@ -670,7 +740,7 @@ function SourcePreview({
       ) : source.kind === 'media' && media?.type === 'image' ? (
         <img src={media.url} alt={source.name} className="h-full w-full object-cover" />
       ) : source.kind === 'presentation' ? (
-        <div data-program-slide-view className="h-full w-full"><SlideView key={slide?.id ?? 'empty'} bg={bg} slide={slide} scale={8} minRem={0.5} animate seamlessBackground /></div>
+        <div data-program-slide-view className="h-full w-full"><SlideView bg={bg} slide={slide} scale={8} minRem={0.5} animate /></div>
       ) : source.kind === 'text' ? (
          <div className="flex h-full items-center justify-center bg-linear-to-br from-slate-800 to-slate-950 p-3 text-center text-sm font-semibold text-white">{source.text || 'Text overlay'}</div>
       ) : (
@@ -985,8 +1055,8 @@ const exportSafeMediaUrl = (url: string) => {
 };
 
 type ProgramLayer = { source: Source; layout: NonNullable<Source['layout']> };
-type ProgramMediaUrls = Record<string, { type: 'image' | 'video'; url: string }>;
-type ProgramTransition = { kind: 'Fade' | 'Slide'; startedAt: number; duration: number; from: StudioSlide; fromBg: string; to: StudioSlide; toBg: string };
+type ProgramMediaUrls = Record<string, { type: 'image' | 'video'; url: string; thumbnailUrl?: string }>;
+type ProgramTransition = { kind: 'Fade' | 'Slide' | 'Wipe' | 'Zoom' | 'Cut'; startedAt: number; duration: number; from: StudioSlide; fromBg: string; to: StudioSlide; toBg: string };
 const safeStreamImages = new Map<string, Promise<HTMLImageElement | null>>();
 const safeStreamVideos = new Map<string, Promise<HTMLVideoElement | null>>();
 type StreamVideoLoop = { front: HTMLVideoElement; back: HTMLVideoElement; fadeStart: number | null; duration: number; swapping: boolean; callback?: number; timer?: number };
@@ -1108,14 +1178,22 @@ const paintProgramSlide = async (ctx: CanvasRenderingContext2D, slide: StudioSli
   gradient.addColorStop(0, streamGradientColor(slide.bg ?? bg, true)); gradient.addColorStop(1, streamGradientColor(slide.bg ?? bg, false));
   ctx.fillStyle = gradient; ctx.fillRect(0, 0, w, h);
   const bgAsset = slide.bgAssetId ? assets[slide.bgAssetId] : undefined;
-  const bgUrl = bgAsset?.url ?? slide.bgImage;
+  ctx.save();
+  ctx.globalAlpha *= (slide.backgroundOpacity ?? 100) / 100;
   if (bgAsset?.type === 'video' || slide.bgVideo) {
+    const poster = bgAsset?.thumbnailUrl ?? slide.bgImage;
+    if (poster) {
+      const image = await loadSafeStreamImage(poster);
+      if (image) ctx.drawImage(image, 0, 0, w, h);
+    }
     const video = await loadSafeStreamVideo(bgAsset?.type === 'video' ? bgAsset.url : slide.bgVideo!);
     if (video?.readyState && video.videoWidth) { startSeamlessStreamLoop(video); drawSeamlessStreamVideo(ctx, video, 0, 0, w, h); }
-  } else if (bgUrl) {
+  } else if (bgAsset?.url ?? slide.bgImage) {
+    const bgUrl = bgAsset?.url ?? slide.bgImage!;
     const image = await loadSafeStreamImage(bgUrl);
     if (image) ctx.drawImage(image, 0, 0, w, h);
   }
+  ctx.restore();
   if (slide.dim) { ctx.fillStyle = `rgba(0,0,0,${slide.dim / 100})`; ctx.fillRect(0, 0, w, h); }
   if (slide.design) {
     const pictures = slide.design.pictures ?? [];
@@ -1159,6 +1237,8 @@ const paintProgramSlide = async (ctx: CanvasRenderingContext2D, slide: StudioSli
         const x = picture.x / 100 * w; const y = picture.y / 100 * h; const pw = picture.w / 100 * w; const ph = picture.h / 100 * h;
         if (picture.mediaType === 'video') {
           const url = picture.assetId ? assets[picture.assetId]?.url : picture.src;
+          const posterUrl = picture.poster ?? (picture.assetId ? assets[picture.assetId]?.thumbnailUrl : undefined);
+          if (posterUrl) { const poster = await loadSafeStreamImage(posterUrl); if (poster) ctx.drawImage(poster, x, y, pw, ph); }
           if (url) { const video = await loadSafeStreamVideo(url); if (video?.readyState && video.videoWidth) ctx.drawImage(video, x, y, pw, ph); }
         } else {
           const url = picture.assetId ? assets[picture.assetId]?.url : picture.src;
@@ -1215,10 +1295,12 @@ const renderProgramFrame = async (canvas: HTMLCanvasElement, stage: HTMLElement,
   const animationElapsed = performance.now() - composition.animationStartedAt;
   const stageWidth = Math.max(1, stage.getBoundingClientRect().width);
   const fontScale = w / stageWidth;
-  const paintLayerSlide = async (slide: StudioSlide, bg: string, x: number, y: number, layerWidth: number, layerHeight: number, opacity = 1, offset = 0, layerAnimationElapsed = animationElapsed) => {
+  const paintLayerSlide = async (slide: StudioSlide, bg: string, x: number, y: number, layerWidth: number, layerHeight: number, opacity = 1, offset = 0, layerAnimationElapsed = animationElapsed, reveal = 1, scale = 1) => {
     ctx.save();
-    ctx.beginPath(); ctx.rect(x, y, layerWidth, layerHeight); ctx.clip();
-    ctx.translate(x + offset, y); ctx.globalAlpha *= opacity;
+    ctx.beginPath(); ctx.rect(x, y, layerWidth * reveal, layerHeight); ctx.clip();
+    ctx.translate(x + offset, y);
+    if (scale !== 1) { ctx.translate(layerWidth / 2, layerHeight / 2); ctx.scale(scale, scale); ctx.translate(-layerWidth / 2, -layerHeight / 2); }
+    ctx.globalAlpha *= opacity;
     await paintProgramSlide(ctx, slide, bg, layerWidth, layerHeight, composition.mediaUrls, fontScale * layerWidth / w, layerAnimationElapsed);
     ctx.restore();
   };
@@ -1234,6 +1316,12 @@ const renderProgramFrame = async (canvas: HTMLCanvasElement, stage: HTMLElement,
       } else if (transition && progress < 1 && transition.kind === 'Slide') {
         await paintLayerSlide(transition.from, transition.fromBg, x, y, lw, lh, 1, -progress * lw, Number.POSITIVE_INFINITY);
         await paintLayerSlide(transition.to, transition.toBg, x, y, lw, lh, 1, (1 - progress) * lw);
+      } else if (transition && progress < 1 && transition.kind === 'Wipe') {
+        await paintLayerSlide(transition.from, transition.fromBg, x, y, lw, lh, 1, 0, Number.POSITIVE_INFINITY);
+        await paintLayerSlide(transition.to, transition.toBg, x, y, lw, lh, 1, 0, animationElapsed, progress);
+      } else if (transition && progress < 1 && transition.kind === 'Zoom') {
+        await paintLayerSlide(transition.from, transition.fromBg, x, y, lw, lh, 1 - progress, 0, Number.POSITIVE_INFINITY, 1, 1.06 - progress * 0.06);
+        await paintLayerSlide(transition.to, transition.toBg, x, y, lw, lh, 1, 0, animationElapsed, 1, 0.94 + progress * 0.06);
       } else {
         await paintLayerSlide(composition.slide, composition.bg, x, y, lw, lh);
       }
@@ -1291,31 +1379,50 @@ export default function Studio() {
   const [preview, setPreview] = useState<Ref>(() => ({ sceneId: scenes[0]?.id ?? 0, slideIdx: 0 }));
   const [onAir, setOnAir] = useState<Ref>(() => ({ sceneId: scenes[0]?.id ?? 0, slideIdx: 0 }));
 
-  const [transition, setTransition] = useState('Fade');
-  const [duration, setDuration] = useState('1.0s');
+  const [transitionEnabled, setTransitionEnabled] = useState(() => localStorage.getItem('faithstream.studio-transition-enabled') !== 'false');
+  const transitionOptions = ['Fade', 'Slide', 'Wipe', 'Zoom', 'Cut'] as const;
+  type TransitionStyle = typeof transitionOptions[number];
+  const [transition, setTransition] = useState<TransitionStyle>(() => {
+    const saved = localStorage.getItem('faithstream.studio-transition');
+    return transitionOptions.includes(saved as TransitionStyle) ? saved as TransitionStyle : 'Fade';
+  });
+  const [duration, setDuration] = useState(() => {
+    const saved = Number(localStorage.getItem('faithstream.studio-transition-duration'));
+    return Number.isFinite(saved) && saved >= 0.2 && saved <= 2 ? saved : 1;
+  });
   const [streamTransition, setStreamTransition] = useState<ProgramTransition | null>(null);
   const previousOnAirTransition = useRef<{ key: string; slide: StudioSlide; bg: string } | null>(null);
+  const visualTransitionKey = useRef('');
   const onAirSlideRef = useRef<HTMLDivElement>(null);
-  const transitionSettings = useRef({ transition, duration });
+  const transitionSettings = useRef({ transition, duration, enabled: transitionEnabled });
 
   useEffect(() => {
-    transitionSettings.current = { transition, duration };
-  }, [transition, duration]);
+    transitionSettings.current = { transition, duration, enabled: transitionEnabled };
+    try {
+      localStorage.setItem('faithstream.studio-transition-enabled', String(transitionEnabled));
+      localStorage.setItem('faithstream.studio-transition', transition);
+      localStorage.setItem('faithstream.studio-transition-duration', String(duration));
+    } catch { /* Keep transition controls usable if local storage is unavailable. */ }
+  }, [transition, duration, transitionEnabled]);
 
   useEffect(() => {
+    const key = `${onAir.sceneId}:${onAir.slideIdx}`;
+    if (visualTransitionKey.current === key) return;
+    visualTransitionKey.current = key;
     const elements = Array.from(onAirSlideRef.current?.querySelectorAll<HTMLElement>('[data-program-slide-view]') ?? []);
     const settings = transitionSettings.current;
-    if (!elements.length || settings.transition === 'Cut') return;
-    const durationMs = Number.parseFloat(settings.duration) * 1000 || 1000;
+    if (!elements.length || !settings.enabled || settings.transition === 'Cut') return;
+    const durationMs = settings.duration * 1000;
     const frames: Keyframe[] = settings.transition === 'Slide'
-      ? [
-          { opacity: 0, transform: 'translateX(5%)' },
-          { opacity: 1, transform: 'translateX(0)' },
-        ]
-      : [{ opacity: 0 }, { opacity: 1 }];
+      ? [{ opacity: 0, transform: 'translateX(5%)' }, { opacity: 1, transform: 'translateX(0)' }]
+      : settings.transition === 'Wipe'
+        ? [{ clipPath: 'inset(0 100% 0 0)' }, { clipPath: 'inset(0 0 0 0)' }]
+        : settings.transition === 'Zoom'
+          ? [{ opacity: 0, transform: 'scale(.94)' }, { opacity: 1, transform: 'scale(1)' }]
+          : [{ opacity: 0 }, { opacity: 1 }];
     const animations = elements.map((element) => element.animate(frames, { duration: durationMs, easing: 'ease-out' }));
     return () => animations.forEach((animation) => animation.cancel());
-  }, [onAir.sceneId, onAir.slideIdx]);
+  }, [onAir.sceneId, onAir.slideIdx, transitionEnabled]);
 
   const [sources, setSources] = useState<Source[]>(loadStudioSources);
   const [musicAssets, setMusicAssets] = useState<StudioMusicAssetWithUrl[]>([]);
@@ -1352,6 +1459,7 @@ export default function Studio() {
   const lastMobileCamCodeRenewalAttempt = useRef(0);
   const mobileCamConnectedState = useRef(new Map<number, boolean>());
   const sourceObjectUrls = useRef<string[]>([]);
+  const sourceMediaReleases = useRef<Array<() => void>>([]);
   const sourceMenuRef = useRef<HTMLDivElement>(null);
   const sourceTriggerRef = useRef<HTMLButtonElement>(null);
   const [channels, setChannels] = useState<Channel[]>(() => {
@@ -1849,6 +1957,7 @@ export default function Studio() {
     musicElements.current.forEach((audio) => audio.pause());
     musicPreviewElement.current?.pause();
     sourceObjectUrls.current.forEach((url) => URL.revokeObjectURL(url));
+    sourceMediaReleases.current.forEach((release) => release());
   }, []);
 
   useEffect(() => {
@@ -1879,16 +1988,13 @@ export default function Studio() {
   }, [selectedProgramSource]);
 
   useEffect(() => {
-    let urls: string[] = [];
     let cancelled = false;
-    readStudioMedia().then((assets) => {
-      const entries = assets.map((asset) => {
-        const url = URL.createObjectURL(asset.blob);
-        urls.push(url);
-        return [asset.id, { type: asset.type, url, sizeBytes: asset.blob.size, originalBytes: asset.originalBlob?.size, optimized: asset.optimized }] as const;
-      });
-      if (cancelled) { urls.forEach(URL.revokeObjectURL); return; }
-      const loadedUrls = Object.fromEntries(entries) as StudioMediaUrlMap;
+    let release: () => void = () => {};
+    void readStudioMediaUrlMap().then((result) => {
+      release = result.release;
+      if (cancelled) { release(); return; }
+      sourceMediaReleases.current.push(release);
+      const loadedUrls = result.mediaUrls;
       mediaUrlsRef.current = loadedUrls;
       setMediaUrls(loadedUrls);
       setScenes((current) => current.map((scene) => hydrateSceneMedia(scene, loadedUrls)));
@@ -1898,7 +2004,7 @@ export default function Studio() {
       if (!cancelled) markStartupResourceReady('studio-media');
       /* Scenes can still use presentation slides without local media. */
     });
-    return () => { cancelled = true; urls.forEach(URL.revokeObjectURL); };
+    return () => { cancelled = true; release(); };
   }, []);
 
   useEffect(() => {
@@ -1918,22 +2024,13 @@ export default function Studio() {
   }, []);
 
   const refreshStudioMediaUrls = async () => {
-    const assets = await readStudioMedia();
-    const refreshed: StudioMediaUrlMap = { ...mediaUrlsRef.current };
-    for (const asset of assets) {
-      if (refreshed[asset.id]) continue;
-      const url = URL.createObjectURL(asset.blob);
-      sourceObjectUrls.current.push(url);
-      refreshed[asset.id] = {
-        type: asset.type,
-        url,
-        sizeBytes: asset.blob.size,
-        originalBytes: asset.originalBlob?.size,
-        optimized: asset.optimized,
-      };
-    }
+    const result = await readStudioMediaUrlMap();
+    sourceMediaReleases.current.push(result.release);
+    const refreshed = { ...mediaUrlsRef.current, ...result.mediaUrls };
     mediaUrlsRef.current = refreshed;
     setMediaUrls(refreshed);
+    setScenes((current) => current.map((scene) => hydrateSceneMedia(scene, refreshed)));
+    setSlideshowScenes((current) => current.map((scene) => hydrateSceneMedia(scene, refreshed)));
     return refreshed;
   };
 
@@ -1963,11 +2060,12 @@ export default function Studio() {
         text: textParts.join('\n') || slide.title || '',
         bg: slide.bg ?? 'from-slate-600 to-slate-950',
         bgAssetId: slide.bgAssetId,
-        bgImage: asset?.type === 'image' ? asset.url : slide.bgAssetId ? undefined : slide.bgImage,
+        bgImage: asset?.type === 'image' ? asset.url : asset?.type === 'video' ? asset.thumbnailUrl : slide.bgAssetId ? undefined : slide.bgImage,
         bgPosition: slide.bgPosition,
         bgVideo: asset?.type === 'video' ? asset.url : slide.bgAssetId ? undefined : slide.bgVideo,
         bgVideoMuted: slide.bgVideoMuted ?? true,
         dim: slide.dim,
+        backgroundOpacity: slide.backgroundOpacity,
         textColor: slide.box?.color,
         countdown: slide.countdown,
         design: {
@@ -1975,7 +2073,7 @@ export default function Studio() {
           extraBoxes: slide.extraBoxes,
           pictures: slide.pictures?.map((picture) => {
             const pictureAsset = picture.assetId ? mediaUrlsRef.current[picture.assetId] : undefined;
-            return pictureAsset ? { ...picture, src: pictureAsset.url } : picture;
+            return pictureAsset ? { ...picture, src: pictureAsset.url, poster: pictureAsset.thumbnailUrl } : picture;
           }),
           shapes: slide.shapes,
         },
@@ -2105,14 +2203,14 @@ export default function Studio() {
     const current = resolve(onAir);
     const previous = previousOnAirTransition.current;
     if (!previous || previous.key !== key) streamAnimationStartedAt.current = performance.now();
-    const durationMs = Number.parseFloat(duration) * 1000 || 1000;
-    if (previous && previous.key !== key && transition !== 'Cut') {
-      setStreamTransition({ kind: transition === 'Slide' ? 'Slide' : 'Fade', startedAt: performance.now(), duration: durationMs, from: previous.slide, fromBg: previous.bg, to: current.slide, toBg: current.bg });
-    } else if (previous && previous.key !== key) {
+    const durationMs = duration * 1000;
+    if (!transitionEnabled || transition === 'Cut') {
       setStreamTransition(null);
+    } else if (previous && previous.key !== key) {
+      setStreamTransition({ kind: transition, startedAt: performance.now(), duration: durationMs, from: previous.slide, fromBg: previous.bg, to: current.slide, toBg: current.bg });
     }
     previousOnAirTransition.current = { key, slide: current.slide, bg: current.bg };
-  }, [onAir.sceneId, onAir.slideIdx, scenes, transition, duration]);
+  }, [onAir.sceneId, onAir.slideIdx, scenes, transition, duration, transitionEnabled]);
 
   useEffect(() => {
     if (!streamTransition) return;
@@ -2259,8 +2357,12 @@ export default function Studio() {
    * Adds a song from the songbooks to the Scenes list (one slide per part), or refreshes it if
    * it is already there, and opens it in the slide list. It never goes on air by itself.
    */
-  const addSongScene = (song: Song) => {
+  const addSongScene = async (song: Song) => {
     const slideshow = studioOutputTab === 'slideshow';
+    // A song can be added from the Songbooks panel before Studio has finished loading the
+    // selected background library. Resolve the asset at the moment the scene is created so
+    // both the in-app preview and the separate monitor have a usable media URL immediately.
+    try { await refreshStudioMediaUrls(); } catch { /* Keep the selected asset ID for later hydration. */ }
     const list = slideshow ? slideshowScenes : scenes;
     const existing = list.find((scene) => scene.songId === song.id);
     // Adding an existing song must not refresh or replace its scene while it may be on air.
@@ -2307,6 +2409,7 @@ export default function Studio() {
         text,
         bg: layout.background,
         dim: layout.dim,
+        backgroundOpacity: layout.backgroundOpacity,
         bgAssetId: layout.backgroundAssetId,
         bgImage: asset?.type === 'image' ? asset.url : undefined,
         bgVideo: asset?.type === 'video' ? asset.url : undefined,
@@ -2335,7 +2438,7 @@ export default function Studio() {
   const presentScriptureNow = (reference: string, text: string, selectedVerses?: SelectedScriptureVerse[]) => {
     setScripturePickerOpen(false);
     const verses = selectedVerses?.length ? selectedVerses : [{ reference, text }];
-    void addScriptureScene(reference, verses, { ...DEFAULT_SONG_STYLE, titleSlide: false }, true);
+    void addScriptureScene(reference, verses, { ...loadSongSlideSettings(), titleSlide: false }, true);
   };
 
 
@@ -3415,32 +3518,28 @@ export default function Studio() {
             </div>
           </Fit>
 
-          <div className="flex shrink-0 flex-wrap items-center gap-3 rounded-xl border border-white/10 bg-panel p-2">
-            <label className="flex items-center gap-2 text-sm text-warm-white/70">
-              Transition
-              <select
-                value={transition}
-                onChange={(e) => setTransition(e.target.value)}
-                className={selectClass}
-              >
-                <option>Fade</option>
-                <option>Cut</option>
-                <option>Slide</option>
-              </select>
-            </label>
-            <label className="ml-auto flex items-center gap-2 text-sm text-warm-white/70">
-              Duration
-              <select
-                value={duration}
-                onChange={(e) => setDuration(e.target.value)}
-                className={selectClass}
-              >
-                <option>0.5s</option>
-                <option>1.0s</option>
-                <option>2.0s</option>
-              </select>
-            </label>
-          </div>
+          <section aria-label="On-air transition controls" className="shrink-0 rounded-xl border border-white/10 bg-panel p-3 shadow-inner shadow-black/10">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5"><span className="text-[11px] font-semibold text-warm-white/85">Transition</span><span className={`rounded px-1 py-0.5 text-[8px] font-semibold uppercase tracking-wide ${transitionEnabled ? 'bg-brand/10 text-brand/80' : 'bg-white/5 text-warm-white/40'}`}>{transitionEnabled ? 'On' : 'Off'}</span></div>
+                <p className="mt-0.5 text-[9px] text-warm-white/40">Effect between on-air slides</p>
+              </div>
+              <button type="button" role="switch" aria-checked={transitionEnabled} aria-label="Apply transition on air" onClick={() => setTransitionEnabled((enabled) => !enabled)} className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${transitionEnabled ? 'bg-brand/70' : 'bg-white/15'}`}>
+                <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${transitionEnabled ? 'translate-x-[18px]' : 'translate-x-1'}`} />
+              </button>
+            </div>
+            <div className={`mt-2 grid grid-cols-[minmax(0,1fr)_minmax(92px,0.8fr)] items-end gap-3 ${transitionEnabled ? '' : 'opacity-55'}`}>
+              <label className="block text-[9px] text-warm-white/45">Style
+                <select aria-label="Transition style" value={transition} onChange={(event) => setTransition(event.target.value as TransitionStyle)} className="mt-1 w-full rounded-md border border-white/10 bg-[#0b1520] px-2 py-1.5 text-[10px] text-warm-white/80 outline-none focus:border-white/25">
+                  {transitionOptions.map((kind) => <option key={kind} value={kind}>{kind === 'Wipe' ? 'Wipe · left to right' : kind === 'Zoom' ? 'Zoom · soft push' : kind}</option>)}
+                </select>
+              </label>
+              <label className="block text-[9px] text-warm-white/45">
+                <span className="flex items-center justify-between">Duration <span className="font-semibold tabular-nums text-warm-white/65">{duration.toFixed(1)}s</span></span>
+                <input aria-label="Transition duration" type="range" min={0.2} max={2} step={0.1} value={duration} onChange={(event) => setDuration(Number(event.target.value))} className="mt-2 w-full accent-brand/70" />
+              </label>
+            </div>
+          </section>
         </div>
 
         {/* Program shows the visual sources that will make up this scene. */}
@@ -3551,7 +3650,7 @@ export default function Studio() {
                   aria-pressed={isSelected}
                   className={`relative block aspect-video w-full overflow-hidden rounded-lg border-2 transition ${isSelected ? 'border-brand ring-2 ring-brand/40' : 'border-white/10 hover:border-white/40'}`}
                 >
-                  <SlideView bg={scene.bg} slide={sl} scale={8} minRem={0.5} />
+                  <StudioSlideThumbnail bg={scene.bg} slide={sl} mediaUrls={mediaUrls} scale={8} minRem={0.5} />
                   <span className="absolute bottom-1 left-1 rounded bg-black/65 px-1 text-[10px] font-semibold text-white">{i + 1}</span>
                   <div className="absolute right-1 top-1 flex flex-col items-end gap-0.5">
                     {isOnAir && <span className="rounded bg-red-600 px-1 text-[9px] font-bold text-white">On air</span>}
@@ -3597,7 +3696,7 @@ export default function Studio() {
                   }`}
                 >
                   <div className="h-10 w-16 shrink-0 overflow-hidden rounded">
-                    <SlideView bg={s.bg} slide={s.slides[0]} />
+                    <StudioSlideThumbnail bg={s.bg} slide={s.slides[0]} mediaUrls={mediaUrls} scale={4} minRem={0.4} />
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="flex items-center gap-1 truncate text-sm font-medium text-warm-white">
@@ -3891,7 +3990,7 @@ export default function Studio() {
                   {slideshowScenes.map((item) => <div key={item.id} className="group relative">
                     <button type="button" onClick={() => setOfflineScene(item.id)} aria-pressed={offlineSlide.sceneId === item.id} className={`flex w-full items-center gap-3 rounded-lg border p-1.5 pr-9 text-left transition-colors ${offlineSlide.sceneId === item.id ? 'border-brand bg-brand/10 text-white' : 'border-white/10 text-warm-white/70 hover:border-white/25 hover:text-white'}`}>
                       <div className="h-10 w-16 shrink-0 overflow-hidden rounded bg-black">
-                        <SlideView bg={item.bg} slide={item.slides[0]} />
+                        <StudioSlideThumbnail bg={item.bg} slide={item.slides[0]} mediaUrls={mediaUrls} scale={4} minRem={0.4} />
                       </div>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center gap-1 truncate text-xs font-semibold text-warm-white">
@@ -3913,7 +4012,7 @@ export default function Studio() {
                 <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain pr-1">
                   {offlineScene.slides.map((slide, index) => (
                     <button key={`${offlineScene.id}-${index}`} type="button" onClick={() => setOfflineSlide({ sceneId: offlineScene.id, slideIdx: index })} aria-pressed={offlineSlide.slideIdx === index} className={`flex items-center gap-2 rounded-lg border p-2 text-left transition ${offlineSlide.slideIdx === index ? 'border-brand bg-brand/10' : 'border-white/10 hover:border-white/25'}`}>
-                      <span className="relative block aspect-video w-24 shrink-0 overflow-hidden rounded bg-black" style={{ containerType: 'inline-size' }}><SlideView bg={offlineScene.bg} slide={slide} scale={4} minRem={0.4} /></span>
+                      <span className="relative block aspect-video w-24 shrink-0 overflow-hidden rounded bg-black" style={{ containerType: 'inline-size' }}><StudioSlideThumbnail bg={offlineScene.bg} slide={slide} mediaUrls={mediaUrls} scale={4} minRem={0.4} /></span>
                       <span className="min-w-0"><span className="block text-[10px] text-warm-white/45">SLIDE {index + 1}</span><span className="block truncate text-xs text-white">{slide.title || slide.text || `Slide ${index + 1}`}</span></span>
                     </button>
                   ))}
@@ -4234,34 +4333,41 @@ export function StudioDisplayOutput() {
     const firstScene = (localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? loadStudioScenes() : loadSlideshowScenes())[0];
     return { sceneId: firstScene?.id ?? 0, slideIdx: 0 };
   });
-  const [assets, setAssets] = useState<Record<string, { type: 'image' | 'video'; url: string }>>({});
+  const [assets, setAssets] = useState<Record<string, { type: 'image' | 'video'; url: string; thumbnailUrl?: string }>>({});
 
   useEffect(() => {
     let active = true;
-    const urls: string[] = [];
-    void readStudioMedia().then((media) => {
-      if (!active) return;
-      const next: Record<string, { type: 'image' | 'video'; url: string }> = {};
-      for (const asset of media) {
-        const url = URL.createObjectURL(asset.blob);
-        urls.push(url);
-        next[asset.id] = { type: asset.type, url };
-      }
+    const releases: Array<() => void> = [];
+    let currentAssets: Record<string, { type: 'image' | 'video'; url: string; thumbnailUrl?: string }> = {};
+    const refreshAssets = async () => {
+      const result = await readStudioMediaUrlMap();
+      if (!active) { result.release(); return; }
+      releases.push(result.release);
+      const next = { ...currentAssets, ...result.mediaUrls };
+      currentAssets = next;
       setAssets(next);
-    }).catch(() => setAssets({}));
+    };
+    void refreshAssets();
     const onStorage = (event: StorageEvent) => {
       if (event.key === STUDIO_DISPLAY_MODE_KEY) {
         const mode = event.newValue === 'stream' ? 'stream' : 'slideshow';
         setOutputMode(mode);
         setScenes(mode === 'stream' ? loadStudioScenes() : loadSlideshowScenes());
+        void refreshAssets();
         const key = mode === 'stream' ? STUDIO_STREAM_OUTPUT_REF_KEY : STUDIO_OUTPUT_REF_KEY;
         try {
           const next = JSON.parse(localStorage.getItem(key) ?? 'null') as Ref | null;
           if (next && Number.isFinite(next.sceneId) && Number.isFinite(next.slideIdx)) setCurrentRef(next);
         } catch { /* Keep the current output while a new mode initializes. */ }
       }
-      if (event.key === getAccountStorageKey(STUDIO_SLIDESHOW_SCENES_KEY) && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) !== 'stream') setScenes(loadSlideshowScenes());
-      if (event.key === getAccountStorageKey(STUDIO_SCENES_KEY) && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream') setScenes(loadStudioScenes());
+      if (event.key === getAccountStorageKey(STUDIO_SLIDESHOW_SCENES_KEY) && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) !== 'stream') {
+        setScenes(loadSlideshowScenes());
+        void refreshAssets();
+      }
+      if (event.key === getAccountStorageKey(STUDIO_SCENES_KEY) && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream') {
+        setScenes(loadStudioScenes());
+        void refreshAssets();
+      }
       const activeRefKey = localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? STUDIO_STREAM_OUTPUT_REF_KEY : STUDIO_OUTPUT_REF_KEY;
       if (event.key === activeRefKey && event.newValue) {
         try {
@@ -4296,7 +4402,7 @@ export function StudioDisplayOutput() {
       active = false;
       window.removeEventListener('storage', onStorage);
       window.removeEventListener('keydown', onKeyDown);
-      urls.forEach((url) => URL.revokeObjectURL(url));
+      releases.forEach((release) => release());
     };
   }, []);
 
@@ -4305,20 +4411,20 @@ export function StudioDisplayOutput() {
   const asset = slide?.bgAssetId ? assets[slide.bgAssetId] : undefined;
   const outputSlide = slide ? {
     ...slide,
-    bgImage: asset?.type === 'image' ? asset.url : slide.bgImage,
+    bgImage: asset?.type === 'image' ? asset.url : asset?.type === 'video' ? asset.thumbnailUrl : slide.bgImage,
     bgVideo: asset?.type === 'video' ? asset.url : slide.bgVideo,
     design: slide.design ? {
       ...slide.design,
       pictures: slide.design.pictures?.map((picture) => {
         const pictureAsset = picture.assetId ? assets[picture.assetId] : undefined;
-        return pictureAsset ? { ...picture, src: pictureAsset.url } : picture;
+        return pictureAsset ? { ...picture, src: pictureAsset.url, poster: pictureAsset.thumbnailUrl } : picture;
       }),
     } : undefined,
   } : undefined;
 
   return (
     <main className="fixed inset-0 overflow-hidden bg-black" style={{ containerType: 'inline-size' }} aria-label="Slideshow output">
-      <SlideView key={`${currentRef.sceneId}:${currentRef.slideIdx}`} bg={scene?.bg ?? 'from-black to-black'} slide={outputSlide} scale={10} minRem={0.75} maxRem={8} animate seamlessBackground />
+      <SlideView bg={scene?.bg ?? 'from-black to-black'} slide={outputSlide} scale={10} minRem={0.75} maxRem={8} animate seamlessBackground />
     </main>
   );
 }

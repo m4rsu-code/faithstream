@@ -84,7 +84,7 @@ import SlideTextEditor from '../components/SlideTextEditor';
 import { backgroundClasses, backgroundStyle, customBackground, parseCustomBackground } from '../utils/slideBackground';
 import { activeAlign, alignText, hasLineAligns, lineAlignAt, remapLineAligns, type TextRange } from '../utils/lineAlign';
 import BodyPortal from '../components/BodyPortal';
-import SeamlessLoopVideo from '../components/SeamlessLoopVideo';
+import SlideBackgroundLayer from '../components/SlideBackgroundLayer';
 
 /* ---------- Types & data ---------- */
 
@@ -140,16 +140,30 @@ const patchTextBox = (box: TextBox, patch: Partial<TextBox>): TextBox => {
   return next;
 };
 
-type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; muted?: boolean; aspectRatio?: number; lockAspectRatio?: boolean; layerOrder?: number | 'back' | 'front'; animation?: EntranceAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: AnimationEasing };
+type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; poster?: string; muted?: boolean; aspectRatio?: number; lockAspectRatio?: boolean; layerOrder?: number | 'back' | 'front'; animation?: EntranceAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: AnimationEasing };
 type ShapeT = { id: number; kind: 'rectangle' | 'circle' | 'triangle' | 'line' | 'star' | 'arrow'; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number; animation?: EntranceAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: AnimationEasing };
 type MediaAsset = { id: string; name: string; type: 'image' | 'video'; category?: 'background' | 'slide'; collection?: string; blob: Blob; thumbnailBlob?: Blob; originalBlob?: Blob; optimized?: boolean; createdAt: number; url: string; thumbnailUrl?: string; fromFolder?: boolean; protected?: boolean; byteSize?: number };
 type StoredMediaAsset = Omit<MediaAsset, 'url' | 'thumbnailUrl'>;
+
+function BackgroundHoverPreview({ asset, className }: { asset: Pick<MediaAsset, 'url' | 'type' | 'thumbnailUrl'>; className: string }) {
+  const [hovered, setHovered] = useState(false);
+  return <span className="absolute inset-0" onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}>
+    {asset.type === 'image'
+      ? <img src={asset.url} alt="" loading="lazy" decoding="async" className={className} />
+      : hovered
+        ? <video src={asset.url} autoPlay muted loop playsInline className={className} />
+        : asset.thumbnailUrl
+          ? <img src={asset.thumbnailUrl} alt="" loading="lazy" decoding="async" className={className} />
+          : <span className="flex h-full w-full items-center justify-center bg-navy"><Video size={20} className="text-warm-white/45" /></span>}
+  </span>;
+}
 
 type SlideT = {
   id: number;
   title: string;
   bg: string; // tailwind gradient classes
   dim: number; // 0-80, % darkening over the background
+  backgroundOpacity?: number;
   bgImage?: string;
   bgPosition?: { x: number; y: number };
   bgVideo?: string;
@@ -334,19 +348,19 @@ const prepareProjectForAccountSync = (project: PresentationProject): SyncedPrese
   const slides = project.slides.map((slide) => {
     if (slide.bgAssetId || slide.bgImage || slide.bgVideo) hasLocalMedia = true;
     const slideWithoutLocalBackground = { ...slide };
-    delete slideWithoutLocalBackground.bgAssetId;
     delete slideWithoutLocalBackground.bgImage;
     delete slideWithoutLocalBackground.bgVideo;
     if (slide.bgPictureRestore) hasLocalMedia = true;
-    delete slideWithoutLocalBackground.bgPictureRestore;
-    const pictures = (slide.pictures ?? []).filter((picture) => {
+    const bgPictureRestore = slide.bgPictureRestore ? { ...slide.bgPictureRestore, src: '' } : undefined;
+    const pictures = (slide.pictures ?? []).map((picture) => {
       if (picture.assetId || picture.src) {
         hasLocalMedia = true;
-        return false;
       }
-      return true;
+      // Preserve the layer geometry and local asset ID for this device to reconnect after
+      // a restart; only the device-specific object URL/base64 data stays off the account API.
+      return { ...picture, src: '' };
     });
-    return { ...slideWithoutLocalBackground, pictures };
+    return { ...slideWithoutLocalBackground, bgPictureRestore, pictures };
   });
 
   return { id: project.id, name: project.name, slides, updatedAt: project.updatedAt, hasLocalMedia, ...(project.colors?.length ? { colors: project.colors } : {}) };
@@ -645,14 +659,14 @@ function TextBoxView({ box, defaultLayerOrder = 3000, animate = false }: { box: 
 }
 
 /** Fills its (relative, 16:9) parent. Everything inside scales with the slide's width. */
-function SlideRender({ slide, onVideoSelect, editingTextBoxId, animate = false, seamlessBackground = false }: { slide: SlideT; onVideoSelect?: (id: number) => void; editingTextBoxId?: number | null; animate?: boolean; seamlessBackground?: boolean }) {
+function SlideRender({ slide, onVideoSelect, editingTextBoxId, animate = false, seamlessBackground = false, eagerMedia = false }: { slide: SlideT; onVideoSelect?: (id: number) => void; editingTextBoxId?: number | null; animate?: boolean; seamlessBackground?: boolean; eagerMedia?: boolean }) {
   const renderPicture = (picture: PictureT, index: number) => {
     const zIndex = typeof picture.layerOrder === 'number' ? picture.layerOrder : picture.layerOrder === 'front' ? 5000 : picture.layerOrder === 'back' ? 0 : 1000 + index;
     const style = { ...(animate && picture.animation && picture.animation !== 'none' ? animationCssStyle(picture) : {}), left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, zIndex };
     const animationClass = animate && picture.animation && picture.animation !== 'none' ? `slide-content-${picture.animation}` : '';
     return picture.mediaType === 'video'
-      ? <video key={picture.id} data-slide-video-id={picture.id} src={picture.src} controls playsInline muted={picture.muted ?? false} onPointerDown={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} onClick={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} className={`pointer-events-auto absolute object-contain ${animationClass}`} style={style} />
-      : <img key={picture.id} src={picture.src} alt="" loading="lazy" decoding="async" draggable={false} className={`absolute object-contain ${animationClass}`} style={style} />;
+      ? <video key={`${slide.id}:${picture.id}`} data-slide-video-id={picture.id} src={picture.src} poster={picture.poster} controls playsInline preload={eagerMedia ? 'auto' : 'metadata'} muted={picture.muted ?? false} onPointerDown={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} onClick={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} className={`pointer-events-auto absolute object-contain ${animationClass}`} style={style} />
+      : <img key={`${slide.id}:${picture.id}`} src={picture.src} alt="" loading={eagerMedia ? 'eager' : 'lazy'} decoding="async" draggable={false} className={`absolute object-contain ${animationClass}`} style={style} />;
   };
 
   return (
@@ -660,19 +674,11 @@ function SlideRender({ slide, onVideoSelect, editingTextBoxId, animate = false, 
       className={`absolute isolate inset-0 overflow-hidden bg-linear-to-br ${backgroundClasses(slide.bg)}`}
       style={{ containerType: 'inline-size', ...backgroundStyle(slide.bg) }}
     >
-      {slide.bgImage && (
-        <img src={slide.bgImage} alt="" loading="lazy" decoding="async" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />
-      )}
-      {slide.bgVideo && (
-        seamlessBackground
-          ? <SeamlessLoopVideo key={slide.bgVideo} src={slide.bgVideo} muted={slide.bgVideoMuted ?? true} style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />
-          : <video src={slide.bgVideo} autoPlay loop muted={slide.bgVideoMuted ?? true} playsInline className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition: `${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%` }} />
-      )}
-      <div className="absolute inset-0 bg-black" style={{ opacity: slide.dim / 100 }} />
+      <SlideBackgroundLayer imageUrl={slide.bgImage} videoUrl={slide.bgVideo} opacity={slide.backgroundOpacity ?? 100} dim={slide.dim} muted={slide.bgVideoMuted ?? true} position={`${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%`} seamless={seamlessBackground} eager={eagerMedia} />
       {slide.pictures?.map(renderPicture)}
-      {slide.shapes?.map((shape, index) => <div key={shape.id} className={`absolute ${animate && shape.animation && shape.animation !== 'none' ? `slide-content-${shape.animation}` : ''}`} style={{ ...(animate && shape.animation && shape.animation !== 'none' ? animationCssStyle(shape) : {}), left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
-      {slide.box && editingTextBoxId !== null && <TextBoxView box={slide.box} animate={animate} />}
-      {slide.extraBoxes?.filter(({ id }) => editingTextBoxId !== id).map(({ id, box }, index) => <TextBoxView key={id} box={box} defaultLayerOrder={3001 + index} animate={animate} />)}
+      {slide.shapes?.map((shape, index) => <div key={`${slide.id}:${shape.id}`} className={`absolute ${animate && shape.animation && shape.animation !== 'none' ? `slide-content-${shape.animation}` : ''}`} style={{ ...(animate && shape.animation && shape.animation !== 'none' ? animationCssStyle(shape) : {}), left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
+      {slide.box && editingTextBoxId !== null && <TextBoxView key={`${slide.id}:main`} box={slide.box} animate={animate} />}
+      {slide.extraBoxes?.filter(({ id }) => editingTextBoxId !== id).map(({ id, box }, index) => <TextBoxView key={`${slide.id}:${id}`} box={box} defaultLayerOrder={3001 + index} animate={animate} />)}
       {slide.countdown && <CountdownDisplay countdown={slide.countdown} />}
     </div>
   );
@@ -872,7 +878,7 @@ function PreviewOverlay({
         className="relative"
         style={{ width: 'min(100vw, calc(100vh * 16 / 9))', aspectRatio: '16 / 9' }}
       >
-        <SlideRender key={`${slides[i]?.id ?? i}-${i}`} slide={slides[i]} animate seamlessBackground />
+        <SlideRender slide={slides[i]} animate seamlessBackground eagerMedia />
       </div>
       <button
         aria-label="Close preview"
@@ -1142,11 +1148,11 @@ export default function Presentation() {
         const asset = slide.bgAssetId ? byId.get(slide.bgAssetId) : undefined;
         const pictures = slide.pictures?.map((picture) => {
           const pictureAsset = picture.assetId ? byId.get(picture.assetId) : undefined;
-          return pictureAsset ? { ...picture, src: pictureAsset.url } : picture;
+          return pictureAsset ? { ...picture, src: pictureAsset.url, poster: pictureAsset.thumbnailUrl } : picture;
         });
         const restoreAsset = slide.bgPictureRestore?.assetId ? byId.get(slide.bgPictureRestore.assetId) : undefined;
         const bgPictureRestore = restoreAsset && slide.bgPictureRestore ? { ...slide.bgPictureRestore, src: restoreAsset.url } : slide.bgPictureRestore;
-        return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), bgPictureRestore, pictures };
+        return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : asset.thumbnailUrl, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), bgPictureRestore, pictures };
       };
       skipUndoRecordingRef.current = true;
       setSlides((current) => current.map(withMedia));
@@ -2256,8 +2262,8 @@ export default function Presentation() {
     const asset = slide.bgAssetId ? byId.get(slide.bgAssetId) : undefined;
     return {
       ...slide,
-      ...(slide.bgAssetId ? { bgImage: asset?.type === 'image' ? asset.url : undefined, bgVideo: asset?.type === 'video' ? asset.url : undefined, bgAssetId: asset ? slide.bgAssetId : undefined } : {}),
-      pictures: slide.pictures?.map((picture) => { const pictureAsset = picture.assetId ? byId.get(picture.assetId) : undefined; return pictureAsset ? { ...picture, src: pictureAsset.url } : picture; }).filter((picture) => !!picture.src),
+      ...(slide.bgAssetId ? { bgImage: asset?.type === 'image' ? asset.url : asset?.type === 'video' ? asset.thumbnailUrl : undefined, bgVideo: asset?.type === 'video' ? asset.url : undefined, bgAssetId: asset ? slide.bgAssetId : undefined } : {}),
+      pictures: slide.pictures?.map((picture) => { const pictureAsset = picture.assetId ? byId.get(picture.assetId) : undefined; return pictureAsset ? { ...picture, src: pictureAsset.url, poster: pictureAsset.thumbnailUrl } : picture; }).filter((picture) => !!picture.src),
     };
   };
   /** A brand-new presentation still has only its untouched starter slide; a template replaces it. */
@@ -2541,6 +2547,7 @@ export default function Presentation() {
         title: layout.label ?? `Part ${index + 1}`,
         bg: layout.background,
         dim: layout.dim,
+        backgroundOpacity: layout.backgroundOpacity,
         ...(asset ? { bgAssetId: asset.id, bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined, bgVideoMuted: asset.type === 'video' ? true : undefined } : {}),
         box: toBox(layout.box),
         extraBoxes: layout.subtitleBox ? [{ id: nextId++, box: toBox(layout.subtitleBox) }] : [],
@@ -2711,7 +2718,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
     setLeaveConfirmationOpen(false);
     setSlides(project.slides.map((slide) => {
       const asset = mediaAssets.find((item) => item.id === slide.bgAssetId);
-      return asset ? { ...slide, bgImage: asset.type === 'image' ? asset.url : undefined, bgVideo: asset.type === 'video' ? asset.url : undefined } : slide;
+      return asset ? { ...slide, bgImage: asset.type === 'image' ? asset.url : asset.thumbnailUrl, bgVideo: asset.type === 'video' ? asset.url : undefined } : slide;
     }));
     setIndex(0);
     setProjectName(project.name);
@@ -2919,7 +2926,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
             {active !== 'All' && (visibleBackgrounds.length ? <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
               {visibleBackgrounds.map((asset) => <article key={asset.id} className="group relative overflow-hidden rounded-xl border border-white/10 bg-panel transition hover:border-brand/50">
                 <button type="button" onClick={() => setVideoPreviewAsset(asset.type === 'video' ? asset : null)} title={asset.type === 'video' ? `Preview ${asset.name}` : asset.name} className="block w-full text-left">
-                  <span className="relative flex aspect-video items-center justify-center overflow-hidden bg-navy">{asset.type === 'image' || asset.thumbnailUrl ? <img src={asset.type === 'image' ? asset.url : asset.thumbnailUrl} alt={asset.type === 'image' ? asset.name : ''} loading="lazy" decoding="async" className="absolute inset-0 h-full w-full object-cover" /> : <Video size={24} className="text-warm-white/30" />}<span className="absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white">{asset.type === 'video' ? 'VIDEO' : 'IMAGE'}</span></span>
+                  <span className="relative flex aspect-video items-center justify-center overflow-hidden bg-navy"><BackgroundHoverPreview asset={asset} className="absolute inset-0 h-full w-full object-cover" /><span className="absolute bottom-2 right-2 z-10 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white">{asset.type === 'video' ? 'VIDEO' : 'IMAGE'}</span></span>
                   <span className="block truncate px-2 pt-2 text-xs font-semibold text-warm-white">{backgroundOriginLabel(asset)} background</span><span className="block truncate px-2 pb-2 text-[10px] text-warm-white/45">{asset.type === 'video' ? 'Video' : 'Image'} · {mediaSizeOf(asset)}</span>
                 </button>
                 {asset.type === 'video' && <button type="button" aria-label={`Play ${asset.name}`} onClick={() => setVideoPreviewAsset(asset)} className="absolute left-2 top-2 rounded-md bg-black/75 p-1.5 text-white opacity-0 transition group-hover:opacity-100 focus:opacity-100"><Play size={13} /></button>}
@@ -3297,7 +3304,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
               }}
             >
               <div className="absolute inset-0 overflow-hidden rounded-lg border border-white/10">
-                <SlideRender slide={cur} onVideoSelect={selectPicture} editingTextBoxId={isBoxSelected ? selectedBoxId : undefined} seamlessBackground />
+                <SlideRender slide={cur} onVideoSelect={selectPicture} editingTextBoxId={isBoxSelected ? selectedBoxId : undefined} eagerMedia />
               </div>
 
               {alignmentGuides.x !== null && <div aria-hidden className="pointer-events-none absolute inset-y-0 z-30 border-l border-dashed border-cyan-300 shadow-[0_0_5px_rgba(103,232,249,.8)]" style={{ left: `${alignmentGuides.x}%` }} />}
@@ -4048,7 +4055,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                           <div key={asset.id} className={`group relative overflow-hidden rounded-lg border transition ${cur.bgAssetId === asset.id ? 'border-brand ring-1 ring-brand/40' : 'border-white/10 hover:border-white/40'}`}>
                             <button onClick={() => applyMediaAsset(asset)} title={`Set ${asset.name} as the slide background`} className="block w-full text-left">
                               <span className="relative block aspect-video overflow-hidden bg-navy">
-                                {asset.type === 'image' || asset.thumbnailUrl ? <img src={asset.type === 'image' ? asset.url : asset.thumbnailUrl} alt={asset.type === 'image' ? asset.name : ''} loading="lazy" decoding="async" className="h-full w-full object-cover" /> : <span className="flex h-full w-full items-center justify-center bg-navy"><Video size={20} className="text-warm-white/30" /></span>}
+                                <BackgroundHoverPreview asset={asset} className="h-full w-full object-cover" />
                                 {asset.type === 'video' && <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white">VIDEO</span>}
                               </span>
                               <span className="block truncate px-1.5 pt-1 text-[10px] font-medium text-warm-white/75">{backgroundOriginLabel(asset)} background</span>

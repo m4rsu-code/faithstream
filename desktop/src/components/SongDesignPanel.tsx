@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
-import { AlignCenter, AlignJustify, AlignLeft, AlignRight, AlignVerticalJustifyCenter, AlignVerticalJustifyEnd, AlignVerticalJustifyStart, Bold, ChevronLeft, ChevronRight, Italic, Underline } from 'lucide-react';
+import { AlignCenter, AlignJustify, AlignLeft, AlignRight, AlignVerticalJustifyCenter, AlignVerticalJustifyEnd, AlignVerticalJustifyStart, Bold, ChevronLeft, ChevronRight, Film, Image as ImageIcon, Italic, Search, Underline, X } from 'lucide-react';
 import { readBackgroundLibrary, type BackgroundItem } from '../utils/mediaLibrary';
+import SlideBackgroundLayer from './SlideBackgroundLayer';
 import { PRESERVED_BLANK_LINE } from '../utils/slideLibrary';
 import { backgroundClasses, backgroundStyle, customBackground, parseCustomBackground } from '../utils/slideBackground';
 import { activeAlign, alignText, hasLineAligns, lineAlignAt, remapLineAligns } from '../utils/lineAlign';
-import { SONG_BACKGROUNDS, SONG_FONTS, songLineKey, songSlideLayouts, songTextArea, withSlideLineAligns, type Song, type SongTextAlign, type SongSlideLayout, type SongStyle, type SongTextLayout } from '../utils/songbooks';
+import { rememberSongBackground, SONG_BACKGROUNDS, SONG_FONTS, songLineKey, songSlideLayouts, songTextArea, withSlideLineAligns, type Song, type SongTextAlign, type SongSlideLayout, type SongStyle, type SongTextLayout } from '../utils/songbooks';
 
 /** One text area of a song slide, sized like Studio's text boxes (and shrunk if it would overflow). */
 function PreviewText({ layout }: { layout: SongTextLayout }) {
@@ -36,15 +37,29 @@ function PreviewText({ layout }: { layout: SongTextLayout }) {
   );
 }
 
+function BackgroundChoiceCard({ item, selected, onSelect }: { item: BackgroundItem; selected: boolean; onSelect: () => void }) {
+  const [previewing, setPreviewing] = useState(false);
+  return <button type="button" aria-label={`Use ${item.type} background${item.collection ? ` from ${item.collection}` : ''}`} aria-pressed={selected} onClick={onSelect} onMouseEnter={() => setPreviewing(true)} onMouseLeave={() => setPreviewing(false)} onFocus={() => setPreviewing(true)} onBlur={() => setPreviewing(false)} className={`group block w-full overflow-hidden rounded-xl border-2 bg-[#0b1520] text-left transition ${selected ? 'border-brand shadow-[0_0_0_2px_rgba(203,135,68,0.2)]' : 'border-white/10 hover:border-white/30'}`}>
+    <div className="relative w-full overflow-hidden bg-gradient-to-br from-slate-700 to-slate-950" style={{ height: 260, minHeight: 260 }}>
+      {item.type === 'image'
+        ? <img src={item.url} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]" />
+        : previewing
+          ? <video src={item.url} autoPlay muted loop playsInline className="h-full w-full object-cover" />
+          : item.thumbnailUrl
+          ? <img src={item.thumbnailUrl} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]" />
+            : <div className="flex h-full w-full items-center justify-center text-white/45"><Film size={24} /></div>}
+      <span className="absolute left-2 top-2 rounded-md bg-black/75 px-2 py-1 text-[10px] font-semibold text-white">{item.type === 'video' ? <><Film size={11} className="mr-1 inline" />Video</> : <><ImageIcon size={11} className="mr-1 inline" />Image</>}</span>
+      {selected && <span className="absolute right-2 top-2 rounded-md bg-brand px-2 py-1 text-[10px] font-semibold text-white">Selected</span>}
+    </div>
+    <div className="px-3 py-2.5"><p className="truncate text-xs font-medium text-white" title={item.name}>{item.name}</p><p className="mt-1 truncate text-[10px] text-warm-white/45">{item.collection || 'Imported background'}</p></div>
+  </button>;
+}
+
 /** A song slide drawn like Studio draws it. Thumbnails pass still, so video backgrounds show a still frame. */
 export function SongSlidePreview({ layout, background, still = false }: { layout: SongSlideLayout; background?: BackgroundItem; still?: boolean }) {
   return (
     <div className={`relative isolate aspect-video w-full overflow-hidden bg-gradient-to-br ${backgroundClasses(layout.background)}`} style={{ containerType: 'inline-size', ...backgroundStyle(layout.background) }}>
-      {background?.type === 'image' && <img src={background.url} alt="" draggable={false} className="absolute inset-0 h-full w-full object-cover" />}
-      {background?.type === 'video' && (still
-        ? <video src={`${background.url}#t=0.5`} muted playsInline preload="metadata" className="absolute inset-0 h-full w-full object-cover" />
-        : <video src={background.url} autoPlay muted loop playsInline className="absolute inset-0 h-full w-full object-cover" />)}
-      <div className="absolute inset-0 bg-black" style={{ opacity: layout.dim / 100 }} />
+      <SlideBackgroundLayer media={background} opacity={layout.backgroundOpacity} dim={layout.dim} still={still} eager={!still} />
       <PreviewText layout={layout.box} />
       {layout.subtitleBox && <PreviewText layout={layout.subtitleBox} />}
     </div>
@@ -242,6 +257,7 @@ export default function SongDesignPanel({
   const [index, setIndex] = useState(0);
   const [library, setLibrary] = useState<BackgroundItem[]>([]);
   const [collection, setCollection] = useState('All');
+  const [backgroundBrowserOpen, setBackgroundBrowserOpen] = useState(false);
   const thumbs = useRef<(HTMLButtonElement | null)[]>([]);
   // Keep the selected slide's thumbnail in view when moving between slides.
   useEffect(() => { thumbs.current[index]?.scrollIntoView({ block: 'nearest' }); }, [index]);
@@ -286,6 +302,16 @@ export default function SongDesignPanel({
   const backgroundItem = style.backgroundAssetId ? library.find((item) => item.id === style.backgroundAssetId) : undefined;
   const collections = ['All', ...[...new Set(library.map((item) => item.collection || 'Uploads'))].sort()];
   const visibleLibrary = collection === 'All' ? library : library.filter((item) => (item.collection || 'Uploads') === collection);
+  const changeStyle = (patch: Partial<SongStyle>) => {
+    onChange(patch);
+    if (!('background' in patch) && !('backgroundAssetId' in patch) && !('dim' in patch) && !('backgroundOpacity' in patch)) return;
+    rememberSongBackground({
+      background: patch.background ?? style.background,
+      backgroundAssetId: 'backgroundAssetId' in patch ? patch.backgroundAssetId : style.backgroundAssetId,
+      dim: patch.dim ?? style.dim,
+      backgroundOpacity: patch.backgroundOpacity ?? style.backgroundOpacity,
+    });
+  };
   const slideCaption = (layout: SongSlideLayout) => designLabel === 'scripture passage'
     ? layout.text.split(/\r?\n|\s{2,}/, 1)[0] || 'Verse'
     : layout.label ?? 'Lyrics';
@@ -452,7 +478,7 @@ export default function SongDesignPanel({
           {(() => {
             const custom = parseCustomBackground(style.background);
             const from = custom?.from ?? '#1E293B';
-            const applyColor = (background: string) => onChange({ background, backgroundAssetId: undefined });
+            const applyColor = (background: string) => changeStyle({ background, backgroundAssetId: undefined });
             return <div className="flex flex-wrap items-center gap-2 text-[11px] text-warm-white/70">
               <label className="flex items-center gap-1.5">Your own color
                 <input type="color" aria-label="Background color" value={from} onChange={(event) => applyColor(customBackground(event.target.value, custom?.to))} className={`h-7 w-10 cursor-pointer rounded border bg-transparent ${custom && !style.backgroundAssetId ? 'border-brand' : 'border-white/15'}`} />
@@ -464,30 +490,49 @@ export default function SongDesignPanel({
           <div className="grid grid-cols-4 gap-1.5">
             {SONG_BACKGROUNDS.map((background) => {
               const selected = !style.backgroundAssetId && style.background === background;
-              return <button key={background} type="button" aria-label="Use this colour background" aria-pressed={selected} onClick={() => onChange({ background, backgroundAssetId: undefined })} className={`aspect-video rounded-md border-2 bg-gradient-to-br ${background} ${selected ? 'border-brand' : 'border-white/10 hover:border-white/30'}`} />;
+              return <button key={background} type="button" aria-label="Use this colour background" aria-pressed={selected} onClick={() => changeStyle({ background, backgroundAssetId: undefined })} className={`aspect-video rounded-md border-2 bg-gradient-to-br ${background} ${selected ? 'border-brand' : 'border-white/10 hover:border-white/30'}`} />;
             })}
           </div>
-          {library.length > 0 && <>
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-[11px] text-warm-white/55">Pictures and videos</p>
-              {collections.length > 2 && <select aria-label="Background collection" value={collection} onChange={(event) => setCollection(event.target.value)} className="max-w-36 rounded-md border border-white/10 bg-[#091521] px-1.5 py-1 text-[11px] text-white outline-none focus:border-brand">{collections.map((name) => <option key={name}>{name}</option>)}</select>}
+          <div className="flex items-center gap-3 rounded-lg border border-white/10 bg-[#0b1520] p-2.5">
+            <div className="relative aspect-video w-28 shrink-0 overflow-hidden rounded-md bg-gradient-to-br from-slate-700 to-slate-950">
+              {backgroundItem?.type === 'image' && <img src={backgroundItem.url} alt="Selected background" className="h-full w-full object-cover" />}
+              {backgroundItem?.type === 'video' && backgroundItem.thumbnailUrl && <img src={backgroundItem.thumbnailUrl} alt="Selected video background" className="h-full w-full object-cover" />}
+              {!backgroundItem && <div className={`h-full w-full bg-gradient-to-br ${backgroundClasses(style.background)}`} />}
+              {backgroundItem?.type === 'video' && <span className="absolute bottom-1 right-1 rounded bg-black/75 p-1 text-white"><Film size={12} /></span>}
             </div>
-            <div className="grid max-h-40 grid-cols-3 gap-1.5 overflow-y-auto pr-1">
-              {visibleLibrary.map((item) => {
-                const selected = style.backgroundAssetId === item.id;
-                return <button key={item.id} type="button" title={item.name} aria-pressed={selected} onClick={() => onChange({ backgroundAssetId: item.id, dim: style.dim || 30 })} className={`relative aspect-video overflow-hidden rounded-md border-2 bg-navy ${selected ? 'border-brand' : 'border-white/10 hover:border-white/30'}`}>
-                  {item.type === 'image' ? <img src={item.url} alt="" className="h-full w-full object-cover" /> : <video src={item.url} muted className="h-full w-full object-cover" />}
-                  {item.type === 'video' && <span className="absolute bottom-0.5 right-0.5 rounded bg-black/70 px-1 text-[8px] text-white">VIDEO</span>}
-                </button>;
-              })}
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-semibold text-white">{backgroundItem ? 'Image or video background' : 'Colour background'}</p>
+              <p className="mt-0.5 truncate text-[10px] text-warm-white/45">{backgroundItem?.collection || (backgroundItem ? 'Imported background' : 'Choose a saved background')}</p>
+              <button type="button" onClick={() => setBackgroundBrowserOpen(true)} disabled={!library.length} className="mt-1.5 rounded-md border border-white/10 px-2 py-1 text-[10px] font-medium text-warm-white/80 hover:border-brand hover:text-white disabled:cursor-not-allowed disabled:opacity-40">Browse backgrounds ({library.length})</button>
             </div>
-          </>}
+          </div>
           {!library.length && <p className="text-[10px] leading-snug text-warm-white/40">Add pictures or videos in Presentations → Backgrounds (Import folder or Add files) to use them here.</p>}
+          <label className="text-[11px] text-warm-white/65"><span className="flex justify-between">Background opacity <span className="tabular-nums text-warm-white/85">{style.backgroundOpacity}%</span></span>
+            <input type="range" min={0} max={100} step={5} value={style.backgroundOpacity} onChange={(event) => changeStyle({ backgroundOpacity: Number(event.target.value) })} className={slider} />
+          </label>
           <label className="text-[11px] text-warm-white/65"><span className="flex justify-between">Darken background <span className="tabular-nums text-warm-white/85">{style.dim}%</span></span>
-            <input type="range" min={0} max={80} step={5} value={style.dim} onChange={(event) => onChange({ dim: Number(event.target.value) })} className={slider} />
+            <input type="range" min={0} max={80} step={5} value={style.dim} onChange={(event) => changeStyle({ dim: Number(event.target.value) })} className={slider} />
           </label>
         </Section>
       </aside>
+      {backgroundBrowserOpen && <div className="fixed inset-0 flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" style={{ zIndex: 1200 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setBackgroundBrowserOpen(false); }}>
+        <section role="dialog" aria-modal="true" aria-labelledby="song-backgrounds-title" className="flex max-h-[94vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101d2a] shadow-2xl">
+          <header className="flex shrink-0 items-center justify-between border-b border-white/10 px-5 py-4">
+            <div><h3 id="song-backgrounds-title" className="text-base font-bold text-white">Choose a background</h3><p className="mt-1 text-xs text-warm-white/50">Select an image or video from your saved background library.</p></div>
+            <button type="button" onClick={() => setBackgroundBrowserOpen(false)} aria-label="Close background library" className="rounded-lg p-2 text-warm-white/60 hover:bg-white/10 hover:text-white"><X size={18} /></button>
+          </header>
+          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 px-5 py-3">
+            <span className="text-xs text-warm-white/55">{visibleLibrary.length} backgrounds</span>
+            {collections.length > 2 && <label className="flex items-center gap-2 text-xs text-warm-white/60"><Search size={14} /><select aria-label="Filter background collection" value={collection} onChange={(event) => setCollection(event.target.value)} className="rounded-md border border-white/10 bg-[#091521] px-2.5 py-1.5 text-xs text-white outline-none focus:border-brand">{collections.map((name) => <option key={name}>{name}</option>)}</select></label>}
+          </div>
+          <div className="grid min-h-0 gap-6 overflow-y-auto p-5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 430px), 1fr))', gridAutoRows: 'max-content' }}>
+            {visibleLibrary.map((item) => {
+              const selected = style.backgroundAssetId === item.id;
+              return <BackgroundChoiceCard key={item.id} item={item} selected={selected} onSelect={() => { changeStyle({ backgroundAssetId: item.id, dim: style.dim || 30 }); setBackgroundBrowserOpen(false); }} />;
+            })}
+          </div>
+        </section>
+      </div>}
     </div>
   );
 }
