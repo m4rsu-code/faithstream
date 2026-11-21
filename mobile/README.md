@@ -32,6 +32,27 @@ npx expo run:android
 
 For iPhone, run `npx expo run:ios` on macOS with Xcode and a connected iPhone. The iOS Simulator does not have a physical camera.
 
+## Android in-app updates
+
+FaithStream Cam checks the public GitHub Releases page for `m4rsu-code/faithstream` when it opens. When it finds a newer version with an APK attached, the user can choose **Download update**, wait for it to be staged, then tap **Install update**. Android asks the user to allow FaithStream Cam to install updates the first time. iPhone updates must be distributed through Apple's app distribution process.
+
+To publish an Android update:
+
+1. Increase `expo.version` and `expo.android.versionCode` in `app.json` (for example, `1.0.0`/`1` to `1.0.1`/`2`). Keep the Android package name unchanged.
+2. Build the release APK with `cd android; .\gradlew assembleRelease` from PowerShell. The file is `android\app\build\outputs\apk\release\FaithStream Cam.apk`.
+3. In GitHub, create a release with a matching tag such as `v1.0.1`, then attach the release APK. The updater only offers published releases, not drafts or prereleases.
+
+Android accepts an update only when its version code is higher and it is signed with the same signing key as the installed app. The generated project currently falls back to Android's debug key until a release key is configured. Before distributing an APK broadly, create a permanent upload keystore, keep a backup in a safe place, and configure these properties in your user-level Gradle properties file (never commit the passwords or keystore):
+
+```properties
+FAITHSTREAM_UPLOAD_STORE_FILE=C:/secure/path/faithstream-upload.jks
+FAITHSTREAM_UPLOAD_STORE_PASSWORD=your-store-password
+FAITHSTREAM_UPLOAD_KEY_ALIAS=faithstream
+FAITHSTREAM_UPLOAD_KEY_PASSWORD=your-key-password
+```
+
+If an APK has already been shared, keep using the same signing key for all its updates. A different key requires users to uninstall the old app first, which removes its local app data.
+
 ## Pair with Studio
 
 1. Open Studio and choose **Sources → Add source → FaithStream Cam**.

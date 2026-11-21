@@ -2,7 +2,18 @@
   "expo": {
     "name": "FaithStream Cam",
     "slug": "faithstream-cam",
-    "version": "1.0.0",
+    "version": "1.0.1",
+    "android": {
+      "versionCode": 2,
+      "package": "com.anonymous.faithstreamcam",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/camera-launcher-icon.png",
+        "backgroundColor": "#0b1b28"
+      },
+      "permissions": ["CAMERA", "INTERNET", "RECORD_AUDIO", "REQUEST_INSTALL_PACKAGES"],
+      "usesCleartextTraffic": true,
+      "softwareKeyboardLayoutMode": "resize"
+    },
     "orientation": "default",
     "icon": "./assets/camera-launcher-icon.png",
     "splash": {
@@ -13,6 +24,7 @@
     "newArchEnabled": true,
     "plugins": [
       "expo-dev-client",
+      "./plugins/withApkInstaller",
       [
         "expo-camera",
         {
@@ -28,23 +40,6 @@
           "microphonePermission": "Allow FaithStream Cam to use your microphone."
         }
       ]
-    ],
-    "ios": {
-      "supportsTablet": false,
-      "infoPlist": {
-        "NSLocalNetworkUsageDescription": "FaithStream Cam connects to FaithStream Studio on your local Wi-Fi network.",
-        "NSMicrophoneUsageDescription": "FaithStream Cam can send your phone microphone audio to FaithStream Studio when you enable Share phone microphone."
-      }
-    },
-    "android": {
-      "package": "com.anonymous.faithstreamcam",
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/camera-launcher-icon.png",
-        "backgroundColor": "#0b1b28"
-      },
-      "permissions": ["CAMERA", "INTERNET", "RECORD_AUDIO"],
-      "usesCleartextTraffic": true,
-      "softwareKeyboardLayoutMode": "resize"
-    }
+    ]
   }
 }
