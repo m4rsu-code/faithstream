@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Models\User;
+use Illuminate\Auth\Notifications\ResetPassword;
 use Illuminate\Auth\Notifications\VerifyEmail;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
@@ -10,9 +11,6 @@ use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
-use Symfony\Component\Mime\Email;
-use Symfony\Component\Mime\Part\DataPart;
-use Symfony\Component\Mime\Part\File;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -53,16 +51,26 @@ class AppServiceProvider extends ServiceProvider
                 ->text('emails.verify-email-text', [
                     'name' => $notifiable->name,
                     'verificationUrl' => $verificationUrl,
-                ])
-                ->withSymfonyMessage(static function (Email $message): void {
-                    $logo = new DataPart(
-                        new File(resource_path('images/faithstream-logo.png')),
-                        'faithstream-logo.png',
-                        'image/png',
-                    );
+                ]);
+        });
 
-                    $message->addPart($logo->asInline()->setContentId('faithstream-logo@faithstream.local'));
-                });
+        ResetPassword::toMailUsing(static function (User $notifiable, string $token): MailMessage {
+            $resetUrl = url(route('password.reset', [
+                'token' => $token,
+                'email' => $notifiable->getEmailForPasswordReset(),
+            ], false));
+
+            $expireMinutes = (int) config(
+                'auth.passwords.'.config('auth.defaults.passwords').'.expire'
+            );
+
+            return (new MailMessage)
+                ->subject('Reset your FaithStream Studio password')
+                ->view('emails.password-reset-email', [
+                    'name' => $notifiable->name,
+                    'resetUrl' => $resetUrl,
+                    'expireMinutes' => $expireMinutes,
+                ]);
         });
     }
 }
