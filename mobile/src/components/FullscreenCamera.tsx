@@ -9,11 +9,14 @@ type Props = {
   onBackToSetup: () => void;
   onDisconnect: () => void;
   onFlip: () => void;
+  microphoneAvailable: boolean;
+  microphoneEnabled: boolean;
+  onToggleMicrophone: () => void;
   status: string;
   stream: MediaStream;
 };
 
-export default function FullscreenCamera({ camera, onBackToSetup, onDisconnect, onFlip, status, stream }: Props) {
+export default function FullscreenCamera({ camera, onBackToSetup, onDisconnect, onFlip, microphoneAvailable, microphoneEnabled, onToggleMicrophone, status, stream }: Props) {
   const connected = status.startsWith('On air') || status.startsWith('Connected');
 
   return (
@@ -35,6 +38,9 @@ export default function FullscreenCamera({ camera, onBackToSetup, onDisconnect, 
           <TouchableOpacity accessibilityRole="button" onPress={onFlip} style={styles.control}>
             <Text style={styles.controlText}>Flip camera</Text>
           </TouchableOpacity>
+          {microphoneAvailable && <TouchableOpacity accessibilityRole="button" accessibilityState={{ selected: microphoneEnabled }} onPress={onToggleMicrophone} style={[styles.control, microphoneEnabled && styles.micEnabled]}>
+            <Text style={styles.controlText}>{microphoneEnabled ? 'Mic on' : 'Mic muted'}</Text>
+          </TouchableOpacity>}
           <TouchableOpacity accessibilityRole="button" onPress={onDisconnect} style={[styles.control, styles.disconnect]}>
             <Text style={styles.controlText}>Disconnect</Text>
           </TouchableOpacity>
@@ -58,4 +64,5 @@ const styles = StyleSheet.create({
   control: { backgroundColor: '#07111de8', borderWidth: 1, borderColor: '#ffffff35', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 24 },
   controlText: { color: colors.text, fontSize: 14, fontWeight: '700' },
   disconnect: { backgroundColor: '#872f2ff0', borderColor: '#ffffff25' },
+  micEnabled: { borderColor: '#4ade80aa', backgroundColor: '#14532de8' },
 });

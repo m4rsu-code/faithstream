@@ -16,6 +16,7 @@ import BrandHeader from '../components/BrandHeader';
 import CameraPreview from '../components/CameraPreview';
 import ConnectionForm from '../components/ConnectionForm';
 import FullscreenCamera from '../components/FullscreenCamera';
+import PairingQrScanner, { type ScannedPairing } from '../components/PairingQrScanner';
 import { useStudioCamera } from '../hooks/useStudioCamera';
 import { colors } from '../theme/colors';
 
@@ -23,10 +24,20 @@ export default function CameraScreen() {
   const [address, setAddress] = useState('');
   const [code, setCode] = useState('');
   const [cameraFullscreen, setCameraFullscreen] = useState(false);
+  const [shareMicrophone, setShareMicrophone] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
   const hadCameraStream = useRef(false);
   const scrollRef = useRef<ScrollView | null>(null);
   const codeInputRef = useRef<TextInput | null>(null);
-  const { camera, connect, disconnect, flipCamera, phase, status, stream } = useStudioCamera();
+  const { camera, connect, disconnect, flipCamera, phase, status, stream, phoneMicrophoneEnabled, togglePhoneMicrophone } = useStudioCamera();
+
+  const useScannedPairing = (pairing: ScannedPairing) => {
+    setAddress(pairing.address);
+    setCode(pairing.code);
+    setScannerOpen(false);
+    // Let Expo Camera release the preview before the WebRTC camera opens.
+    setTimeout(() => { void connect(pairing.address, pairing.code, shareMicrophone); }, 350);
+  };
 
   useEffect(() => {
     if (stream && !hadCameraStream.current) setCameraFullscreen(true);
@@ -46,6 +57,9 @@ export default function CameraScreen() {
       onBackToSetup={() => setCameraFullscreen(false)}
       onDisconnect={disconnect}
       onFlip={() => void flipCamera()}
+      microphoneAvailable={!!stream?.getAudioTracks().length}
+      microphoneEnabled={phoneMicrophoneEnabled}
+      onToggleMicrophone={togglePhoneMicrophone}
       status={status}
       stream={stream}
     />;
@@ -74,13 +88,17 @@ export default function CameraScreen() {
             onAddressChange={setAddress}
             onAddressSubmit={() => codeInputRef.current?.focus()}
             onCodeChange={setCode}
-            onConnect={() => void connect(address, code)}
+            onScanQr={() => setScannerOpen(true)}
+            onConnect={() => void connect(address, code, shareMicrophone)}
             onDisconnect={disconnect}
             onInputFocus={keepFocusedInputVisible}
+            shareMicrophone={shareMicrophone}
+            onShareMicrophoneChange={setShareMicrophone}
             status={status}
           />
           <Text style={styles.footer}>Keep this app open while the camera is in use.</Text>
         </ScrollView>
+        <PairingQrScanner visible={scannerOpen} onClose={() => setScannerOpen(false)} onScanned={useScannedPairing} />
       </KeyboardAvoidingView>
     </View>
   );

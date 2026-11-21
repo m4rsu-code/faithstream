@@ -4,6 +4,7 @@ import {
   mediaDevices,
   RTCPeerConnection as NativeRTCPeerConnection,
   type MediaStream,
+  type MediaStreamTrack as NativeMediaStreamTrack,
   type RTCPeerConnection,
   registerGlobals,
 } from 'react-native-webrtc';
@@ -46,6 +47,7 @@ export function useStudioCamera() {
   const attemptId = useRef(0);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [camera, setCamera] = useState<CameraFacing>('back');
+  const [phoneMicrophoneEnabled, setPhoneMicrophoneEnabled] = useState(false);
   const cameraRef = useRef<CameraFacing>('back');
   const socket = useRef<WebSocket | null>(null);
   const peer = useRef<RTCPeerConnection | null>(null);
@@ -75,6 +77,7 @@ export function useStudioCamera() {
     local.current?.getTracks().forEach((track) => track.stop());
     local.current = null;
     setStream(null);
+    setPhoneMicrophoneEnabled(false);
     transition({ phase: 'disconnected' });
   }, [transition]);
 
@@ -91,7 +94,7 @@ export function useStudioCamera() {
     local.current?.getTracks().forEach((track) => track.stop());
   }, []);
 
-  const connect = useCallback(async (address: string, code: string) => {
+  const connect = useCallback(async (address: string, code: string, shareMicrophone = false) => {
     if (isActiveConnection(connectionRef.current.phase)) return;
     const host = address.trim().replace(/^https?:\/\//, '').replace(/^wss?:\/\//, '').replace(/\/$/, '');
     const pin = code.trim();
@@ -104,16 +107,29 @@ export function useStudioCamera() {
     transition({ phase: 'requesting-permission' });
     try {
       const activeOrientation = readScreenOrientation();
-      const cameraStream = await mediaDevices.getUserMedia({
-        audio: false,
-        video: videoConstraints(camera, activeOrientation),
-      });
+      const cameraStream = await mediaDevices.getUserMedia({ audio: false, video: videoConstraints(camera, activeOrientation) });
       if (attempt !== attemptId.current) {
         cameraStream.getTracks().forEach((track) => track.stop());
         return;
       }
-      local.current = cameraStream;
-      setStream(cameraStream);
+      let microphoneTracks: NativeMediaStreamTrack[] = [];
+      if (shareMicrophone) {
+        try {
+          const microphoneStream = await mediaDevices.getUserMedia({ video: false, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+          microphoneTracks = microphoneStream.getAudioTracks();
+        } catch {
+          Alert.alert('Microphone unavailable', 'FaithStream Cam will connect the camera without phone audio. Check microphone permission in Android settings if you want to use it.');
+        }
+      }
+      if (attempt !== attemptId.current) {
+        cameraStream.getTracks().forEach((track) => track.stop());
+        microphoneTracks.forEach((track) => track.stop());
+        return;
+      }
+      const localStream = new MediaStream([...cameraStream.getVideoTracks(), ...microphoneTracks]);
+      local.current = localStream;
+      setStream(localStream);
+      setPhoneMicrophoneEnabled(microphoneTracks.length > 0);
       transition({ phase: 'connecting' });
 
       const ws = new WebSocket(`ws://${host}/?code=${encodeURIComponent(pin)}&role=phone`);
@@ -137,6 +153,7 @@ export function useStudioCamera() {
         local.current?.getTracks().forEach((track) => track.stop());
         local.current = null;
         setStream(null);
+        setPhoneMicrophoneEnabled(false);
         if (!terminalFailure) transition({ phase: 'disconnected' });
       };
       ws.onopen = () => {
@@ -171,7 +188,7 @@ export function useStudioCamera() {
         if (message.type === 'offer' && message.sdp) {
           const connection = new NativeRTCPeerConnection({ iceServers: [] });
           peer.current = connection;
-          (local.current ?? cameraStream).getTracks().forEach((track) => connection.addTrack(track, local.current ?? cameraStream));
+          (local.current ?? localStream).getTracks().forEach((track) => connection.addTrack(track, local.current ?? localStream));
           connection.onicecandidate = (event) => {
             if (event.candidate && ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: 'ice', candidate: event.candidate.toJSON() }));
@@ -214,6 +231,14 @@ export function useStudioCamera() {
     }
   }, [camera, disconnect, transition]);
 
+  const togglePhoneMicrophone = useCallback(() => {
+    const tracks = local.current?.getAudioTracks() ?? [];
+    if (!tracks.length) return;
+    const enabled = !tracks.some((track) => track.enabled);
+    tracks.forEach((track) => { track.enabled = enabled; });
+    setPhoneMicrophoneEnabled(enabled);
+  }, []);
+
   const flipCamera = useCallback(async () => {
     const currentStream = local.current;
     if (!currentStream) return;
@@ -235,9 +260,10 @@ export function useStudioCamera() {
         replacement.getTracks().forEach((item) => item.stop());
         return;
       }
-      currentStream.getTracks().forEach((item) => item.stop());
-      local.current = replacement;
-      setStream(replacement);
+      const nextStream = new MediaStream([...replacement.getVideoTracks(), ...currentStream.getAudioTracks()]);
+      currentStream.getVideoTracks().forEach((item) => item.stop());
+      local.current = nextStream;
+      setStream(nextStream);
     } catch {
       if (attempt !== attemptId.current) {
         replacement?.getTracks().forEach((track) => track.stop());
@@ -248,5 +274,5 @@ export function useStudioCamera() {
     }
   }, [camera]);
 
-  return { camera, connect, disconnect, flipCamera, phase: connection.phase, status, stream };
+  return { camera, connect, disconnect, flipCamera, phase: connection.phase, status, stream, phoneMicrophoneEnabled, togglePhoneMicrophone };
 }

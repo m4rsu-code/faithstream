@@ -4,7 +4,7 @@
     "slug": "faithstream-cam",
     "version": "1.0.0",
     "orientation": "default",
-    "icon": "./assets/faithstream-app-icon.png",
+    "icon": "./assets/camera-launcher-icon.png",
     "splash": {
       "image": "./assets/faithstream-adaptive-foreground.png",
       "resizeMode": "contain",
@@ -13,6 +13,14 @@
     "newArchEnabled": true,
     "plugins": [
       "expo-dev-client",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow FaithStream Cam to scan Studio pairing QR codes.",
+          "recordAudioAndroid": false,
+          "barcodeScannerEnabled": true
+        }
+      ],
       [
         "@config-plugins/react-native-webrtc",
         {
@@ -24,16 +32,17 @@
     "ios": {
       "supportsTablet": false,
       "infoPlist": {
-        "NSLocalNetworkUsageDescription": "FaithStream Cam connects to FaithStream Studio on your local Wi-Fi network."
+        "NSLocalNetworkUsageDescription": "FaithStream Cam connects to FaithStream Studio on your local Wi-Fi network.",
+        "NSMicrophoneUsageDescription": "FaithStream Cam can send your phone microphone audio to FaithStream Studio when you enable Share phone microphone."
       }
     },
     "android": {
       "package": "com.anonymous.faithstreamcam",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/faithstream-adaptive-foreground.png",
+        "foregroundImage": "./assets/camera-launcher-icon.png",
         "backgroundColor": "#0b1b28"
       },
-      "permissions": ["CAMERA", "INTERNET"],
+      "permissions": ["CAMERA", "INTERNET", "RECORD_AUDIO"],
       "usesCleartextTraffic": true,
       "softwareKeyboardLayoutMode": "resize"
     }
