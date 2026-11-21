@@ -99,6 +99,7 @@ const Header: React.FC<HeaderProps> = ({
   const [notifications, setNotifications] = useState<AppNotification[]>(readNotifications);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatusEvent>({ status: 'idle' });
+  const lastNotifiedUpdateStatus = useRef<UpdateStatusEvent['status']>('idle');
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const notificationPanelRef = useRef<HTMLDivElement>(null);
   const profileMenuRef = useRef<HTMLDivElement>(null);
@@ -129,20 +130,28 @@ const Header: React.FC<HeaderProps> = ({
     return () => unsubscribe?.();
   }, []);
 
-  const updateButtonLabel = updateStatus.status === 'checking'
-    ? 'Checking…'
+  useEffect(() => {
+    if (updateStatus.status === 'available' && lastNotifiedUpdateStatus.current !== 'available') {
+      window.dispatchEvent(new CustomEvent('faithstream:notification', { detail: {
+        id: `studio-update-${Date.now()}`,
+        title: 'FaithStream Studio update available',
+        message: 'A new update is downloading. The Update button beside the logo will let you install it when it is ready.',
+        createdAt: Date.now(),
+        read: false,
+        kind: 'info',
+      } }));
+    }
+    lastNotifiedUpdateStatus.current = updateStatus.status;
+  }, [updateStatus.status]);
+
+  const updateButtonLabel = updateStatus.status === 'available'
+    ? 'Update available'
     : updateStatus.status === 'downloading'
       ? 'Downloading…'
-      : updateStatus.status === 'downloaded'
-        ? 'Restart to update'
-        : updateStatus.status === 'not-available'
-          ? 'Up to date'
-          : updateStatus.status === 'error'
-            ? 'Retry update'
-            : 'Check updates';
+      : 'Install update';
+  const showUpdateButton = ['available', 'downloading', 'downloaded'].includes(updateStatus.status);
   const handleUpdateButton = () => {
     if (updateStatus.status === 'downloaded') void window.faithstreamWindow?.installAppUpdate();
-    else void window.faithstreamWindow?.checkForAppUpdates();
   };
 
   useEffect(() => {
@@ -295,17 +304,17 @@ const Header: React.FC<HeaderProps> = ({
           <span className="select-none text-sm font-semibold tracking-wide text-white">
             FaithStream Studio
           </span>
-          <button
+          {showUpdateButton && <button
             type="button"
             onClick={handleUpdateButton}
-            disabled={updateStatus.status === 'checking' || updateStatus.status === 'downloading'}
-            title={updateStatus.message || 'Check for FaithStream Studio updates'}
+            disabled={updateStatus.status !== 'downloaded'}
+            title={updateStatus.message || 'FaithStream Studio update'}
             aria-label={updateButtonLabel}
-            className={`ml-2 inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition disabled:cursor-wait disabled:opacity-70 ${updateStatus.status === 'downloaded' ? 'border-brand/60 bg-brand text-navy hover:bg-brand/90' : 'border-white/15 bg-white/5 text-white/75 hover:border-white/25 hover:bg-white/10 hover:text-white'}`}
+            className={`ml-2 inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2 text-[11px] font-semibold transition disabled:cursor-wait disabled:opacity-90 ${updateStatus.status === 'downloaded' ? 'border-brand/60 bg-brand text-navy hover:bg-brand/90' : 'border-brand/35 bg-brand/10 text-brand'}`}
           >
             {updateStatus.status === 'downloaded' ? <Download size={12} /> : <RefreshCw size={12} className={updateStatus.status === 'checking' || updateStatus.status === 'downloading' ? 'animate-spin' : ''} />}
             <span>{updateButtonLabel}</span>
-          </button>
+          </button>}
         </div>
         <div className="flex h-full" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
           <button aria-label="Minimize window" onClick={() => void window.faithstreamWindow?.minimize()} className="flex w-11 items-center justify-center text-white/70 hover:bg-white/10 hover:text-white"><Minus size={14} /></button>

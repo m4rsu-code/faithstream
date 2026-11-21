@@ -298,6 +298,10 @@ const readSavedPresentations = (): SavedPresentation[] => {
   } catch { return []; }
 };
 
+const presentationBackgroundIds = (presentations: SavedPresentation[]) => [...new Set(presentations
+  .flatMap((presentation) => presentation.slides.map((slide) => slide.bgAssetId))
+  .filter((id): id is string => typeof id === 'string' && id.startsWith('folder-default-')))];
+
 const readStudioMedia = async (): Promise<StudioMedia[]> => {
   const request = indexedDB.open(getAccountDatabaseName('faithstream.media'), 1);
   const db = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -1387,6 +1391,11 @@ export default function Studio() {
   const [savedPresentations, setSavedPresentations] = useState<SavedPresentation[]>([]);
   const [mediaUrls, setMediaUrls] = useState<StudioMediaUrlMap>({});
   const mediaUrlsRef = useRef(mediaUrls);
+  const backgroundThumbnailRequestKey = [...new Set([
+    ...presentationBackgroundIds(readSavedPresentations()),
+    ...[...scenes, ...slideshowScenes].flatMap((scene) => scene.slides.map((slide) => slide.bgAssetId)
+      .filter((id): id is string => typeof id === 'string' && id.startsWith('folder-default-'))),
+  ])].sort().join('|');
   const [addSceneOpen, setAddSceneOpen] = useState(false);
   const [scripturePickerOpen, setScripturePickerOpen] = useState(false);
   const [pendingScriptureDesign, setPendingScriptureDesign] = useState<{ reference: string; verses: SelectedScriptureVerse[] } | null>(null);
@@ -2022,6 +2031,7 @@ export default function Studio() {
   useEffect(() => {
     let cancelled = false;
     let release: () => void = () => {};
+    const bridge = window.faithstreamWindow;
     void readStudioMediaUrlMap().then((result) => {
       release = result.release;
       if (cancelled) { release(); return; }
@@ -2036,8 +2046,26 @@ export default function Studio() {
       if (!cancelled) markStartupResourceReady('studio-media');
       /* Scenes can still use presentation slides without local media. */
     });
-    return () => { cancelled = true; release(); };
+    const unsubscribe = bridge?.onPresentationBackgroundsChanged(() => {
+      void readStudioMediaUrlMap().then((result) => {
+        if (cancelled) { result.release(); return; }
+        sourceMediaReleases.current.push(result.release);
+        mediaUrlsRef.current = result.mediaUrls;
+        setMediaUrls(result.mediaUrls);
+        setScenes((current) => current.map((scene) => hydrateSceneMedia(scene, result.mediaUrls)));
+        setSlideshowScenes((current) => current.map((scene) => hydrateSceneMedia(scene, result.mediaUrls)));
+      }).catch(() => { /* Keep existing previews if the thumbnail refresh fails. */ });
+    });
+    return () => { cancelled = true; release(); unsubscribe?.(); };
   }, []);
+
+  // Built-in video previews are cached per computer. Generate only backgrounds in saved decks
+  // and scenes, then refresh the cards above after the thumbnails are ready.
+  useEffect(() => {
+    if (!backgroundThumbnailRequestKey) return;
+    const ids = backgroundThumbnailRequestKey.split('|');
+    void window.faithstreamWindow?.preparePresentationBackgroundThumbnails(ids);
+  }, [backgroundThumbnailRequestKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2821,6 +2849,7 @@ export default function Studio() {
       mobileCamPairingDetails.current.set(sourceId, pairingDetails);
       setMobileCamPairing({ ...pairingDetails, connected: false, remainingSeconds: 180 });
       return await new Promise<{ stream: MediaStream; deviceName: string; cleanup: () => void; phoneOrientation?: 'portrait' | 'landscape' }>((resolve, reject) => {
+        const pairingStartedAt = Date.now();
         const socket = new WebSocket(`ws://127.0.0.1:${pairing.port}/?code=${pairing.code}&role=studio`);
         const peer = new RTCPeerConnection({ iceServers: [] });
         const queuedIce: RTCIceCandidateInit[] = [];
@@ -2829,6 +2858,8 @@ export default function Studio() {
         let intentionallyClosed = false;
         let remoteStream: MediaStream | null = null;
         let phoneOrientation: 'portrait' | 'landscape' = 'portrait';
+        let readyTimer: number | undefined;
+        let readyScheduled = false;
         const discardPairing = () => {
           mobileCamPairingDetails.current.delete(sourceId);
           void window.faithstreamWindow?.stopMobileCamPairing(sourceId);
@@ -2836,12 +2867,12 @@ export default function Studio() {
         };
         const cleanup = () => {
           intentionallyClosed = true;
-          window.clearTimeout(timeout); peer.close(); socket.close();
+          window.clearTimeout(timeout); if (readyTimer !== undefined) window.clearTimeout(readyTimer); peer.close(); socket.close();
           void window.faithstreamWindow?.stopMobileCamPairing(sourceId);
         };
         const timeout = window.setTimeout(() => {
           if (finished) return;
-          finished = true; peer.close(); socket.close();
+          finished = true; if (readyTimer !== undefined) window.clearTimeout(readyTimer); peer.close(); socket.close();
           discardPairing();
           reject(new Error('Phone camera did not connect. Check both devices are on the same Wi-Fi and the computer firewall allows FaithStream Studio.'));
         }, 120_000);
@@ -2872,14 +2903,27 @@ export default function Studio() {
           event.track.addEventListener('unmute', refreshSourceHealth);
           event.track.addEventListener('ended', refreshSourceHealth);
           if (!finished && activeRemoteStream?.getVideoTracks().some((track) => track.readyState === 'live')) {
-            finished = true; window.clearTimeout(timeout);
-            notifyMobileCamStatus(true, sourceId);
-            setMobileCamPairing(null);
-            resolve({ stream: activeRemoteStream, deviceName: `FaithStream Cam ${mobileCamSlot}`, cleanup, phoneOrientation });
+            if (!readyScheduled) {
+              readyScheduled = true;
+              setMobileCamPairing((current) => current?.sourceId === sourceId ? { ...current, connected: true } : current);
+              readyTimer = window.setTimeout(() => {
+                const readyStream = remoteStream;
+                if (intentionallyClosed || !readyStream?.getVideoTracks().some((track) => track.readyState === 'live')) {
+                  readyScheduled = false;
+                  setMobileCamPairing((current) => current?.sourceId === sourceId ? { ...current, connected: false } : current);
+                  return;
+                }
+                finished = true; window.clearTimeout(timeout);
+                notifyMobileCamStatus(true, sourceId);
+                setMobileCamPairing(null);
+                resolve({ stream: readyStream, deviceName: `FaithStream Cam ${mobileCamSlot}`, cleanup, phoneOrientation });
+              }, Math.max(0, 1000 - (Date.now() - pairingStartedAt)));
+            }
             return;
           }
+          const hasLiveVideo = activeRemoteStream.getVideoTracks().some((track) => track.readyState === 'live');
+          if (!hasLiveVideo) return;
           notifyMobileCamStatus(true, sourceId);
-          setMobileCamPairing(null);
           if (finished && sourceId !== undefined && activeRemoteStream) {
             sourceStreams.current.set(sourceId, activeRemoteStream);
             setSources((list) => list.map((item) => item.id === sourceId ? { ...item, stream: activeRemoteStream } : item));
@@ -2887,13 +2931,13 @@ export default function Studio() {
         };
         socket.onerror = () => {
           if (finished) return;
-          finished = true; window.clearTimeout(timeout); peer.close();
+          finished = true; window.clearTimeout(timeout); if (readyTimer !== undefined) window.clearTimeout(readyTimer); peer.close();
           discardPairing();
           reject(new Error('Could not open the local camera connection. Allow FaithStream Studio through the computer firewall.'));
         };
         socket.onclose = () => {
           if (!finished) {
-            finished = true; window.clearTimeout(timeout); peer.close();
+            finished = true; window.clearTimeout(timeout); if (readyTimer !== undefined) window.clearTimeout(readyTimer); peer.close();
             discardPairing();
             reject(new Error('Phone camera pairing was canceled or disconnected.'));
           } else {
@@ -4378,7 +4422,7 @@ export default function Studio() {
             <div className="mt-5 grid grid-cols-[136px_minmax(0,1fr)] gap-4 rounded-xl border border-white/10 bg-black/20 p-4">
               <div className="flex flex-col items-center gap-2">
                 {mobileCamPairing.connected
-                  ? <div className="flex h-32 w-32 items-center justify-center rounded-lg border border-emerald-400/20 bg-emerald-400/10 text-center text-xs font-semibold text-emerald-200">Phone connected</div>
+                  ? <div className="flex h-32 w-32 flex-col items-center justify-center gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/10 text-center text-xs font-semibold text-emerald-200"><Loader2 size={18} className="animate-spin" />Preparing camera…</div>
                   : <MobileCamPairingQr pairing={mobileCamPairing} />}
                 {!mobileCamPairing.connected && <span className="text-center text-[10px] font-semibold text-warm-white/65">Scan with FaithStream Cam</span>}
               </div>
@@ -4390,7 +4434,7 @@ export default function Studio() {
                 {!mobileCamPairing.connected && <p className="mt-2 text-[11px] leading-relaxed text-warm-white/55">Code refreshes in {Math.floor((mobileCamPairing.remainingSeconds ?? 180) / 60)}:{String((mobileCamPairing.remainingSeconds ?? 180) % 60).padStart(2, '0')}. The QR updates with it.</p>}
               </div>
             </div>
-            <p role="status" className={`mt-4 text-sm ${mobileCamPairing.connected ? 'text-emerald-300' : mobileCamPairing.reconnecting ? 'text-amber-200' : 'text-warm-white/70'}`}>{mobileCamPairing.connected ? 'Phone camera connected. You can position it in Preview setup.' : mobileCamPairing.reconnecting ? 'Disconnected · waiting for the phone to reconnect…' : 'Waiting for your phone to connect…'}</p>
+            <p role="status" className={`mt-4 flex items-center gap-2 text-sm ${mobileCamPairing.connected ? 'text-emerald-300' : mobileCamPairing.reconnecting ? 'text-amber-200' : 'text-warm-white/70'}`}>{mobileCamPairing.connected ? <><Loader2 size={14} className="animate-spin" /> Preparing the camera feed…</> : mobileCamPairing.reconnecting ? 'Disconnected · waiting for the phone to reconnect…' : 'Waiting for your phone to connect…'}</p>
             {mobileCamPairing.refreshError && <p role="alert" className="mt-2 text-xs text-amber-200">{mobileCamPairing.refreshError}</p>}
             <div className="mt-5 flex justify-end"><button onClick={() => { if (!mobileCamPairing.connected && !mobileCamPairing.reconnecting) { void window.faithstreamWindow?.stopMobileCamPairing(mobileCamPairing.sourceId); mobileCamPairingDetails.current.delete(mobileCamPairing.sourceId); } setMobileCamPairing(null); }} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy">{mobileCamPairing.connected || mobileCamPairing.reconnecting ? 'Close' : 'Cancel pairing'}</button></div>
           </section>

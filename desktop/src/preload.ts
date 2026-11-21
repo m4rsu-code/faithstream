@@ -18,7 +18,7 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
   resolveStudioMusicFiles: (assets: { id: string; name: string; path: string; createdAt: number }[]) => ipcRenderer.invoke('studio:music:resolve', assets) as Promise<{ id: string; name: string; path: string; createdAt: number; url: string; available: boolean }[]>,
   removeStudioMusicFile: (id: string) => ipcRenderer.invoke('studio:music:remove', id) as Promise<boolean>,
   listPresentationBackgrounds: () => ipcRenderer.invoke('presentation:backgrounds:list') as Promise<{ id: string; name: string; type: 'image' | 'video'; collection: string; url: string; size: number; thumbnailUrl?: string }[]>,
-  preparePresentationBackgroundThumbnails: () => ipcRenderer.invoke('presentation:backgrounds:prepare-thumbnails') as Promise<boolean>,
+  preparePresentationBackgroundThumbnails: (assetIds?: string[]) => ipcRenderer.invoke('presentation:backgrounds:prepare-thumbnails', assetIds) as Promise<boolean>,
   onPresentationBackgroundsChanged: (callback: () => void) => {
     const listener = () => callback();
     ipcRenderer.on('presentation:backgrounds:changed', listener);

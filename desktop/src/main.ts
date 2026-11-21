@@ -898,7 +898,8 @@ app.whenReady().then(() => {
   if (app.isPackaged && process.platform === 'win32' && isUpdateFeedConfigured) {
     autoUpdater.setFeedURL({ url: __FAITHSTREAM_UPDATE_FEED_URL__.trim().replace(/\/$/, '') });
     autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking', 'Checking for updates…'));
-    autoUpdater.on('update-available', () => sendUpdateStatus('downloading', 'A new update is downloading.'));
+    autoUpdater.on('update-available', () => sendUpdateStatus('available', 'A new FaithStream Studio update is available. Downloading it now.'));
+    autoUpdater.on('download-progress', (progress) => sendUpdateStatus('downloading', `Downloading the update… ${Math.round(progress.percent)}%`));
     autoUpdater.on('update-not-available', () => {
       updateCheckInProgress = false;
       sendUpdateStatus('not-available', 'You’re using the latest version.');
@@ -1083,9 +1084,13 @@ app.whenReady().then(() => {
     }
     return items.sort((a, b) => a.collection.localeCompare(b.collection) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
   });
-  ipcMain.handle('presentation:backgrounds:prepare-thumbnails', async (event) => {
+  ipcMain.handle('presentation:backgrounds:prepare-thumbnails', async (event, requestedIds: unknown) => {
     if (!isTrustedMainSender(event) || !ffmpegPath) return false;
     try {
+      const requested = Array.isArray(requestedIds)
+        ? new Set(requestedIds.filter((id): id is string => typeof id === 'string' && id.startsWith('folder-default-')).map((id) => id.slice('folder-default-'.length)))
+        : null;
+      if (requested && requested.size === 0) return true;
       const folder = bundledBackgroundsPath();
       const cacheFolder = backgroundThumbnailsPath();
       await Promise.all([mkdir(folder, { recursive: true }), mkdir(cacheFolder, { recursive: true })]);
@@ -1094,6 +1099,8 @@ app.whenReady().then(() => {
         const extension = path.extname(entry.name).toLowerCase();
         if (!entry.isFile() || !STUDIO_BACKGROUND_EXTENSIONS.has(extension) || ['.png', '.jpg', '.jpeg', '.webp'].includes(extension)) continue;
         const sourcePath = path.join(folder, entry.name);
+        const assetId = createHash('sha256').update(`Built-in:${entry.name}`).digest('hex').slice(0, 24);
+        if (requested && !requested.has(assetId)) continue;
         const info = await stat(sourcePath);
         if (!info.isFile()) continue;
         const key = createHash('sha256').update(`${sourcePath}:${info.size}:${info.mtimeMs}`).digest('hex');

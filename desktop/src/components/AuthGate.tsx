@@ -5,7 +5,6 @@ import { ArrowRight, Eye, EyeOff, LockKeyhole, Mail, Minus, Square, X } from 'lu
 import FaithStreamLogo from '../assets/img/Logo.png';
 import LoadingAnimation from '../assets/img/loading.gif';
 import { apiFetch, apiUrl } from '../api/client';
-import { checkBackendConnection, type BackendConnectionStatus } from '../api/connection';
 import LicenseLockedScreen from './LicenseLockedScreen';
 import { LICENSE_REQUIRED_EVENT, LICENSE_REQUIRED_MESSAGE, isLicenseRequiredPayload } from '../utils/license';
 
@@ -249,7 +248,6 @@ export const cancelLocalAccountDeletionRequest = async (): Promise<{ message: st
 
 export default function AuthGate({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  const [backendConnection, setBackendConnection] = useState<BackendConnectionStatus | 'checking'>('checking');
   const [signedIn, setSignedIn] = useState(false);
   const [checkingSession, setCheckingSession] = useState(true);
   const [mode, setMode] = useState<AuthMode>('login');
@@ -268,27 +266,6 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   const [licenseMessage, setLicenseMessage] = useState('');
   const [licenseDismissed, setLicenseDismissed] = useState(false);
   const licenseDismissedRef = useRef(false);
-
-  useEffect(() => {
-    let disposed = false;
-    let activeController: AbortController | null = null;
-
-    const refreshConnection = async () => {
-      activeController?.abort();
-      const controller = new AbortController();
-      activeController = controller;
-      const status = await checkBackendConnection(controller.signal);
-      if (!disposed && !controller.signal.aborted) setBackendConnection(status);
-    };
-
-    void refreshConnection();
-    const timer = window.setInterval(() => void refreshConnection(), 30000);
-    return () => {
-      disposed = true;
-      activeController?.abort();
-      window.clearInterval(timer);
-    };
-  }, []);
 
   const switchAuthMode = (nextMode: AuthMode) => {
     setError('');
@@ -616,13 +593,6 @@ export default function AuthGate({ children }: { children: ReactNode }) {
             <p className="mt-2 text-sm text-warm-white/55">{isRegister ? 'Create an account with your Gmail address.' : isForgot ? 'Enter your Gmail address and we’ll email you a password reset link.' : 'Sign in to your FaithStream Studio account.'}</p>
           </div>
 
-          <div role="status" aria-live="polite" className={`mb-5 flex items-center gap-2 rounded-lg border px-3 py-2 text-xs ${backendConnection === 'connected' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : backendConnection === 'checking' ? 'border-white/10 bg-white/[.03] text-warm-white/55' : 'border-amber-400/20 bg-amber-400/10 text-amber-100'}`}>
-            <span className={`h-2 w-2 shrink-0 rounded-full ${backendConnection === 'connected' ? 'bg-emerald-400' : backendConnection === 'checking' ? 'animate-pulse bg-warm-white/45' : 'bg-amber-400'}`} />
-            {backendConnection === 'connected' ? 'Server and database connected'
-              : backendConnection === 'database-unavailable' ? 'Server reached, but its database is unavailable'
-                : backendConnection === 'unreachable' ? 'Cannot reach the FaithStream server. Check the server address and network.'
-                  : 'Checking FaithStream server connection…'}
-          </div>
 
           <form onSubmit={(event) => { void submit(event); }} className="space-y-4">
             {isRegister && <label className="block text-xs font-medium text-warm-white/70">Your name
