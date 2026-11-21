@@ -1,4 +1,4 @@
-export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api'
+export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://192.168.1.189:3000/api'
 export const WEBSITE_TOKEN_KEY = 'faithstream.website-token'
 export const WEBSITE_USER_KEY = 'faithstream.website-user'
 export const WEBSITE_ACCOUNT_EVENT = 'faithstream:website-account-changed'

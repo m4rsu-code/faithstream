@@ -57,16 +57,6 @@ export default function Downloads() {
           <small>Choose the latest Android release on GitHub.</small>
         </article>
 
-        {/* iOS Companion Card */}
-        <article className="download-card download-card-muted">
-          <div className="download-card-icon">
-            <Icon name="heart" size={24} />
-          </div>
-          <span className="download-platform">MOBILE · iOS</span>
-          <h2>iPhone companion</h2>
-          <p>An iOS download package is not published yet. Check back here for availability.</p>
-          <span className="availability-pill">NOT AVAILABLE YET</span>
-        </article>
       </div>
 
       <div className="section-container download-note">

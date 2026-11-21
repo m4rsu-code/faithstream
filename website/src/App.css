@@ -284,10 +284,9 @@ h1, h2, h3, p { margin: 0; }
 .inner-page-hero h1 { margin-top: 21px; font-size: clamp(43px,6vw,68px); }
 .inner-page-hero h1 em { color: var(--gold-light); }
 .inner-page-hero > p { max-width: 545px; margin: 20px auto 0; color: #a6b2b8; font-size: 13px; line-height: 1.85; }
-.download-cards { display: grid; grid-template-columns: repeat(3,1fr); gap: 13px; }
+.download-cards { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 13px; }
 .download-card { display: flex; min-height: 310px; flex-direction: column; align-items: flex-start; padding: 25px; border: 1px solid rgba(255,255,255,.12); background: rgba(18,38,54,.8); }
 .download-card-featured { border-color: rgba(211,146,80,.55); background: linear-gradient(160deg, rgba(211,146,80,.09), rgba(18,38,54,.9) 40%); }
-.download-card-muted { background: rgba(255,255,255,.025); }
 .download-card-icon { display: grid; width: 44px; height: 44px; place-items: center; color: var(--gold-light); border: 1px solid rgba(211,146,80,.25); background: rgba(211,146,80,.09); }
 .download-platform { margin-top: 20px; color: #e1ae78; font-size: 10px; font-weight: 800; letter-spacing: .14em; }
 .download-card h2 { margin-top: 7px; color: #f3f1ea; font-size: 19px; font-weight: 550; letter-spacing: -.03em; }
@@ -430,7 +429,6 @@ h1, h2, h3, p { margin: 0; }
   .video-chapters { grid-column: 1/-1; grid-template-columns: repeat(3,1fr); gap: 12px; }
   .video-chapters span { border-bottom: 0; }
   .download-cards { grid-template-columns: repeat(2,1fr); }
-  .download-card-muted { grid-column: 1/-1; min-height: 220px; }
   .account-shell { grid-template-columns: minmax(0,1fr); gap: 30px; max-width: 560px; }
   .account-intro h1 { font-size: clamp(38px,8vw,52px); }
 }
@@ -521,7 +519,7 @@ h1, h2, h3, p { margin: 0; }
   .inner-page-hero h1 { font-size: 45px; }
   .inner-page-hero > p { font-size: 13px; }
   .download-cards { grid-template-columns: 1fr; }
-  .download-card, .download-card-muted { grid-column: auto; min-height: 275px; padding: 21px; }
+  .download-card { grid-column: auto; min-height: 275px; padding: 21px; }
   .download-card p { min-height: auto; }
   .plan-preview-card { grid-template-columns: 42px 1fr; gap: 14px; padding: 18px; }
   .plan-preview-card .button { grid-column: 1/-1; justify-self: start; }
