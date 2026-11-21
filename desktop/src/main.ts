@@ -1,6 +1,6 @@
 import { app, autoUpdater, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, protocol, safeStorage, screen, session, shell } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { createReadStream, existsSync, watch as watchDirectory, type FSWatcher } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, watch as watchDirectory, type FSWatcher } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,13 +8,15 @@ import { Readable, Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 import started from 'electron-squirrel-startup';
-import ffmpegStaticPath from 'ffmpeg-static';
+import type { ApiRequestBody, ApiRequestPayload, ApiResponsePayload } from './shared/apiContracts';
 import type { RecordingStatusEvent, StreamStatus } from './shared/streamContracts';
 import type { UpdateStatusEvent } from './shared/updateContracts';
 protocol.registerSchemesAsPrivileged([{ scheme: 'faithstream-local', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } }]);
-// In a packaged app the binary is unpacked next to app.asar (see forge.config.mts).
-// The OS cannot execute a file from inside the archive, so point spawn() at the unpacked copy.
-const ffmpegPath = ffmpegStaticPath ? ffmpegStaticPath.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1') : null;
+// Ship the executable as a resource so Electron can always resolve it outside app.asar.
+const ffmpegCandidatePath = app.isPackaged
+  ? path.join(process.resourcesPath, 'ffmpeg.exe')
+  : path.resolve(__dirname, '../../node_modules/ffmpeg-static/ffmpeg.exe');
+const ffmpegPath = existsSync(ffmpegCandidatePath) ? ffmpegCandidatePath : null;
 const { WebSocketServer } = require('ws') as { WebSocketServer: new (options: { host: string; port: number; maxPayload?: number }) => any };
 
 type StreamStartOptions = {
@@ -51,9 +53,11 @@ type RecordingSession = {
   active: boolean;
   failed?: boolean;
 };
+type PresentationBundleWriteSession = { window: BrowserWindow; filePath: string; writer: ReturnType<typeof createWriteStream>; error?: string };
 
 let streamSession: StreamSession | null = null;
 let recordingSession: RecordingSession | null = null;
+const presentationBundleWriters = new Map<number, PresentationBundleWriteSession>();
 const studioDisplayWindows = new Map<number, BrowserWindow>();
 const STUDIO_AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac', '.wma', '.webm']);
 let authWindow: BrowserWindow | null = null;
@@ -176,6 +180,89 @@ const isAppUrl = (rawUrl: string | undefined | null) => {
 /** IPC that touches files, the encoder, or the network must come from the main Studio window's own page. */
 const isTrustedMainSender = (event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent) =>
   isAuthWindow(event.sender) && isAppUrl(event.senderFrame?.url);
+
+const FAITHSTREAM_API_BASE_URL = typeof __FAITHSTREAM_API_URL__ === 'string' && __FAITHSTREAM_API_URL__.trim()
+  ? __FAITHSTREAM_API_URL__.trim().replace(/\/+$/, '')
+  : 'http://127.0.0.1:8000/api';
+
+const makeApiResponse = (status: number, message: string): ApiResponsePayload => ({
+  status,
+  statusText: status === 0 ? 'Network Error' : 'Request Error',
+  headers: { 'content-type': 'application/json' },
+  body: status === 0 ? '' : JSON.stringify({ message }),
+});
+
+const buildApiRequestBody = (body: ApiRequestBody | undefined): BodyInit | undefined => {
+  if (!body) return undefined;
+  if (body.kind === 'text') return body.value;
+  const form = new FormData();
+  for (const field of body.fields) {
+    if ('value' in field) form.append(field.name, field.value);
+    else {
+      const fileBytes = Uint8Array.from(field.file.data).buffer as ArrayBuffer;
+      form.append(field.name, new Blob([fileBytes], { type: field.file.type }), field.file.name);
+    }
+  }
+  return form;
+};
+
+const apiBaseUrl = new URL(FAITHSTREAM_API_BASE_URL);
+const apiBasePath = apiBaseUrl.pathname.replace(/\/+$/, '');
+
+const sendApiRequest = async (event: Electron.IpcMainInvokeEvent, request: ApiRequestPayload): Promise<ApiResponsePayload> => {
+  if (!isTrustedMainSender(event)) return makeApiResponse(403, 'This request is not allowed.');
+  if (!request || typeof request.path !== 'string' || request.path.length > 2048 || request.path.startsWith('/') || request.path.includes('\\') || request.path.includes('://')) {
+    return makeApiResponse(400, 'The API path is invalid.');
+  }
+
+  const method = typeof request.method === 'string' ? request.method.toUpperCase() : '';
+  if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) return makeApiResponse(405, 'This API method is not allowed.');
+
+  let target: URL;
+  try {
+    target = new URL(request.path, `${FAITHSTREAM_API_BASE_URL}/`);
+  } catch {
+    return makeApiResponse(400, 'The API path is invalid.');
+  }
+  if (target.origin !== apiBaseUrl.origin || !target.pathname.startsWith(`${apiBasePath}/`)) {
+    return makeApiResponse(400, 'The API path is outside the configured service.');
+  }
+
+  const headers = new Headers();
+  for (const [name, value] of request.headers ?? []) {
+    const normalizedName = name.toLowerCase();
+    if (!['accept', 'authorization', 'content-type', 'x-requested-with'].includes(normalizedName) || typeof value !== 'string' || value.length > 8192) {
+      return makeApiResponse(400, 'The API request headers are invalid.');
+    }
+    headers.set(normalizedName, value);
+  }
+
+  let body: BodyInit | undefined;
+  try {
+    body = buildApiRequestBody(request.body);
+  } catch {
+    return makeApiResponse(400, 'The API request body is invalid.');
+  }
+  const bodySize = request.body?.kind === 'text'
+    ? Buffer.byteLength(request.body.value)
+    : request.body?.kind === 'form'
+      ? request.body.fields.reduce((size, field) => size + ('value' in field ? Buffer.byteLength(field.value) : field.file.data.byteLength), 0)
+      : 0;
+  if (bodySize > 15 * 1024 * 1024) return makeApiResponse(413, 'The API request is too large.');
+
+  try {
+    const response = await fetch(target, { method, headers, ...(body ? { body } : {}), redirect: 'error' });
+    const contentType = response.headers.get('content-type');
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      headers: contentType ? { 'content-type': contentType } : {},
+      body: await response.text(),
+    };
+  } catch {
+    return makeApiResponse(0, 'Could not reach the FaithStream API. Check the server address and network connection.');
+  }
+};
 
 /** Monitor output windows need read access to the same built-in background library as Studio. */
 const isStudioDisplayWindow = (sender: Electron.WebContents) =>
@@ -739,6 +826,8 @@ const createWindow = () => {
     minHeight: 620,
     autoHideMenuBar: true,
     title: 'FaithStream Studio',
+    show: false,
+    backgroundColor: '#101923',
 
     // Use your custom icon during development.
     // The packaged app uses the icon configured in forge.config.mts.
@@ -762,6 +851,10 @@ const createWindow = () => {
       webSecurity: true,
     },
   });
+  const mainWindowContentsId = mainWindow.webContents.id;
+  mainWindow.once('ready-to-show', () => {
+    if (!mainWindow.isDestroyed()) mainWindow.show();
+  });
   authWindow = mainWindow;
   protectWindowNavigation(mainWindow);
   mainWindow.webContents.on('before-input-event', (event, input) => {
@@ -773,6 +866,12 @@ const createWindow = () => {
     if (authWindow === mainWindow) authWindow = null;
     if (streamSession?.window === mainWindow) stopStream();
     if (recordingSession?.window === mainWindow) stopRecording(mainWindow);
+    const bundleWrite = presentationBundleWriters.get(mainWindowContentsId);
+    if (bundleWrite) {
+      presentationBundleWriters.delete(mainWindowContentsId);
+      bundleWrite.writer.destroy();
+      void rm(bundleWrite.filePath, { force: true }).catch(() => undefined);
+    }
   });
 
   // Load the Vite development server or the packaged renderer.
@@ -792,6 +891,10 @@ const createWindow = () => {
 };
 
 app.whenReady().then(() => {
+  // Squirrel starts the app with an install/update argument to register shortcuts.
+  // Do not create the Studio window during that installer hook.
+  if (started) return;
+
   if (app.isPackaged && process.platform === 'win32' && isUpdateFeedConfigured) {
     autoUpdater.setFeedURL({ url: __FAITHSTREAM_UPDATE_FEED_URL__.trim().replace(/\/$/, '') });
     autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking', 'Checking for updates…'));
@@ -854,6 +957,7 @@ app.whenReady().then(() => {
     }
   });
 
+  ipcMain.handle('api:request', sendApiRequest);
   ipcMain.handle('auth:token:get', async (event) => {
     if (!isTrustedMainSender(event) || !safeStorage.isEncryptionAvailable()) return null;
     try {
@@ -1028,6 +1132,72 @@ app.whenReady().then(() => {
     } catch {
       return { ok: false, message: 'Could not save the file there. Check that the drive is connected and not full.' };
     }
+  });
+
+  ipcMain.handle('presentation:portable-export:start', async (event, suggestedName: unknown) => {
+    if (!isTrustedMainSender(event)) return { ok: false, message: 'Export presentations from FaithStream Studio.' };
+    if (presentationBundleWriters.has(event.sender.id)) return { ok: false, message: 'A presentation backup is already being saved.' };
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window) return { ok: false, message: 'The Studio window is unavailable.' };
+    const safeName = (typeof suggestedName === 'string' ? path.basename(suggestedName) : 'FaithStream presentation')
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').slice(0, 120) || 'FaithStream presentation';
+    const chosen = window
+      ? await dialog.showSaveDialog(window, { title: 'Save portable presentation', defaultPath: path.join(app.getPath('documents'), `${safeName}.fspresentation`), filters: [{ name: 'FaithStream portable presentation', extensions: ['fspresentation'] }] })
+      : await dialog.showSaveDialog({ title: 'Save portable presentation', defaultPath: path.join(app.getPath('documents'), `${safeName}.fspresentation`), filters: [{ name: 'FaithStream portable presentation', extensions: ['fspresentation'] }] });
+    if (chosen.canceled || !chosen.filePath) return { ok: false, canceled: true };
+    const filePath = chosen.filePath.toLowerCase().endsWith('.fspresentation') ? chosen.filePath : `${chosen.filePath}.fspresentation`;
+    const writer = createWriteStream(filePath);
+    const session: PresentationBundleWriteSession = { window, filePath, writer };
+    try {
+      await new Promise<void>((resolve, reject) => {
+        writer.once('open', () => resolve());
+        writer.once('error', reject);
+      });
+    } catch {
+      writer.destroy();
+      return { ok: false, message: 'Could not create the backup file. Check that the destination is writable.' };
+    }
+    writer.on('error', (error) => { session.error = error.message; });
+    presentationBundleWriters.set(event.sender.id, session);
+    return { ok: true };
+  });
+  ipcMain.handle('presentation:portable-export:write', async (event, payload: unknown) => {
+    const session = presentationBundleWriters.get(event.sender.id);
+    const chunk = ipcAudioBuffer(payload);
+    if (!isTrustedMainSender(event) || !session || session.window.webContents !== event.sender || !chunk || chunk.byteLength > 1024 * 1024) {
+      return { ok: false, message: 'The presentation backup stream is unavailable.' };
+    }
+    if (session.error) return { ok: false, message: session.error };
+    return new Promise<{ ok: boolean; message?: string }>((resolve) => {
+      session.writer.write(chunk, (error) => resolve(error ? { ok: false, message: error.message } : { ok: true }));
+    });
+  });
+  ipcMain.handle('presentation:portable-export:finish', async (event) => {
+    const session = presentationBundleWriters.get(event.sender.id);
+    if (!isTrustedMainSender(event) || !session || session.window.webContents !== event.sender) return { ok: false, message: 'The presentation backup stream is unavailable.' };
+    presentationBundleWriters.delete(event.sender.id);
+    const result = await new Promise<{ ok: boolean; message?: string }>((resolve) => {
+      session.writer.end(() => resolve(session.error ? { ok: false, message: session.error } : { ok: true }));
+      session.writer.once('error', (error) => resolve({ ok: false, message: error.message }));
+    });
+    if (!result.ok) {
+      await rm(session.filePath, { force: true }).catch(() => undefined);
+      return result;
+    }
+    return { ...result, filePath: session.filePath };
+  });
+  ipcMain.handle('presentation:portable-export:cancel', async (event) => {
+    const session = presentationBundleWriters.get(event.sender.id);
+    if (!isTrustedMainSender(event) || !session || session.window.webContents !== event.sender) return false;
+    presentationBundleWriters.delete(event.sender.id);
+    const closed = new Promise<void>((resolve) => {
+      if (session.writer.closed || session.writer.destroyed) { resolve(); return; }
+      session.writer.once('close', resolve);
+    });
+    session.writer.destroy();
+    await closed;
+    await rm(session.filePath, { force: true }).catch(() => undefined);
+    return true;
   });
 
   ipcMain.handle('media:optimize-video', async (event, sourcePath: unknown) => {

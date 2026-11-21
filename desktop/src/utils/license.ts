@@ -5,7 +5,7 @@
  * `{ license_required: true }`. Local features (Studio, presentations kept on this
  * computer, songbooks) keep working, so this must never sign the operator out.
  */
-import { API_BASE_URL } from './apiConfig';
+import { API_BASE_URL } from '../api/client';
 
 export const LICENSE_REQUIRED_EVENT = 'faithstream:license-required';
 

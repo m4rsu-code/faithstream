@@ -1,7 +1,12 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import type { ApiRequestPayload, ApiResponsePayload } from './shared/apiContracts';
 import type { RecordingStatusEvent, StreamStatusEvent } from './shared/streamContracts';
 
+const requestApi = (request: ApiRequestPayload): Promise<ApiResponsePayload> =>
+  ipcRenderer.invoke('api:request', request) as Promise<ApiResponsePayload>;
+
 contextBridge.exposeInMainWorld('faithstreamWindow', {
+  requestApi,
   getAuthToken: () => ipcRenderer.invoke('auth:token:get') as Promise<string | null>,
   getStreamSettings: () => ipcRenderer.invoke('stream-settings:get') as Promise<{ serverUrl: string; streamKey: string } | null>,
   saveStreamSettings: (settings: { serverUrl: string; streamKey: string }) => ipcRenderer.invoke('stream-settings:save', settings) as Promise<boolean>,
@@ -50,6 +55,13 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
     }>,
   saveTextFile: (suggestedName: string, content: string, kind: 'backup' | 'songbook') =>
     ipcRenderer.invoke('files:save-text', suggestedName, content, kind) as Promise<{ ok: boolean; canceled?: boolean; filePath?: string; message?: string }>,
+  startPortablePresentationExport: (suggestedName: string) =>
+    ipcRenderer.invoke('presentation:portable-export:start', suggestedName) as Promise<{ ok: boolean; canceled?: boolean; message?: string }>,
+  writePortablePresentationExportChunk: (chunk: Uint8Array) =>
+    ipcRenderer.invoke('presentation:portable-export:write', chunk) as Promise<{ ok: boolean; message?: string }>,
+  finishPortablePresentationExport: () =>
+    ipcRenderer.invoke('presentation:portable-export:finish') as Promise<{ ok: boolean; filePath?: string; message?: string }>,
+  cancelPortablePresentationExport: () => ipcRenderer.invoke('presentation:portable-export:cancel') as Promise<boolean>,
   minimize: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   close: () => ipcRenderer.invoke('window:close'),

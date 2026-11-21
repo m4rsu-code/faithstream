@@ -7,7 +7,7 @@
  * - Everything is stored on this computer in IndexedDB, per signed-in account.
  */
 import { getAccountDatabaseName, getAccountStorageKey } from './accountStorage';
-import { API_BASE_URL } from './apiConfig';
+import { apiFetch } from '../api/client';
 import { isLicenseRequiredPayload, notifyLicenseRequired } from './license';
 import { STANDARD_SONGBOOKS } from '../data/standardHymns';
 import { splitLyrics } from './slideLibrary';
@@ -96,7 +96,7 @@ const saveDeletedSongbookIds = (ids: string[]) => {
 };
 
 const accountSongbookRequest = async (token: string, path: string, init: RequestInit = {}) => {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await apiFetch(path, {
     ...init,
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...init.headers },
   });

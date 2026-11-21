@@ -1,7 +1,9 @@
 /// <reference types="@electron-forge/plugin-vite/forge-vite-env" />
 declare const __FAITHSTREAM_UPDATE_FEED_URL__: string;
+declare const __FAITHSTREAM_API_URL__: string;
 interface Window {
   faithstreamWindow?: {
+    requestApi: (request: import('./shared/apiContracts').ApiRequestPayload) => Promise<import('./shared/apiContracts').ApiResponsePayload>;
     getAuthToken: () => Promise<string | null>;
     getStreamSettings: () => Promise<{ serverUrl: string; streamKey: string } | null>;
     saveStreamSettings: (settings: { serverUrl: string; streamKey: string }) => Promise<boolean>;
@@ -38,6 +40,10 @@ interface Window {
       message?: string;
     }>;
     saveTextFile: (suggestedName: string, content: string, kind: 'backup' | 'songbook') => Promise<{ ok: boolean; canceled?: boolean; filePath?: string; message?: string }>;
+    startPortablePresentationExport: (suggestedName: string) => Promise<{ ok: boolean; canceled?: boolean; message?: string }>;
+    writePortablePresentationExportChunk: (chunk: Uint8Array) => Promise<{ ok: boolean; message?: string }>;
+    finishPortablePresentationExport: () => Promise<{ ok: boolean; filePath?: string; message?: string }>;
+    cancelPortablePresentationExport: () => Promise<boolean>;
     minimize: () => Promise<void>;
     toggleMaximize: () => Promise<boolean>;
     close: () => Promise<void>;

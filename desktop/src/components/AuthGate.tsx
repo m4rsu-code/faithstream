@@ -4,7 +4,8 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowRight, Eye, EyeOff, LockKeyhole, Mail, Minus, Square, X } from 'lucide-react';
 import FaithStreamLogo from '../assets/img/Logo.png';
 import LoadingAnimation from '../assets/img/loading.gif';
-import { API_BASE_URL } from '../utils/apiConfig';
+import { apiFetch, apiUrl } from '../api/client';
+import { checkBackendConnection, type BackendConnectionStatus } from '../api/connection';
 import LicenseLockedScreen from './LicenseLockedScreen';
 import { LICENSE_REQUIRED_EVENT, LICENSE_REQUIRED_MESSAGE, isLicenseRequiredPayload } from '../utils/license';
 
@@ -52,7 +53,7 @@ type AccountAccess =
  * computer is lost and the operator still sees what to do next.
  */
 const checkAccountAccess = async (token: string): Promise<AccountAccess> => {
-  const response = await fetch(`${API_BASE_URL}/user`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+  const response = await apiFetch('user', { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
   const data = await readJson(response) as { user?: ApiUser; message?: string };
   if (response.ok && data.user) return { status: 'ok', user: data.user };
   if (isLicenseRequiredPayload(data)) return { status: 'license', message: data.message?.trim() || LICENSE_REQUIRED_MESSAGE };
@@ -102,7 +103,7 @@ const saveUserProfile = (user: ApiUser) => {
     name: user.name,
     role: user.role,
     email: user.email_address,
-    photoUrl: user.profile_photo_url ? new URL(user.profile_photo_url, `${API_BASE_URL}/`).toString() : null,
+    photoUrl: user.profile_photo_url ? new URL(user.profile_photo_url, apiUrl('')).toString() : null,
     photoPosition: user.profile_photo_position ?? { x: 50, y: 50 },
     // The account's header title (empty when the account has not set one). Missing on older servers.
     ...(user.service_title !== undefined ? { serviceTitle: user.service_title ?? '' } : {}),
@@ -115,7 +116,7 @@ const saveUserProfile = (user: ApiUser) => {
 export const saveAccountServiceTitle = async (title: string): Promise<void> => {
   const token = await getStoredAuthToken();
   if (!token) throw new Error('Not signed in.');
-  const response = await fetch(`${API_BASE_URL}/user/service-title`, {
+  const response = await apiFetch('user/service-title', {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ service_title: title }),
@@ -128,7 +129,7 @@ export const saveAccountServiceTitle = async (title: string): Promise<void> => {
 export const signOutLocalAccount = () => {
   void (async () => {
     const token = await getStoredAuthToken().catch(() => null);
-    if (token) void fetch(`${API_BASE_URL}/logout`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }).catch(() => undefined);
+    if (token) void apiFetch('logout', { method: 'POST', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }).catch(() => undefined);
     await clearStoredAuthToken().catch(() => undefined);
     window.dispatchEvent(new Event('faithstream:logged-out'));
   })();
@@ -139,7 +140,7 @@ export const updateLocalAccountProfile = async (name: string, role: string): Pro
   try {
     const token = await getStoredAuthToken();
     if (!token) throw new Error('You must be signed in to update your profile.');
-    const response = await fetch(`${API_BASE_URL}/user`, {
+    const response = await apiFetch('user', {
       method: 'PATCH',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ name, role }),
@@ -163,7 +164,7 @@ export const updateLocalAccountProfilePhoto = async (photo: File): Promise<ApiUs
   if (!token) throw new Error('You must be signed in to update your profile photo.');
   const form = new FormData();
   form.append('photo', photo);
-  const response = await fetch(`${API_BASE_URL}/user/profile-photo`, {
+  const response = await apiFetch('user/profile-photo', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
     body: form,
@@ -180,7 +181,7 @@ export const updateLocalAccountProfilePhoto = async (photo: File): Promise<ApiUs
 export const removeLocalAccountProfilePhoto = async (): Promise<ApiUser> => {
   const token = await getStoredAuthToken();
   if (!token) throw new Error('You must be signed in to update your profile photo.');
-  const response = await fetch(`${API_BASE_URL}/user/profile-photo`, {
+  const response = await apiFetch('user/profile-photo', {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
@@ -193,7 +194,7 @@ export const removeLocalAccountProfilePhoto = async (): Promise<ApiUser> => {
 export const updateLocalAccountProfilePhotoPosition = async (position: ProfilePhotoPosition): Promise<ApiUser> => {
   const token = await getStoredAuthToken();
   if (!token) throw new Error('You must be signed in to adjust your profile photo.');
-  const response = await fetch(`${API_BASE_URL}/user/profile-photo/position`, {
+  const response = await apiFetch('user/profile-photo/position', {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify(position),
@@ -210,7 +211,7 @@ export const updateLocalAccountProfilePhotoPosition = async (position: ProfilePh
 export const getLocalAccountDeletionStatus = async (): Promise<AccountDeletionStatus> => {
   const token = await getStoredAuthToken();
   if (!token) throw new Error('You must be signed in to manage your account.');
-  const response = await fetch(`${API_BASE_URL}/user`, {
+  const response = await apiFetch('user', {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
   const data = await readJson(response) as { user?: ApiUser; message?: string };
@@ -221,7 +222,7 @@ export const getLocalAccountDeletionStatus = async (): Promise<AccountDeletionSt
 export const requestLocalAccountDeletion = async (password: string): Promise<{ message: string; status: AccountDeletionStatus }> => {
   const token = await getStoredAuthToken();
   if (!token) throw new Error('You must be signed in to request account deletion.');
-  const response = await fetch(`${API_BASE_URL}/user/deletion-request`, {
+  const response = await apiFetch('user/deletion-request', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ password }),
@@ -237,7 +238,7 @@ export const requestLocalAccountDeletion = async (password: string): Promise<{ m
 export const cancelLocalAccountDeletionRequest = async (): Promise<{ message: string; status: AccountDeletionStatus }> => {
   const token = await getStoredAuthToken();
   if (!token) throw new Error('You must be signed in to manage your account.');
-  const response = await fetch(`${API_BASE_URL}/user/deletion-request`, {
+  const response = await apiFetch('user/deletion-request', {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
@@ -248,6 +249,7 @@ export const cancelLocalAccountDeletionRequest = async (): Promise<{ message: st
 
 export default function AuthGate({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
+  const [backendConnection, setBackendConnection] = useState<BackendConnectionStatus | 'checking'>('checking');
   const [signedIn, setSignedIn] = useState(false);
   const [checkingSession, setCheckingSession] = useState(true);
   const [mode, setMode] = useState<AuthMode>('login');
@@ -266,6 +268,27 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   const [licenseMessage, setLicenseMessage] = useState('');
   const [licenseDismissed, setLicenseDismissed] = useState(false);
   const licenseDismissedRef = useRef(false);
+
+  useEffect(() => {
+    let disposed = false;
+    let activeController: AbortController | null = null;
+
+    const refreshConnection = async () => {
+      activeController?.abort();
+      const controller = new AbortController();
+      activeController = controller;
+      const status = await checkBackendConnection(controller.signal);
+      if (!disposed && !controller.signal.aborted) setBackendConnection(status);
+    };
+
+    void refreshConnection();
+    const timer = window.setInterval(() => void refreshConnection(), 30000);
+    return () => {
+      disposed = true;
+      activeController?.abort();
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const switchAuthMode = (nextMode: AuthMode) => {
     setError('');
@@ -367,7 +390,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
           return;
         }
 
-        const response = await fetch(`${API_BASE_URL}/session/status`, {
+        const response = await apiFetch('session/status', {
           headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
           cache: 'no-store',
         });
@@ -435,7 +458,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
         setError('Enter the Gmail address you used to register.');
         return;
       }
-      const response = await fetch(`${API_BASE_URL}/email/verification-notification`, {
+      const response = await apiFetch('email/verification-notification', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ email_address: normalizedEmail }),
@@ -470,7 +493,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
       }
 
       if (mode === 'forgot') {
-        const response = await fetch(`${API_BASE_URL}/forgot-password`, {
+        const response = await apiFetch('forgot-password', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify({ email_address: normalizedEmail }),
@@ -494,7 +517,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
         payload.confirm_password = confirmPassword;
       }
 
-      const response = await fetch(`${API_BASE_URL}/${mode === 'register' ? 'register' : 'login'}`, {
+      const response = await apiFetch(mode === 'register' ? 'register' : 'login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify(payload),
@@ -591,6 +614,14 @@ export default function AuthGate({ children }: { children: ReactNode }) {
             <p className="text-xs font-semibold uppercase tracking-[.18em] text-brand">{isRegister ? 'Get started' : isForgot ? 'Account recovery' : 'Welcome back'}</p>
             <h2 className="mt-2 text-3xl font-bold">{isRegister ? 'Create your account' : isForgot ? 'Forgot password?' : 'Sign in'}</h2>
             <p className="mt-2 text-sm text-warm-white/55">{isRegister ? 'Create an account with your Gmail address.' : isForgot ? 'Enter your Gmail address and we’ll email you a password reset link.' : 'Sign in to your FaithStream Studio account.'}</p>
+          </div>
+
+          <div role="status" aria-live="polite" className={`mb-5 flex items-center gap-2 rounded-lg border px-3 py-2 text-xs ${backendConnection === 'connected' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : backendConnection === 'checking' ? 'border-white/10 bg-white/[.03] text-warm-white/55' : 'border-amber-400/20 bg-amber-400/10 text-amber-100'}`}>
+            <span className={`h-2 w-2 shrink-0 rounded-full ${backendConnection === 'connected' ? 'bg-emerald-400' : backendConnection === 'checking' ? 'animate-pulse bg-warm-white/45' : 'bg-amber-400'}`} />
+            {backendConnection === 'connected' ? 'Server and database connected'
+              : backendConnection === 'database-unavailable' ? 'Server reached, but its database is unavailable'
+                : backendConnection === 'unreachable' ? 'Cannot reach the FaithStream server. Check the server address and network.'
+                  : 'Checking FaithStream server connection…'}
           </div>
 
           <form onSubmit={(event) => { void submit(event); }} className="space-y-4">

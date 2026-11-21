@@ -9,6 +9,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { strToU8, strFromU8, Unzip, UnzipPassThrough, Zip, ZipPassThrough } from 'fflate';
 import {
   AlignCenter,
   AlignJustify,
@@ -35,6 +36,7 @@ import {
   GripVertical,
   Lock,
   MoreHorizontal,
+  PackageOpen,
   Pencil,
   Minus,
   Play,
@@ -77,7 +79,7 @@ import CountdownDisplay, { COUNTDOWN_FONTS, DEFAULT_COUNTDOWN_UNITS, type Countd
 import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimization';
 import { getAccountDatabaseName, getAccountStorageKey } from '../utils/accountStorage';
 import GOOGLE_FONT_FAMILIES from '../data/google-font-families.json';
-import { API_BASE_URL as PRESENTATION_API_URL } from '../utils/apiConfig';
+import { apiFetch } from '../api/client';
 import Songbooks from './Songbooks';
 import { songSlideLayouts, type Song, type SongTextLayout } from '../utils/songbooks';
 import SlideTextEditor from '../components/SlideTextEditor';
@@ -144,6 +146,8 @@ type PictureT = { id: number; src: string; x: number; y: number; w: number; h: n
 type ShapeT = { id: number; kind: 'rectangle' | 'circle' | 'triangle' | 'line' | 'star' | 'arrow'; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number; animation?: EntranceAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: AnimationEasing };
 type MediaAsset = { id: string; name: string; type: 'image' | 'video'; category?: 'background' | 'slide'; collection?: string; blob: Blob; thumbnailBlob?: Blob; originalBlob?: Blob; optimized?: boolean; createdAt: number; url: string; thumbnailUrl?: string; fromFolder?: boolean; protected?: boolean; byteSize?: number };
 type StoredMediaAsset = Omit<MediaAsset, 'url' | 'thumbnailUrl'>;
+type PortableMediaEntry = { id: string; name: string; type: 'image' | 'video'; mimeType: string; thumbnailMimeType?: string; category?: 'background' | 'slide'; collection?: string; optimized?: boolean; createdAt: number; dataFile: string; thumbnailFile?: string };
+type PortablePresentationManifest = { format: 'faithstream-portable-presentation'; version: 1; presentation: { id: string; name: string; slides: SlideT[]; updatedAt: number; deviceOnly?: boolean; colors?: string[] }; assets: PortableMediaEntry[] };
 
 function BackgroundHoverPreview({ asset, className }: { asset: Pick<MediaAsset, 'url' | 'type' | 'thumbnailUrl'>; className: string }) {
   const [hovered, setHovered] = useState(false);
@@ -395,6 +399,16 @@ const readMediaAssets = async (): Promise<StoredMediaAsset[]> => {
   return new Promise((resolve, reject) => {
     const request = db.transaction(MEDIA_STORE, 'readonly').objectStore(MEDIA_STORE).getAll();
     request.onsuccess = () => resolve((request.result as StoredMediaAsset[]).sort((a, b) => b.createdAt - a.createdAt));
+    request.onerror = () => reject(request.error);
+    request.transaction?.addEventListener('complete', () => db.close(), { once: true });
+  });
+};
+
+const readStoredMediaAsset = async (id: string): Promise<StoredMediaAsset | undefined> => {
+  const db = await openMediaDb();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(MEDIA_STORE, 'readonly').objectStore(MEDIA_STORE).get(id);
+    request.onsuccess = () => resolve(request.result as StoredMediaAsset | undefined);
     request.onerror = () => reject(request.error);
     request.transaction?.addEventListener('complete', () => db.close(), { once: true });
   });
@@ -978,6 +992,7 @@ export default function Presentation() {
   const [saving, setSaving] = useState(false);
   const [mediaImporting, setMediaImporting] = useState<string | null>(null);
   const [slideImportProgress, setSlideImportProgress] = useState<{ message: string; current: number; total: number } | null>(null);
+  const [portableBackupBusy, setPortableBackupBusy] = useState<string | null>(null);
   const [selectedBoxId, setSelectedBoxId] = useState<number | null>(null);
   const [isBoxSelected, setIsBoxSelected] = useState(false);
   /** The text highlighted in a text box editor, so the align buttons can change just those lines. */
@@ -1055,7 +1070,7 @@ export default function Presentation() {
         return;
       }
       try {
-        const response = await fetch(`${PRESENTATION_API_URL}/presentations`, {
+        const response = await apiFetch('presentations', {
           headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
         });
         if (!response.ok) throw new Error('Could not load presentations from your account.');
@@ -1121,7 +1136,7 @@ export default function Presentation() {
     const timeout = window.setTimeout(() => {
       void Promise.all(syncableProjects.map(async (project) => {
         const payload = prepareProjectForAccountSync(project);
-        const response = await fetch(`${PRESENTATION_API_URL}/presentations/${encodeURIComponent(project.id)}`, {
+        const response = await apiFetch(`presentations/${encodeURIComponent(project.id)}`, {
           method: 'PUT',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify(payload),
@@ -1288,6 +1303,7 @@ export default function Presentation() {
   const fitTextHeightRef = useRef<{ bottom: number | null } | null>(null);
   const [canvasTextScale, setCanvasTextScale] = useState(1);
   const slideImportInput = useRef<HTMLInputElement>(null);
+  const portablePresentationInput = useRef<HTMLInputElement>(null);
   const slideFolderInput = useRef<HTMLInputElement>(null);
   const backgroundFolderInput = useRef<HTMLInputElement>(null);
   const backgroundFilesInput = useRef<HTMLInputElement>(null);
@@ -2189,13 +2205,13 @@ export default function Presentation() {
       const stillDeleting: string[] = [];
       await Promise.all(deleted.map(async (id) => {
         try {
-          const response = await fetch(`${PRESENTATION_API_URL}/templates/${encodeURIComponent(id)}`, { method: 'DELETE', headers });
+          const response = await apiFetch(`templates/${encodeURIComponent(id)}`, { method: 'DELETE', headers });
           if (!response.ok && response.status !== 404) stillDeleting.push(id);
         } catch { stillDeleting.push(id); }
       }));
       saveDeletedTemplateIds(stillDeleting);
       try {
-        const response = await fetch(`${PRESENTATION_API_URL}/templates`, { headers });
+        const response = await apiFetch('templates', { headers });
         if (!response.ok) throw new Error('Could not load templates.');
         const result = await response.json() as { templates?: SyncedTemplate[] };
         const remote = (Array.isArray(result.templates) ? result.templates : []).filter((item) => item && typeof item.id === 'string' && Array.isArray(item.slides) && !stillDeleting.includes(item.id));
@@ -2228,7 +2244,7 @@ export default function Presentation() {
         if (!token) return;
         await Promise.all(changed.map(async (item) => {
           try {
-            const response = await fetch(`${PRESENTATION_API_URL}/templates/${encodeURIComponent(item.id)}`, {
+            const response = await apiFetch(`templates/${encodeURIComponent(item.id)}`, {
               method: 'PUT',
               headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
               body: JSON.stringify(prepareTemplateForAccountSync(item)),
@@ -2247,7 +2263,7 @@ export default function Presentation() {
       const token = await window.faithstreamWindow?.getAuthToken();
       if (!token) return;
       try {
-        const response = await fetch(`${PRESENTATION_API_URL}/templates/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+        const response = await apiFetch(`templates/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
         if (response.ok || response.status === 404) saveDeletedTemplateIds(loadDeletedTemplateIds().filter((item) => item !== id));
       } catch { /* kept in the list and retried next time */ }
     })();
@@ -2336,6 +2352,303 @@ export default function Presentation() {
     name: name.trim() || 'Untitled presentation',
     slides: serializable(deck),
   });
+  const exportPortablePresentation = async (project: PresentationProject) => {
+    const bridge = window.faithstreamWindow;
+    if (!bridge?.startPortablePresentationExport || !bridge.writePortablePresentationExportChunk || !bridge.finishPortablePresentationExport) {
+      flash('Portable presentation export is available in the FaithStream Studio desktop app.');
+      return;
+    }
+    if (!mediaReadyRef.current) {
+      flash('Wait for the media library to finish loading, then save the backup again.');
+      return;
+    }
+    setProjectMenuFor(null);
+    setPortableBackupBusy(`Preparing “${project.name}”…`);
+    let exportStarted = false;
+    let zip: Zip | null = null;
+    try {
+      const mediaIds = new Set<string>();
+      project.slides.forEach((slide) => {
+        if (slide.bgAssetId) mediaIds.add(slide.bgAssetId);
+        if (slide.bgPictureRestore?.assetId) mediaIds.add(slide.bgPictureRestore.assetId);
+        slide.pictures?.forEach((picture) => { if (picture.assetId) mediaIds.add(picture.assetId); });
+      });
+      const library = new Map(mediaAssets.map((asset) => [asset.id, asset]));
+      const files: { path: string; read: () => Promise<Blob> }[] = [];
+      const entries: PortableMediaEntry[] = [];
+      const ids = [...mediaIds];
+      for (let index = 0; index < ids.length; index += 1) {
+        const id = ids[index];
+        const asset = library.get(id);
+        if (!asset) throw new Error(`The media “${id}” used by this presentation is missing from this device.`);
+        setPortableBackupBusy(`Preparing media ${index + 1} of ${ids.length}: ${asset.name}`);
+        const readAsset = async () => {
+          if (asset.blob.size) return asset.blob;
+          const response = await fetch(asset.url);
+          if (!response.ok) throw new Error(`Could not read “${asset.name}” from this device.`);
+          return response.blob();
+        };
+        const dataFile = `media/${id}.bin`;
+        const thumbnailFile = asset.thumbnailBlob || asset.thumbnailUrl ? `media/${id}.thumb` : undefined;
+        entries.push({ id, name: asset.name, type: asset.type, mimeType: asset.blob.type || (asset.type === 'video' ? 'video/mp4' : 'image/png'), ...(thumbnailFile ? { thumbnailMimeType: asset.thumbnailBlob?.type || 'image/jpeg' } : {}), category: asset.category, collection: asset.collection, optimized: asset.optimized, createdAt: asset.createdAt, dataFile, thumbnailFile });
+        files.push({ path: dataFile, read: readAsset });
+        if (thumbnailFile) files.push({ path: thumbnailFile, read: async () => {
+          if (asset.thumbnailBlob) return asset.thumbnailBlob;
+          const response = await fetch(asset.thumbnailUrl!);
+          if (!response.ok) throw new Error(`Could not read the preview for “${asset.name}”.`);
+          return response.blob();
+        } });
+      }
+
+      const manifest: PortablePresentationManifest = {
+        format: 'faithstream-portable-presentation',
+        version: 1,
+        presentation: {
+          id: project.id,
+          name: project.name,
+          slides: serializable(project.slides),
+          updatedAt: project.updatedAt,
+          ...(project.deviceOnly ? { deviceOnly: true } : {}),
+          ...(project.colors?.length ? { colors: project.colors } : {}),
+        },
+        assets: entries,
+      };
+      const started = await bridge.startPortablePresentationExport(project.name);
+      if (!started.ok) {
+        if (!started.canceled) throw new Error(started.message || 'Could not create the backup file.');
+        return;
+      }
+      exportStarted = true;
+
+      let writeChain = Promise.resolve();
+      let writeError: Error | null = null;
+      zip = new Zip((error, chunk) => {
+        if (error) { writeError = error; return; }
+        writeChain = writeChain.then(async () => {
+          if (writeError) return;
+          const result = await bridge.writePortablePresentationExportChunk(chunk);
+          if (!result.ok) throw new Error(result.message || 'Could not write the presentation backup.');
+        }).catch((cause: unknown) => { writeError = cause instanceof Error ? cause : new Error('Could not write the presentation backup.'); });
+      });
+      const flush = async () => {
+        await writeChain;
+        if (writeError) throw writeError;
+      };
+      const addBytes = async (name: string, bytes: Uint8Array) => {
+        const entry = new ZipPassThrough(name);
+        zip!.add(entry);
+        entry.push(bytes, true);
+        await flush();
+      };
+      const addBlob = async (name: string, blob: Blob) => {
+        const entry = new ZipPassThrough(name);
+        zip!.add(entry);
+        const reader = blob.stream().getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) { entry.push(new Uint8Array(0), true); break; }
+            entry.push(value, false);
+            await flush();
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        await flush();
+      };
+
+      setPortableBackupBusy('Writing presentation backup…');
+      await addBytes('manifest.json', strToU8(JSON.stringify(manifest)));
+      for (let index = 0; index < files.length; index += 1) {
+        setPortableBackupBusy(`Packing media ${index + 1} of ${files.length}…`);
+        await addBlob(files[index].path, await files[index].read());
+      }
+      zip.end();
+      await flush();
+      const saved = await bridge.finishPortablePresentationExport();
+      exportStarted = false;
+      if (!saved.ok) throw new Error(saved.message || 'Could not finish the presentation backup.');
+      flash(`Portable backup saved for “${project.name}”.`);
+    } catch (error) {
+      zip?.terminate();
+      if (exportStarted) await bridge.cancelPortablePresentationExport().catch(() => false);
+      const message = error instanceof Error ? error.message : '';
+      flash(message.includes("No handler registered for 'presentation:portable-export:start'")
+        ? 'This FaithStream Studio window is running an older desktop build. Close the app and launch the updated build, then save the portable backup again.'
+        : message || 'Could not create the portable presentation backup.');
+    } finally {
+      setPortableBackupBusy(null);
+    }
+  };
+  const importPortablePresentation = async (file: File | null) => {
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.fspresentation')) {
+      flash('Choose a FaithStream portable presentation backup (.fspresentation).');
+      return;
+    }
+    if (file.size === 0 || file.size > 8 * 1024 * 1024 * 1024) {
+      flash('This backup is empty or too large to import.');
+      return;
+    }
+
+    setPortableBackupBusy(`Opening “${file.name}”…`);
+    const importedIds: string[] = [];
+    let stagedMediaAssets: MediaAsset[] = [];
+    try {
+      let manifest: PortablePresentationManifest | null = null;
+      let manifestBytes: Uint8Array[] = [];
+      let manifestByteCount = 0;
+      const idMap = new Map<string, string>();
+      const expectedEntries = new Map<string, { asset: PortableMediaEntry; kind: 'data' | 'thumbnail' }>();
+      const completedData = new Set<string>();
+      const completedEntries = new Set<string>();
+      let entryWork = Promise.resolve();
+      let streamError: Error | null = null;
+      let mediaDone = 0;
+      const unzip = new Unzip((entry) => {
+        if (streamError) return;
+        if (entry.compression !== 0) {
+          streamError = new Error('This backup uses an unsupported compression format. Create it again in FaithStream Studio.');
+          return;
+        }
+        if (entry.name === 'manifest.json') {
+          if (manifest || manifestBytes.length) {
+            streamError = new Error('This backup has more than one presentation manifest.');
+            return;
+          }
+          entry.ondata = (error, chunk, final) => {
+            if (error) { streamError = new Error('Could not read the presentation details from this backup.'); return; }
+            manifestByteCount += chunk.byteLength;
+            if (manifestByteCount > 16 * 1024 * 1024) { streamError = new Error('The presentation details in this backup are too large.'); return; }
+            if (chunk.byteLength) manifestBytes.push(chunk);
+            if (final && !streamError) {
+              try {
+                const bytes = new Uint8Array(manifestByteCount);
+                let offset = 0;
+                for (const part of manifestBytes) { bytes.set(part, offset); offset += part.byteLength; }
+                const parsed = JSON.parse(strFromU8(bytes)) as PortablePresentationManifest;
+                if (parsed?.format !== 'faithstream-portable-presentation' || parsed.version !== 1 || !parsed.presentation || typeof parsed.presentation.id !== 'string' || typeof parsed.presentation.name !== 'string' || !Array.isArray(parsed.presentation.slides) || !Array.isArray(parsed.assets) || parsed.assets.length > 10000) {
+                  throw new Error('This is not a supported FaithStream presentation backup.');
+                }
+                const uniqueIds = new Set<string>();
+                for (const asset of parsed.assets) {
+                  if (!asset || typeof asset.id !== 'string' || !asset.id || asset.id.length > 200 || uniqueIds.has(asset.id) || !['image', 'video'].includes(asset.type) || typeof asset.name !== 'string' || typeof asset.mimeType !== 'string' || typeof asset.dataFile !== 'string' || asset.dataFile !== `media/${asset.id}.bin` || (asset.thumbnailFile && asset.thumbnailFile !== `media/${asset.id}.thumb`)) {
+                    throw new Error('This backup contains invalid media details.');
+                  }
+                  uniqueIds.add(asset.id);
+                  const localId = crypto.randomUUID();
+                  idMap.set(asset.id, localId);
+                  expectedEntries.set(asset.dataFile, { asset, kind: 'data' });
+                  if (asset.thumbnailFile) expectedEntries.set(asset.thumbnailFile, { asset, kind: 'thumbnail' });
+                }
+                manifest = parsed;
+              } catch (cause) {
+                streamError = cause instanceof Error ? cause : new Error('Could not read this presentation backup.');
+              }
+            }
+          };
+          entry.start();
+          return;
+        }
+
+        const expected = expectedEntries.get(entry.name);
+        if (!manifest || !expected || completedEntries.has(entry.name)) {
+          streamError = new Error('This backup contains unexpected or duplicated files.');
+          return;
+        }
+        const chunks: Uint8Array[] = [];
+        let byteCount = 0;
+        entry.ondata = (error, chunk, final) => {
+          if (error) { streamError = new Error(`Could not read media “${expected.asset.name}” from this backup.`); return; }
+          byteCount += chunk.byteLength;
+          if (byteCount > 4 * 1024 * 1024 * 1024) { streamError = new Error(`Media “${expected.asset.name}” is too large to restore.`); return; }
+          if (chunk.byteLength) chunks.push(chunk);
+          if (!final || streamError) return;
+          completedEntries.add(entry.name);
+          entryWork = entryWork.then(async () => {
+            if (streamError) return;
+            const localId = idMap.get(expected.asset.id)!;
+            const blobType = expected.kind === 'data' ? expected.asset.mimeType : (expected.asset.thumbnailMimeType || 'image/jpeg');
+            const contiguousBuffer = new ArrayBuffer(byteCount);
+            const contiguousBytes = new Uint8Array(contiguousBuffer);
+            let offset = 0;
+            for (const part of chunks) { contiguousBytes.set(part, offset); offset += part.byteLength; }
+            const blob = new Blob([contiguousBuffer], { type: blobType });
+            const existing = await readStoredMediaAsset(localId);
+            const stored: StoredMediaAsset = existing
+              ? { ...existing, ...(expected.kind === 'data' ? { blob, originalBlob: undefined } : { thumbnailBlob: blob }) }
+              : { id: localId, name: expected.asset.name, type: expected.asset.type, category: expected.asset.category, collection: expected.asset.collection, optimized: expected.asset.optimized, createdAt: expected.asset.createdAt || Date.now(), blob: expected.kind === 'data' ? blob : new Blob([], { type: expected.asset.mimeType || 'image/png' }), ...(expected.kind === 'thumbnail' ? { thumbnailBlob: blob } : {}) };
+            await updateMediaAssetsInDb([stored]);
+            if (expected.kind === 'data') completedData.add(expected.asset.id);
+            mediaDone += 1;
+            setPortableBackupBusy(`Restoring media ${mediaDone} of ${expectedEntries.size}…`);
+            if (!importedIds.includes(localId)) importedIds.push(localId);
+          }).catch((cause: unknown) => { streamError = cause instanceof Error ? cause : new Error('Could not save the restored media on this device.'); });
+        };
+        entry.start();
+      });
+      unzip.register(UnzipPassThrough);
+
+      const reader = file.stream().getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          unzip.push(value);
+          await entryWork;
+          if (streamError) throw streamError;
+        }
+        unzip.push(new Uint8Array(0), true);
+        await entryWork;
+      } finally {
+        reader.releaseLock();
+      }
+      if (streamError) throw streamError;
+      if (!manifest) throw new Error('This file is not a valid FaithStream portable presentation backup.');
+      const importedManifest = manifest as PortablePresentationManifest;
+      const expectedDataCount = importedManifest.assets.length;
+      if (completedData.size !== expectedDataCount || completedEntries.size !== expectedEntries.size) {
+        throw new Error('The backup is incomplete. Some presentation media could not be restored.');
+      }
+
+      const remapSlide = (slide: SlideT): SlideT => ({
+        ...slide,
+        ...(slide.bgAssetId && idMap.has(slide.bgAssetId) ? { bgAssetId: idMap.get(slide.bgAssetId) } : {}),
+        ...(slide.bgPictureRestore?.assetId && idMap.has(slide.bgPictureRestore.assetId) ? { bgPictureRestore: { ...slide.bgPictureRestore, assetId: idMap.get(slide.bgPictureRestore.assetId) } } : {}),
+        ...(slide.pictures ? { pictures: slide.pictures.map((picture) => picture.assetId && idMap.has(picture.assetId) ? { ...picture, assetId: idMap.get(picture.assetId) } : picture) } : {}),
+      });
+      const presentation = importedManifest.presentation;
+      const restored: PresentationProject = {
+        id: presentation.id,
+        name: presentation.name.slice(0, 120) || 'Imported presentation',
+        slides: presentation.slides.map(remapSlide),
+        updatedAt: Math.max(Date.now(), Number.isFinite(presentation.updatedAt) ? presentation.updatedAt : 0),
+        ...(presentation.deviceOnly ? { deviceOnly: true } : {}),
+        ...(presentation.colors?.length ? { colors: presentation.colors } : {}),
+      };
+      const importedElementIds = restored.slides.flatMap((slide) => [
+        slide.id,
+        ...(slide.extraBoxes ?? []).map((item) => item.id),
+        ...(slide.pictures ?? []).map((picture) => picture.id),
+        ...(slide.shapes ?? []).map((shape) => shape.id),
+      ]).filter((id): id is number => Number.isFinite(id));
+      if (importedElementIds.length) nextId = Math.max(nextId, ...importedElementIds) + 1;
+      stagedMediaAssets = (await readMediaAssets()).map(attachStoredMediaAsset);
+      const next = [restored, ...projectsRef.current.filter((project) => project.id !== restored.id)];
+      localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
+      mediaLibraryCache = { db: getAccountDatabaseName(MEDIA_DB), assets: stagedMediaAssets };
+      setMediaAssets((current) => { current.forEach(revokeMediaAssetUrls); return stagedMediaAssets; });
+      setProjects(next);
+      window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
+      flash(`“${restored.name}” and its ${importedManifest.assets.length} media file${importedManifest.assets.length === 1 ? '' : 's'} are ready on this device.`);
+    } catch (error) {
+      await Promise.all(importedIds.map((id) => deleteMediaAssetFromDb(id).catch(() => undefined)));
+      stagedMediaAssets.forEach(revokeMediaAssetUrls);
+      flash(error instanceof Error ? error.message : 'Could not import this presentation backup.');
+    } finally {
+      setPortableBackupBusy(null);
+    }
+  };
   const hasEditorChanges = () => {
     const original = originalProjectRef.current;
     return (!!activeProjectId && newDraftProjectIdRef.current === activeProjectId)
@@ -2696,7 +3009,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
         setProjects(next);
         localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
         if (!project.deviceOnly && accountTokenRef.current) {
-          void fetch(`${PRESENTATION_API_URL}/presentations/${encodeURIComponent(project.id)}`, {
+          void apiFetch(`presentations/${encodeURIComponent(project.id)}`, {
             method: 'DELETE',
             headers: { Authorization: `Bearer ${accountTokenRef.current}`, Accept: 'application/json' },
           }).then((response) => {
@@ -3012,6 +3325,10 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                     <FolderPlus size={17} className="mt-0.5 shrink-0 text-brand" />
                     <span><span className="block font-semibold">Folder of slides</span><span className="block text-xs text-warm-white/50">Each folder inside becomes its own presentation</span></span>
                   </button>
+                  <button role="menuitem" disabled={portableBackupBusy !== null} onClick={() => { setImportMenuOpen(false); portablePresentationInput.current?.click(); }} className="flex w-full items-start gap-3 rounded-lg px-3 py-2.5 text-left hover:bg-white/10 disabled:cursor-wait disabled:opacity-50">
+                    <PackageOpen size={17} className="mt-0.5 shrink-0 text-brand" />
+                    <span><span className="block font-semibold">Portable presentation backup</span><span className="block text-xs text-warm-white/50">Restore a presentation and its images or videos from another device</span></span>
+                  </button>
                   <p className="px-3 pb-1 pt-2 text-[11px] text-warm-white/40">Tip: you can also drag folders onto this page.</p>
                 </div>
               </>}
@@ -3030,6 +3347,17 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
             onChange={(event) => {
               void importSlideImages(event.target.files);
               event.target.value = '';
+            }}
+          />
+          <input
+            ref={portablePresentationInput}
+            type="file"
+            accept=".fspresentation,application/zip"
+            hidden
+            onChange={(event) => {
+              const file = event.target.files?.[0] ?? null;
+              event.target.value = '';
+              void importPortablePresentation(file);
             }}
           />
           <input
@@ -3074,6 +3402,10 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
               </div>
             </div>
           </div>}
+          {portableBackupBusy && <div role="status" aria-live="polite" className="mb-5 flex items-center gap-3 rounded-xl border border-brand/25 bg-brand/5 px-4 py-3 text-sm text-warm-white/75">
+            <Loader2 size={17} className="shrink-0 animate-spin text-brand" />
+            <span className="min-w-0 truncate">{portableBackupBusy}</span>
+          </div>}
 
           {projects.length > 0 && !visibleProjects.length && <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/15 bg-panel/50 px-6 py-16 text-center">
             <Search size={26} className="text-warm-white/30" />
@@ -3086,9 +3418,9 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
               {visibleProjects.map((project) => {
                 const firstSlide = project.slides[0];
                 return (
-                  <div key={project.id} className="group relative overflow-hidden rounded-2xl border border-white/10 bg-panel text-left transition hover:-translate-y-0.5 hover:border-brand/70 hover:shadow-xl hover:shadow-black/20">
+                  <div key={project.id} className={`group relative ${projectMenuFor === project.id ? 'z-40' : 'z-0'} overflow-visible rounded-2xl border border-white/10 bg-panel text-left transition hover:-translate-y-0.5 hover:border-brand/70 hover:shadow-xl hover:shadow-black/20`}>
                     <button onClick={() => openProject(project)} aria-label={`Open ${project.name}`} className="block w-full text-left">
-                      <div className="relative aspect-video overflow-hidden bg-navy">
+                      <div className="relative aspect-video overflow-hidden rounded-t-2xl bg-navy">
                         {firstSlide ? <SlideThumbnail slide={firstSlide} assets={mediaAssets} /> : <div className="absolute inset-0 flex items-center justify-center text-warm-white/30"><FolderOpen size={38} /></div>}
                         <span className="absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-lg bg-black/55 px-2.5 py-1.5 text-xs font-semibold text-white backdrop-blur"><FolderOpen size={14} /> Presentation</span>
                         {project.locked && <span className="absolute bottom-3 left-3 z-10 flex items-center gap-1.5 rounded-lg bg-black/65 px-2.5 py-1.5 text-xs font-semibold text-amber-200 backdrop-blur"><Lock size={13} /> Locked</span>}
@@ -3097,7 +3429,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                         <div className="min-w-0">
                           <p className="truncate font-semibold text-warm-white">{project.name}</p>
                           <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-warm-white/50">{projectCategories[project.id] && <span className="inline-flex items-center gap-1 rounded-md bg-white/[0.07] px-1.5 py-0.5 text-[11px] font-semibold text-warm-white/75"><Tag size={11} />{projectCategories[project.id]}</span>}<span>{project.slides.length} {project.slides.length === 1 ? 'slide' : 'slides'} · Updated {new Date(project.updatedAt).toLocaleDateString()}</span></p>
-                          {(project.hasLocalMedia || project.deviceOnly) && <p className="mt-1 text-[11px] text-amber-200/80">Imported media stays on its original device</p>}
+                          {(project.hasLocalMedia || project.deviceOnly) && <p className="mt-1 text-[11px] text-amber-200/80">Media is stored on this device · save a portable backup to transfer it</p>}
                         </div>
                         <ChevronRight size={18} className="shrink-0 text-warm-white/40 transition group-hover:translate-x-0.5 group-hover:text-brand" />
                       </div>
@@ -3106,8 +3438,9 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                       <MoreHorizontal size={16} />
                     </button>
                     {projectMenuFor === project.id && <>
-                      <div data-project-menu className="absolute right-3 top-12 z-30 w-60 rounded-xl border border-white/10 bg-navy p-1.5 text-sm text-warm-white shadow-xl">
+                      <div data-project-menu className="absolute right-3 top-12 z-50 max-h-[min(70vh,32rem)] w-60 overflow-y-auto rounded-xl border border-white/10 bg-navy p-1.5 text-sm text-warm-white shadow-xl">
                         <button onClick={() => toggleProjectLock(project.id)} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-white/10">{project.locked ? <Unlock size={15} /> : <Lock size={15} />}{project.locked ? 'Unlock presentation' : 'Lock presentation'}</button>
+                        <button disabled={portableBackupBusy !== null} onClick={() => void exportPortablePresentation(project)} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-white/10 disabled:cursor-wait disabled:opacity-50"><PackageOpen size={15} /> Save portable backup</button>
                         <button onClick={() => deleteProject(project.id)} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-red-300 hover:bg-red-500/10"><Trash2 size={15} /> Delete presentation</button>
                         <div className="my-1.5 border-t border-white/10" />
                         <div className="max-h-36 overflow-y-auto">

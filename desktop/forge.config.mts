@@ -9,13 +9,11 @@ import { FuseV1Options, FuseVersion } from '@electron/fuses';
 
 const config: ForgeConfig = {
  packagerConfig: {
-  asar: {
-   unpack: '**/node_modules/ffmpeg-static/ffmpeg.exe',
-  },
+  asar: true,
   name: 'FaithStream Studio',
-  executableName: 'faithstream',
-  icon: './src/assets/icons/win/camera-logo',
-  extraResource: ['./backgrounds'],
+  executableName: 'FaithStream Studio',
+  icon: './src/assets/icons/win/faithstream-studio',
+  extraResource: ['./backgrounds', './node_modules/ffmpeg-static/ffmpeg.exe'],
 },
 
 
@@ -23,8 +21,10 @@ const config: ForgeConfig = {
 
   makers: [
   new MakerSquirrel({
-    name: 'FaithStream Studio',
-    setupIcon: './src/assets/icons/win/camera-logo.ico',
+    name: 'FaithStreamStudio',
+    exe: 'FaithStream Studio.exe',
+    setupIcon: './src/assets/icons/win/faithstream-studio.ico',
+    loadingGif: './src/assets/icons/win/installer-loading.gif',
   }),
 
 

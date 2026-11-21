@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import QRCode from 'qrcode';
 import {
   ArrowRight,
   BookOpen,
@@ -392,6 +393,9 @@ type Source = {
   cameraRotation?: Exclude<CameraRotation, 'auto'>;
   connectionStatus?: 'connected' | 'disconnected';
   deviceId?: string;
+  mobileCamSourceId?: number;
+  /** Legacy auto-created phone-audio channels are discarded during source restore. */
+  mobileCamAudioAuto?: boolean;
   mediaAssetId?: string;
   loop?: boolean;
   text?: string;
@@ -446,7 +450,7 @@ const loadStudioSources = (): Source[] => {
   try {
     const saved = JSON.parse(localStorage.getItem(getAccountStorageKey(STUDIO_SOURCES_KEY)) ?? '[]') as Source[];
     if (!Array.isArray(saved)) return [];
-    const validSources = saved.filter((source) => Number.isFinite(source?.id) && Number.isFinite(source?.sceneId) && !!source.name && SOURCE_OPTIONS.some((option) => option.kind === source.kind));
+    const validSources = saved.filter((source) => Number.isFinite(source?.id) && Number.isFinite(source?.sceneId) && !!source.name && !source.mobileCamAudioAuto && SOURCE_OPTIONS.some((option) => option.kind === source.kind));
     const mobileSources = validSources.filter((source) => source.kind === 'mobile-camera');
     const mobileSlots = new Map<number, MobileCamSlot>(mobileSources.map((source, index) => [source.id, (source.mobileCamSlot ?? Math.min(index + 1, 3)) as MobileCamSlot] as const));
     return validSources.map((source) => {
@@ -487,6 +491,29 @@ function Panel({
       {children}
     </section>
   );
+}
+
+function MobileCamPairingQr({ pairing }: { pairing: MobileCamPairing }) {
+  const [qrImage, setQrImage] = useState('');
+  const payload = JSON.stringify({
+    app: 'faithstream-cam-pairing',
+    version: 1,
+    addresses: pairing.addresses.map((address) => `${address}:${pairing.port}`),
+    code: pairing.code,
+  });
+
+  useEffect(() => {
+    let active = true;
+    setQrImage('');
+    void QRCode.toDataURL(payload, { width: 256, margin: 1, errorCorrectionLevel: 'M' })
+      .then((image) => { if (active) setQrImage(image); })
+      .catch(() => { if (active) setQrImage(''); });
+    return () => { active = false; };
+  }, [payload]);
+
+  return qrImage
+    ? <img src={qrImage} alt="FaithStream Cam pairing QR code" className="h-32 w-32 rounded-lg bg-white p-1" />
+    : <div aria-label="Preparing pairing QR code" className="flex h-32 w-32 items-center justify-center rounded-lg bg-white text-center text-xs text-slate-600">Preparing QR…</div>;
 }
 
 /**
@@ -760,12 +787,14 @@ function AudioChannelMeter({
   muted,
   enabled,
   onLevel,
+  description = 'Live input level after the volume control',
 }: {
   stream?: MediaStream;
   db: number;
   muted: boolean;
   enabled: boolean;
   onLevel: (level: number) => void;
+  description?: string;
 }) {
   const [level, setLevel] = useState(0);
   const [contextState, setContextState] = useState<AudioContextState | 'unavailable'>('closed');
@@ -851,7 +880,7 @@ function AudioChannelMeter({
   const status = !hasAudio ? 'Disconnected' : muted || !enabled ? 'Muted' : contextState === 'suspended' ? 'Click to enable' : contextState === 'unavailable' ? 'Unavailable' : active ? 'Signal' : 'No signal';
   const dbLevel = level > 0 ? Math.max(0, Math.min(100, ((20 * Math.log10(level) + 60) / 60) * 100)) : 0;
   return (
-    <button type="button" disabled={!stream || contextState !== 'suspended'} onClick={() => { void contextRef.current?.resume().then(() => setContextState(contextRef.current?.state ?? 'running')); }} className="mt-1 flex w-full items-center gap-1.5 text-left disabled:cursor-default" title="Live input level after the volume control">
+    <button type="button" disabled={!stream || contextState !== 'suspended'} onClick={() => { void contextRef.current?.resume().then(() => setContextState(contextRef.current?.state ?? 'running')); }} className="mt-1 flex w-full items-center gap-1.5 text-left disabled:cursor-default" title={description}>
        <span className="w-18 shrink-0 truncate text-[9px] text-warm-white/50">{status}</span>
       <span className="flex h-2 flex-1 gap-px overflow-hidden rounded-sm bg-white/5" aria-label={`${status}, ${dbLevel.toFixed(0)} percent`}>
         {Array.from({ length: 18 }, (_, index) => {
@@ -1425,6 +1454,8 @@ export default function Studio() {
   }, [onAir.sceneId, onAir.slideIdx, transitionEnabled]);
 
   const [sources, setSources] = useState<Source[]>(loadStudioSources);
+  const sourcesRef = useRef(sources);
+  sourcesRef.current = sources;
   const [musicAssets, setMusicAssets] = useState<StudioMusicAssetWithUrl[]>([]);
   const [musicPlaying, setMusicPlaying] = useState<Record<number, boolean>>({});
   const [previewingMusicId, setPreviewingMusicId] = useState<string | null>(null);
@@ -1477,6 +1508,7 @@ export default function Studio() {
   });
   const [audioLevels, setAudioLevels] = useState<Record<number, number>>({});
   const [audioSettingsChannelId, setAudioSettingsChannelId] = useState<number | null>(null);
+  const [microphoneSwitchingId, setMicrophoneSwitchingId] = useState<number | null>(null);
 
   const [live, setLive] = useState(false);
   const [startingStream, setStartingStream] = useState(false);
@@ -2419,18 +2451,16 @@ export default function Studio() {
     });
     const bg = slides[0]?.bg ?? style.background;
     const scene: Scene = { id, name: reference, desc: `Scripture · ${slides.length} verses`, bg, slides };
+    const target = { sceneId: id, slideIdx: 0 };
     if (slideshow) {
       setSlideshowScenes((current) => [...current, scene]);
-      if (presentNow) setOfflineSlide({ sceneId: id, slideIdx: 0 });
+      setOfflineSlide(target);
     } else {
       setScenes((current) => [...current, scene]);
-      if (presentNow) {
-        const target = { sceneId: id, slideIdx: 0 };
-        setSceneId(id);
-        setSelected(target);
-        setPreview(target);
-        setOnAir(target);
-      }
+      setSceneId(id);
+      setSelected(target);
+      setPreview(target);
+      if (presentNow || !previewMode) setOnAir(target);
     }
     setPendingScriptureDesign(null);
   };
@@ -2593,6 +2623,7 @@ export default function Studio() {
       return;
     }
     const visible = !source.visible;
+    if (source.mobileCamSourceId !== undefined) setPreviewSetupVisibility((current) => ({ ...current, [id]: visible }));
     if (source.kind === 'microphone' || source.kind === 'desktop-audio' || source.kind === 'music') {
       const muted = channels.find((channel) => channel.id === id)?.muted ?? false;
       source.stream?.getAudioTracks().forEach((track) => { track.enabled = visible && !muted; });
@@ -2693,11 +2724,15 @@ export default function Studio() {
       ? { sceneId: targetScene.id, slideIdx: Math.min(previewSetupRef.slideIdx, Math.max(0, targetScene.slides.length - 1)) }
       : previewSetupRef;
     setScenes(latestScenes);
-    setSources((current) => current.map((source) => ({
-      ...source,
-      ...(previewSetupLayouts[source.id] ? { layout: previewSetupLayouts[source.id] } : {}),
-      ...(previewSetupVisibility[source.id] !== undefined ? { visible: previewSetupVisibility[source.id] } : {}),
-    })));
+    setSources((current) => current.map((source) => {
+      const linkedCamera = source.mobileCamSourceId === undefined ? undefined : current.find((item) => item.id === source.mobileCamSourceId);
+      const linkedCameraVisible = linkedCamera ? (previewSetupVisibility[linkedCamera.id] ?? linkedCamera.visible) : undefined;
+      return {
+        ...source,
+        ...(previewSetupLayouts[source.id] ? { layout: previewSetupLayouts[source.id] } : {}),
+        ...(previewSetupVisibility[source.id] !== undefined ? { visible: previewSetupVisibility[source.id] } : linkedCameraVisible !== undefined ? { visible: linkedCameraVisible } : {}),
+      };
+    }));
     setPreview(targetRef);
     setOnAir(targetRef);
     setSelectedProgramSource(null);
@@ -2811,6 +2846,7 @@ export default function Studio() {
           reject(new Error('Phone camera did not connect. Check both devices are on the same Wi-Fi and the computer firewall allows FaithStream Studio.'));
         }, 120_000);
         peer.addTransceiver('video', { direction: 'recvonly' });
+        peer.addTransceiver('audio', { direction: 'recvonly' });
         peer.onicecandidate = (event) => { if (event.candidate && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ice', candidate: event.candidate.toJSON() })); };
         peer.onconnectionstatechange = () => {
           if (intentionallyClosed) return;
@@ -2819,42 +2855,35 @@ export default function Studio() {
         };
         peer.ontrack = (event) => {
           const incoming = event.streams[0] ?? new MediaStream([event.track]);
+          if (!remoteStream) remoteStream = incoming;
+          else if (incoming !== remoteStream) {
+            incoming.getTracks().forEach((track) => {
+              if (!remoteStream?.getTracks().some((current) => current.id === track.id)) remoteStream?.addTrack(track);
+            });
+          }
+          const activeRemoteStream = remoteStream;
           const refreshSourceHealth = () => {
-            if (intentionallyClosed || !remoteStream || !remoteStream.getTracks().includes(event.track)) return;
-            const connected = remoteStream.getTracks().some((track) => track.readyState === 'live' && !track.muted);
+            if (intentionallyClosed || !activeRemoteStream || !activeRemoteStream.getTracks().includes(event.track)) return;
+            const connected = activeRemoteStream.getVideoTracks().some((track) => track.readyState === 'live' && !track.muted);
             notifyMobileCamStatus(connected, sourceId);
-            if (sourceId === undefined) return;
-            setSources((list) => list.map((item) => item.id === sourceId && remoteStream ? { ...item, stream: remoteStream } : item));
+            if (sourceId !== undefined) setSources((list) => list.map((item) => item.id === sourceId && activeRemoteStream ? { ...item, stream: activeRemoteStream } : item));
           };
           event.track.addEventListener('mute', refreshSourceHealth);
           event.track.addEventListener('unmute', refreshSourceHealth);
           event.track.addEventListener('ended', refreshSourceHealth);
-          if (!remoteStream) {
-            remoteStream = incoming;
+          if (!finished && activeRemoteStream?.getVideoTracks().some((track) => track.readyState === 'live')) {
             finished = true; window.clearTimeout(timeout);
             notifyMobileCamStatus(true, sourceId);
             setMobileCamPairing(null);
-            resolve({ stream: remoteStream, deviceName: `FaithStream Cam ${mobileCamSlot}`, cleanup, phoneOrientation });
+            resolve({ stream: activeRemoteStream, deviceName: `FaithStream Cam ${mobileCamSlot}`, cleanup, phoneOrientation });
             return;
           }
-          if (incoming === remoteStream) {
-            if (sourceId !== undefined) {
-              sourceStreams.current.set(sourceId, remoteStream);
-              setSources((list) => list.map((item) => item.id === sourceId ? { ...item, stream: remoteStream! } : item));
-            }
-            notifyMobileCamStatus(true, sourceId);
-            setMobileCamPairing(null);
-            return;
-          }
-          // Keep the same MediaStream object attached to the source while a phone reconnects.
-          remoteStream.getTracks().forEach((track) => remoteStream?.removeTrack(track));
-          incoming.getTracks().forEach((track) => remoteStream?.addTrack(track));
           notifyMobileCamStatus(true, sourceId);
-          if (sourceId !== undefined) {
-            sourceStreams.current.set(sourceId, remoteStream);
-            setSources((list) => list.map((item) => item.id === sourceId ? { ...item, stream: remoteStream! } : item));
-          }
           setMobileCamPairing(null);
+          if (finished && sourceId !== undefined && activeRemoteStream) {
+            sourceStreams.current.set(sourceId, activeRemoteStream);
+            setSources((list) => list.map((item) => item.id === sourceId ? { ...item, stream: activeRemoteStream } : item));
+          }
         };
         socket.onerror = () => {
           if (finished) return;
@@ -2918,8 +2947,17 @@ export default function Studio() {
       return { stream, deviceId: track?.getSettings().deviceId || device?.deviceId, deviceName: track?.label || device?.label };
     }
     if (kind === 'microphone') {
-      const noiseSuppression = sources.find((source) => source.id === sourceId)?.noiseSuppression ?? true;
-      return { stream: await navigator.mediaDevices.getUserMedia({ video: false, audio: { noiseSuppression, echoCancellation: true, autoGainControl: true } }) };
+      const microphoneSource = sources.find((source) => source.id === sourceId);
+      const noiseSuppression = microphoneSource?.mobileCamSourceId !== undefined ? true : microphoneSource?.noiseSuppression ?? true;
+      const devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'audioinput');
+      const device = preferredDeviceId ? devices.find((item) => item.deviceId === preferredDeviceId) : undefined;
+      if (preferredDeviceId && !device) throw new Error('That microphone is no longer available. Choose another input device.');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: false,
+        audio: { ...(device ? { deviceId: { exact: device.deviceId } } : {}), noiseSuppression, echoCancellation: true, autoGainControl: true },
+      });
+      const track = stream.getAudioTracks()[0];
+      return { stream, deviceId: track?.getSettings().deviceId || device?.deviceId, deviceName: track?.label || device?.label };
     }
     if (kind === 'screen') return { stream: await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false }) };
     if (kind === 'desktop-audio') {
@@ -2982,10 +3020,14 @@ export default function Studio() {
         sourceStreams.current.set(source.id, stream);
         if (captured?.cleanup) sourceCleanups.current.set(source.id, captured.cleanup);
         stream.getTracks().forEach((track) => {
-          const refreshSourceHealth = () => setSources((list) => list.map((item) => item.id === source.id ? { ...item, stream } : item));
+          const refreshSourceHealth = () => {
+            if (sourceStreams.current.get(source.id) !== stream) return;
+            setSources((list) => list.map((item) => item.id === source.id ? { ...item, stream } : item));
+          };
           track.addEventListener('mute', refreshSourceHealth);
           track.addEventListener('unmute', refreshSourceHealth);
           track.addEventListener('ended', () => {
+            if (sourceStreams.current.get(source.id) !== stream) return;
             if (stream.getTracks().some((item) => item.readyState === 'live')) return;
             sourceStreams.current.delete(source.id);
             setSources((list) => list.map((item) => item.id === source.id ? { ...item, stream: undefined } : item));
@@ -3093,6 +3135,12 @@ export default function Studio() {
 
   const reconnectSource = async (source: Source) => {
     setSourceError('');
+    if (source.kind === 'microphone' && source.mobileCamSourceId !== undefined) {
+      const cameraSource = sourcesRef.current.find((item) => item.id === source.mobileCamSourceId && item.kind === 'mobile-camera');
+      if (cameraSource) await reconnectSource(cameraSource);
+      else setSourceError('The FaithStream Cam source for this microphone was removed. Re-add the phone camera to reconnect its audio.');
+      return;
+    }
     const pairingDetails = source.kind === 'mobile-camera' ? mobileCamPairingDetails.current.get(source.id) : undefined;
     if (source.kind === 'mobile-camera' && pairingDetails) {
       setMobileCamPairing({ ...pairingDetails, connected: false, reconnecting: true, remainingSeconds: Math.max(0, Math.ceil((pairingDetails.expiresAt - Date.now()) / 1000)) });
@@ -3106,10 +3154,14 @@ export default function Studio() {
       sourceStreams.current.set(source.id, stream);
       if (captured.cleanup) sourceCleanups.current.set(source.id, captured.cleanup);
       stream.getTracks().forEach((track) => {
-        const refreshSourceHealth = () => setSources((list) => list.map((item) => item.id === source.id ? { ...item, stream } : item));
+        const refreshSourceHealth = () => {
+          if (sourceStreams.current.get(source.id) !== stream) return;
+          setSources((list) => list.map((item) => item.id === source.id ? { ...item, stream } : item));
+        };
         track.addEventListener('mute', refreshSourceHealth);
         track.addEventListener('unmute', refreshSourceHealth);
         track.addEventListener('ended', () => {
+          if (sourceStreams.current.get(source.id) !== stream) return;
           if (stream.getTracks().some((item) => item.readyState === 'live')) return;
           sourceStreams.current.delete(source.id);
           setSources((list) => list.map((item) => item.id === source.id ? { ...item, stream: undefined } : item));
@@ -3126,6 +3178,68 @@ export default function Studio() {
     }
   };
 
+  const selectMicrophoneDevice = async (sourceId: number, requestedDeviceId: string) => {
+    const source = sources.find((item) => item.id === sourceId && item.kind === 'microphone');
+    if (!source || microphoneSwitchingId !== null) return;
+    setAudioError('');
+    setMicrophoneSwitchingId(sourceId);
+    let replacement: MediaStream | undefined;
+    let replacementUsesRemoteTrack = false;
+    try {
+      if (requestedDeviceId === source.deviceId) return;
+      let selectedDeviceId = requestedDeviceId;
+      let selectedDeviceName = '';
+      let selectedMobileCamSourceId: number | undefined;
+      if (requestedDeviceId.startsWith('faithstream-cam-audio:')) {
+        const cameraSourceId = Number(requestedDeviceId.slice('faithstream-cam-audio:'.length));
+        const cameraSource = sources.find((item) => item.kind === 'mobile-camera' && item.id === cameraSourceId);
+        const liveTracks = cameraSource?.stream?.getAudioTracks().filter((item) => item.readyState === 'live') ?? [];
+        if (!cameraSource || liveTracks.length === 0) throw new Error('That FaithStream Cam microphone is disconnected. Reconnect the phone and try again.');
+        replacement = new MediaStream(liveTracks);
+        replacementUsesRemoteTrack = true;
+        selectedMobileCamSourceId = cameraSourceId;
+        selectedDeviceName = `${cameraSource.name} audio`;
+      } else {
+        const captured = await captureStream('microphone', sourceId, requestedDeviceId || undefined);
+        if (!captured?.stream) throw new Error('Could not open the selected microphone. Choose another input device.');
+        replacement = captured.stream;
+        selectedDeviceId = captured.deviceId ?? requestedDeviceId;
+        selectedDeviceName = captured.deviceName ?? '';
+      }
+      const track = replacement?.getAudioTracks().find((item) => item.readyState === 'live');
+      if (!track) throw new Error('The selected device did not provide an audio signal. Choose another microphone.');
+
+      const oldStream = sourceStreams.current.get(sourceId) ?? source.stream;
+      const channel = channels.find((item) => item.id === sourceId);
+      replacement.getAudioTracks().forEach((item) => { item.enabled = source.visible && !(channel?.muted ?? false); });
+      const disconnect = (input: Map<number, MediaStreamAudioSourceNode>, gain: Map<number, GainNode>, panner: Map<number, StereoPannerNode>, compressor: Map<number, DynamicsCompressorNode>) => {
+        input.get(sourceId)?.disconnect(); input.delete(sourceId);
+        gain.get(sourceId)?.disconnect(); gain.delete(sourceId);
+        panner.get(sourceId)?.disconnect(); panner.delete(sourceId);
+        compressor.get(sourceId)?.disconnect(); compressor.delete(sourceId);
+      };
+      disconnect(liveAudioInputs.current, liveAudioGains.current, liveAudioPanners.current, liveAudioCompressors.current);
+      disconnect(recordingAudioInputs.current, recordingAudioGains.current, recordingAudioPanners.current, recordingAudioCompressors.current);
+      sourceStreams.current.set(sourceId, replacement);
+      replacement.getTracks().forEach((item) => {
+        item.addEventListener('ended', () => {
+          if (sourceStreams.current.get(sourceId) !== replacement) return;
+          if (replacement?.getTracks().some((liveTrack) => liveTrack.readyState === 'live')) return;
+          sourceStreams.current.delete(sourceId);
+          setSources((list) => list.map((entry) => entry.id === sourceId ? { ...entry, stream: undefined } : entry));
+        }, { once: true });
+      });
+      setSources((list) => list.map((item) => item.id === sourceId ? { ...item, stream: replacement!, deviceId: selectedDeviceId || undefined, mobileCamSourceId: selectedMobileCamSourceId, noiseSuppression: selectedMobileCamSourceId === undefined, ...(selectedDeviceName ? { name: selectedDeviceName } : {}) } : item));
+      if (selectedDeviceName) setChannels((list) => list.map((item) => item.id === sourceId ? { ...item, name: selectedDeviceName } : item));
+      if (!source.mobileCamSourceId) oldStream?.getTracks().forEach((item) => item.stop());
+    } catch (error) {
+      if (!replacementUsesRemoteTrack) replacement?.getTracks().forEach((item) => item.stop());
+      setAudioError(error instanceof Error ? error.message : 'Could not switch the microphone input.');
+    } finally {
+      setMicrophoneSwitchingId(null);
+    }
+  };
+
   const saveSourceText = () => {
     if (!sourceEditor) return;
     const text = sourceDraft.trim();
@@ -3136,21 +3250,23 @@ export default function Studio() {
 
   const removeSource = (id: number) => {
     const source = sources.find((item) => item.id === id);
+    const removingIds = new Set([id]);
     musicElements.current.get(id)?.pause();
     musicElements.current.delete(id);
     musicStreams.current.delete(id);
     setMusicPlaying((current) => { const next = { ...current }; delete next[id]; return next; });
-    sourceStreams.current.get(id)?.getTracks().forEach((track) => track.stop());
-    sourceStreams.current.delete(id);
+    if (!source?.mobileCamSourceId) sourceStreams.current.get(id)?.getTracks().forEach((track) => track.stop());
+    removingIds.forEach((sourceId) => sourceStreams.current.delete(sourceId));
     sourceCleanups.current.get(id)?.();
     sourceCleanups.current.delete(id);
     if (source?.kind === 'mobile-camera') {
       mobileCamPairingDetails.current.delete(id);
       mobileCamConnectedState.current.delete(id);
       setMobileCamPairing((current) => current?.sourceId === id ? null : current);
+      sources.filter((item) => item.kind === 'microphone' && item.mobileCamSourceId === id).forEach((item) => sourceStreams.current.delete(item.id));
     }
-    setChannels((list) => list.filter((channel) => channel.id !== id));
-    setSources((list) => list.filter((source) => source.id !== id));
+    setChannels((list) => list.filter((channel) => !removingIds.has(channel.id)));
+    setSources((list) => list.filter((item) => !removingIds.has(item.id)).map((item) => item.kind === 'microphone' && item.mobileCamSourceId === id ? { ...item, stream: undefined } : item));
   };
 
   const deleteMusicAsset = async (asset: StudioMusicAssetWithUrl) => {
@@ -3251,6 +3367,13 @@ export default function Studio() {
       const destination = context.createMediaStreamDestination();
       recordingAudioContext.current = context;
       recordingAudioDestination.current = destination;
+      // Keep the WebM audio input valid even when no mixer channel is active.
+      // FFmpeg still expects a complete audio stream when finalizing the MP4.
+      const silence = context.createOscillator();
+      const silenceGain = context.createGain();
+      silenceGain.gain.value = 0;
+      silence.connect(silenceGain).connect(destination);
+      silence.start();
       mixerChannels.forEach((channel) => {
         const source = sources.find((item) => item.id === channel.id);
         const tracks = source?.stream?.getAudioTracks().filter((track) => track.readyState === 'live') ?? [];
@@ -3540,6 +3663,19 @@ export default function Studio() {
               </label>
             </div>
           </section>
+
+          <section aria-label="Choose camera" className="shrink-0 rounded-xl border border-white/10 bg-panel p-2">
+            <div className="mb-1.5 flex items-center justify-between">
+              <h3 className="text-[10px] font-semibold text-warm-white/75">Cameras</h3>
+              <span className="text-[10px] text-warm-white/45">{previewSceneSources.filter((source) => source.kind === 'camera' || source.kind === 'mobile-camera').length}</span>
+            </div>
+            {previewSceneSources.some((source) => source.kind === 'camera' || source.kind === 'mobile-camera') ? <div className="grid grid-cols-3 gap-2">
+              {previewSceneSources.filter((source) => source.kind === 'camera' || source.kind === 'mobile-camera').map((source) => <button key={source.id} type="button" aria-pressed={isPreviewSourceVisible(source)} onClick={() => showCameraWithCurrentLayers(source.id)} title={`Add ${source.name} to the staged output`} className={`min-w-0 overflow-hidden rounded-lg border text-left ${selectedProgramSource === source.id ? 'border-sky-400 ring-1 ring-sky-400' : 'border-white/10 hover:border-white/30'}`}>
+                <div className="aspect-video"><SourcePreview source={source} slide={previewSlide} bg={previewSetupSlide.bg} showLabel={false} rounded={false} /></div>
+                <span className="block truncate px-1 py-0.5 text-[8px] text-warm-white/80">{source.name}</span>
+              </button>)}
+            </div> : <p className="rounded-lg border border-dashed border-white/10 p-1.5 text-center text-[9px] text-warm-white/45">Add a camera from Sources to choose it here.</p>}
+          </section>
         </div>
 
         {/* Program shows the visual sources that will make up this scene. */}
@@ -3618,16 +3754,6 @@ export default function Studio() {
             <div className="mr-auto min-w-0 pb-1"><p className="truncate text-[9px] font-semibold text-warm-white">{selectedProgramOverlay.name}</p><p className="text-[8px] text-warm-white/45">Position and size</p></div>
             {([['X', 'x', 100 - selectedProgramLayout.width], ['Y', 'y', 100 - selectedProgramLayout.height], ['W', 'width', 100 - selectedProgramLayout.x], ['H', 'height', 100 - selectedProgramLayout.y]] as const).map(([label, key, max]) => <label key={key} className="flex w-10 shrink-0 flex-col gap-1 text-[8px] text-warm-white/55">{label}<input type="number" min={key === 'width' || key === 'height' ? 8 : 0} max={max} value={selectedProgramLayout[key]} onChange={(event) => updateProgramLayout(selectedProgramOverlay.id, { [key]: Number(event.currentTarget.value) })} className="w-full rounded border border-white/10 bg-slate-950 px-0.5 py-1 text-center text-[9px] text-white outline-none focus:border-sky-400" /></label>)}
           </div>}
-          <section data-program-control className="mt-2 shrink-0">
-            <div className="mb-1 flex items-center justify-between"><h3 className="text-[11px] font-semibold text-warm-white/75">Choose camera</h3><span className="text-[10px] text-warm-white/45">{previewSceneSources.filter((source) => source.kind === 'camera' || source.kind === 'mobile-camera').length}</span></div>
-            {previewSceneSources.some((source) => source.kind === 'camera' || source.kind === 'mobile-camera') ? <div className="grid grid-cols-3 gap-2">
-              {previewSceneSources.filter((source) => source.kind === 'camera' || source.kind === 'mobile-camera').map((source) => <button key={source.id} type="button" aria-pressed={isPreviewSourceVisible(source)} onClick={() => showCameraWithCurrentLayers(source.id)} title={`Add ${source.name} to the staged output`} className={`overflow-hidden rounded-lg border text-left ${selectedProgramSource === source.id ? 'border-sky-400 ring-1 ring-sky-400' : 'border-white/10 hover:border-white/30'}`}>
-                <div className="aspect-video"><SourcePreview source={source} slide={previewSlide} bg={previewSetupSlide.bg} showLabel={false} rounded={false} /></div>
-                <span className="block truncate px-1.5 py-1 text-[9px] text-warm-white/80">{source.name}{isPreviewSourceVisible(source) ? ' · shown' : ' · hidden'}</span>
-              </button>)}
-            </div> : <p className="rounded-lg border border-dashed border-white/10 p-2 text-center text-[10px] text-warm-white/45">Add a camera from Sources to choose it here.</p>}
-          </section>
-
         </Panel>
 
         <Panel title="Slides" className="min-w-0">
@@ -4244,17 +4370,25 @@ export default function Studio() {
       )}
       {mobileCamPairing && (
          createPortal(<div className="fixed inset-0 z-1000 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
-          <section role="dialog" aria-modal="true" aria-labelledby="mobile-cam-title" className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
+          <section role="dialog" aria-modal="true" aria-labelledby="mobile-cam-title" className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#101d2a] p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div><h2 id="mobile-cam-title" className="text-lg font-bold text-warm-white">{mobileCamPairing.reconnecting ? `Reconnect Cam ${mobileCamPairing.slot}` : `Connect Cam ${mobileCamPairing.slot}`}</h2><p className="mt-1 text-sm text-warm-white/55">{mobileCamPairing.reconnecting ? 'Tap Reconnect camera on your phone and use the current code below.' : 'Install and open FaithStream Cam on your phone. Both devices must use the same Wi-Fi.'}</p></div>
               <button aria-label="Close pairing details" onClick={() => { if (!mobileCamPairing.connected && !mobileCamPairing.reconnecting) { void window.faithstreamWindow?.stopMobileCamPairing(mobileCamPairing.sourceId); mobileCamPairingDetails.current.delete(mobileCamPairing.sourceId); } setMobileCamPairing(null); }} className="rounded-lg p-1.5 text-warm-white/55 hover:bg-white/10 hover:text-white"><X size={17} /></button>
             </div>
-            <div className="mt-5 rounded-xl border border-white/10 bg-black/20 p-4">
-              <p className="text-xs font-semibold uppercase tracking-wide text-warm-white/50">Studio address</p>
-              <div className="mt-2 space-y-1 font-mono text-sm text-white">{mobileCamPairing.addresses.map((address) => <p key={address}>{address}:{mobileCamPairing.port}</p>)}</div>
-              <p className="mt-4 text-xs font-semibold uppercase tracking-wide text-warm-white/50">Pairing code</p>
-              <p className="mt-1 font-mono text-3xl font-bold tracking-[0.3em] text-brand">{mobileCamPairing.code}</p>
-              {!mobileCamPairing.connected && <p className="mt-2 text-xs text-warm-white/55">Code refreshes in {Math.floor((mobileCamPairing.remainingSeconds ?? 180) / 60)}:{String((mobileCamPairing.remainingSeconds ?? 180) % 60).padStart(2, '0')}. A new code appears automatically; update it on your phone if needed.</p>}
+            <div className="mt-5 grid grid-cols-[136px_minmax(0,1fr)] gap-4 rounded-xl border border-white/10 bg-black/20 p-4">
+              <div className="flex flex-col items-center gap-2">
+                {mobileCamPairing.connected
+                  ? <div className="flex h-32 w-32 items-center justify-center rounded-lg border border-emerald-400/20 bg-emerald-400/10 text-center text-xs font-semibold text-emerald-200">Phone connected</div>
+                  : <MobileCamPairingQr pairing={mobileCamPairing} />}
+                {!mobileCamPairing.connected && <span className="text-center text-[10px] font-semibold text-warm-white/65">Scan with FaithStream Cam</span>}
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-wide text-warm-white/50">Studio address</p>
+                <div className="mt-2 space-y-1 font-mono text-xs text-white">{mobileCamPairing.addresses.map((address) => <p key={address} className="break-all">{address}:{mobileCamPairing.port}</p>)}</div>
+                <p className="mt-4 text-xs font-semibold uppercase tracking-wide text-warm-white/50">Pairing code</p>
+                <p className="mt-1 font-mono text-2xl font-bold tracking-[0.25em] text-brand">{mobileCamPairing.code}</p>
+                {!mobileCamPairing.connected && <p className="mt-2 text-[11px] leading-relaxed text-warm-white/55">Code refreshes in {Math.floor((mobileCamPairing.remainingSeconds ?? 180) / 60)}:{String((mobileCamPairing.remainingSeconds ?? 180) % 60).padStart(2, '0')}. The QR updates with it.</p>}
+              </div>
             </div>
             <p role="status" className={`mt-4 text-sm ${mobileCamPairing.connected ? 'text-emerald-300' : mobileCamPairing.reconnecting ? 'text-amber-200' : 'text-warm-white/70'}`}>{mobileCamPairing.connected ? 'Phone camera connected. You can position it in Preview setup.' : mobileCamPairing.reconnecting ? 'Disconnected · waiting for the phone to reconnect…' : 'Waiting for your phone to connect…'}</p>
             {mobileCamPairing.refreshError && <p role="alert" className="mt-2 text-xs text-amber-200">{mobileCamPairing.refreshError}</p>}
@@ -4266,8 +4400,11 @@ export default function Studio() {
         channel={audioSettingsChannel ?? null}
         source={audioSettingsSource}
         noiseSuppressionSupported={typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getSupportedConstraints?.().noiseSuppression}
+        microphoneSwitching={microphoneSwitchingId === audioSettingsChannel?.id}
+        remoteMicrophoneDevices={sources.filter((item) => item.kind === 'mobile-camera' && item.stream?.getAudioTracks().some((track) => track.readyState === 'live')).map((item) => ({ deviceId: `faithstream-cam-audio:${item.id}`, label: `${item.name} audio` }))}
         error={audioError}
         onChange={(patch) => { if (audioSettingsChannel) updateChannel(audioSettingsChannel.id, patch); }}
+        onSelectMicrophoneDevice={(deviceId) => { if (audioSettingsChannel) void selectMicrophoneDevice(audioSettingsChannel.id, deviceId); }}
         onToggleNoiseSuppression={() => { if (audioSettingsChannel) void toggleNoiseSuppression(audioSettingsChannel.id); }}
         onClose={() => setAudioSettingsChannelId(null)}
         meter={audioSettingsChannel && <AudioChannelMeter
@@ -4276,6 +4413,14 @@ export default function Studio() {
           muted={audioSettingsChannel.muted}
           enabled={audioSettingsSource?.visible ?? false}
           onLevel={(level) => setAudioLevels((current) => Math.abs((current[audioSettingsChannel.id] ?? 0) - level) < 0.005 ? current : { ...current, [audioSettingsChannel.id]: level })}
+        />}
+        inputMeter={audioSettingsChannel && audioSettingsSource?.kind === 'microphone' && <AudioChannelMeter
+          stream={audioSettingsSource.stream}
+          db={0}
+          muted={false}
+          enabled
+          onLevel={() => undefined}
+          description="Live microphone level before the mixer volume control"
         />}
       />
       <ConfirmationModal

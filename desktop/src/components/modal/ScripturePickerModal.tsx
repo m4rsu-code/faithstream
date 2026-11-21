@@ -2,7 +2,7 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { BookOpen, Check, LoaderCircle, Search, X } from 'lucide-react';
 import BodyPortal from '../BodyPortal';
 
-type Verse = { reference: string; text: string };
+type Verse = { reference: string; text: string; searchReference?: string };
 export type SelectedScriptureVerse = Verse;
 type BibleData = {
   books: {
@@ -12,6 +12,25 @@ type BibleData = {
 };
 type BibleBook = { name: string; testament: 'old' | 'new'; chapters: { number: number; verses: Verse[] }[] };
 const NEW_TESTAMENT_BOOKS = new Set(['Matthew', 'Mark', 'Luke', 'John', 'Acts', 'Romans', '1 Corinthians', '2 Corinthians', 'Galatians', 'Ephesians', 'Philippians', 'Colossians', '1 Thessalonians', '2 Thessalonians', '1 Timothy', '2 Timothy', 'Titus', 'Philemon', 'Hebrews', 'James', '1 Peter', '2 Peter', '1 John', '2 John', '3 John', 'Jude', 'Revelation']);
+const CEBUANO_BOOK_NAMES: Readonly<Record<string, string>> = {
+  Genesis: 'Genesis', Exodus: 'Exodo', Leviticus: 'Levitico', Numbers: 'Numeros', Deuteronomy: 'Deuteronomio',
+  Joshua: 'Josue', Judges: 'Mga Maghuhukom', Ruth: 'Ruth', '1 Samuel': '1 Samuel', '2 Samuel': '2 Samuel',
+  '1 Kings': '1 Mga Hari', '2 Kings': '2 Mga Hari', '1 Chronicles': '1 Cronicas', '2 Chronicles': '2 Cronicas',
+  Ezra: 'Esdras', Nehemiah: 'Nehemias', Esther: 'Ester', Job: 'Job', Psalms: 'Mga Salmo', Proverbs: 'Mga Panultihon',
+  Ecclesiastes: 'Ecclesiastes', 'Song of Solomon': 'Awit sa mga Awit', Isaiah: 'Isaias', Jeremiah: 'Jeremias',
+  Lamentations: 'Mga Pagbangotan', Ezekiel: 'Ezequiel', Daniel: 'Daniel', Hosea: 'Oseas', Joel: 'Joel', Amos: 'Amos',
+  Obadiah: 'Abdias', Jonah: 'Jonas', Micah: 'Miqueas', Nahum: 'Nahum', Habakkuk: 'Habacuc', Zephaniah: 'Sofonias',
+  Haggai: 'Hageo', Zechariah: 'Zacarias', Malachi: 'Malaquias', Matthew: 'Mateo', Mark: 'Marcos', Luke: 'Lukas',
+  John: 'Juan', Acts: 'Mga Buhat', Romans: 'Roma', '1 Corinthians': '1 Corinto',
+  '2 Corinthians': '2 Corinto', Galatians: 'Galacia', Ephesians: 'Efeso',
+  Philippians: 'Filipos', Colossians: 'Colosas', '1 Thessalonians': '1 Tesalonica',
+  '2 Thessalonians': '2 Tesalonica', '1 Timothy': '1 Timoteo', '2 Timothy': '2 Timoteo', Titus: 'Tito',
+  Philemon: 'Filemon', Hebrews: 'Hebreo', James: 'Santiago', '1 Peter': '1 Pedro', '2 Peter': '2 Pedro',
+  '1 John': '1 Juan', '2 John': '2 Juan', '3 John': '3 Juan', Jude: 'Judas', Revelation: 'Gipadayag',
+};
+const ENGLISH_BOOK_NAMES: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(CEBUANO_BOOK_NAMES).map(([englishName, cebuanoName]) => [cebuanoName, englishName]),
+);
 
 const selectionReference = (selected: Verse[]) => {
   if (!selected.length) return '';
@@ -32,7 +51,7 @@ type BibleLanguage = 'en' | 'ceb';
 /** A Bible ready to browse: every verse, grouped by book and chapter, with a quick position lookup. */
 type BibleIndex = { verses: Verse[]; catalog: BibleBook[]; position: Map<string, number> };
 
-const buildBibleIndex = (verses: Verse[]): BibleIndex => {
+const buildBibleIndex = (verses: Verse[], language: BibleLanguage): BibleIndex => {
   const books = new Map<string, Map<number, Verse[]>>();
   const position = new Map<string, number>();
   verses.forEach((verse, index) => {
@@ -48,7 +67,7 @@ const buildBibleIndex = (verses: Verse[]): BibleIndex => {
   });
   const catalog: BibleBook[] = [...books.entries()].map(([name, chapters]) => ({
     name,
-    testament: NEW_TESTAMENT_BOOKS.has(name) ? 'new' : 'old',
+    testament: NEW_TESTAMENT_BOOKS.has(language === 'ceb' ? ENGLISH_BOOK_NAMES[name] ?? name : name) ? 'new' : 'old',
     chapters: [...chapters.entries()].sort(([a], [b]) => a - b).map(([number, chapterVerses]) => ({ number, verses: chapterVerses.filter((verse): verse is Verse => !!verse) })),
   }));
   return { verses, catalog, position };
@@ -65,9 +84,18 @@ const loadBible = (language: BibleLanguage) => {
     pending = (language === 'en'
       ? import('../../data/kjv.json').then(({ default: bible }) => (bible as BibleData).books.flatMap((book) => book.chapters.flatMap((chapter) =>
         chapter.verses.map((verse) => ({ reference: `${book.englishName} ${chapter.chapter}:${verse.number}`, text: verse.text })))))
-      : import('../../data/ceb.json').then(({ default: data }) => data as Verse[]))
+      : import('../../data/ceb.json').then(({ default: data }) => (data as Verse[]).map((verse) => {
+        const match = /^(.*?)(\s+\d+:\d+)$/.exec(verse.reference);
+        if (!match) return verse;
+        const [, englishBook, chapterAndVerse] = match;
+        return {
+          ...verse,
+          reference: `${CEBUANO_BOOK_NAMES[englishBook] ?? englishBook}${chapterAndVerse}`,
+          searchReference: verse.reference,
+        };
+      })))
       .then((verses) => {
-        const index = buildBibleIndex(verses);
+        const index = buildBibleIndex(verses, language);
         readyBibles.set(language, index);
         return index;
       });
@@ -223,7 +251,7 @@ export default function ScripturePickerModal({
     const terms = deferredQuery.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
     if (!terms.length) return [];
     return verses.filter((verse) => {
-      const searchable = `${verse.reference} ${verse.text}`.toLocaleLowerCase();
+      const searchable = `${verse.reference} ${verse.searchReference ?? ''} ${verse.text}`.toLocaleLowerCase();
       return terms.every((term) => searchable.includes(term));
     }).slice(0, 100);
   }, [deferredQuery, verses]);
@@ -252,6 +280,20 @@ export default function ScripturePickerModal({
     setSelectionAnchor(null);
   };
 
+  const changeLanguage = (nextLanguage: BibleLanguage) => {
+    const englishBookName = language === 'ceb' ? ENGLISH_BOOK_NAMES[bookName] ?? bookName : bookName;
+    const nextBookName = nextLanguage === 'ceb' ? CEBUANO_BOOK_NAMES[englishBookName] ?? englishBookName : englishBookName;
+    setLanguage(nextLanguage);
+    setTestament(NEW_TESTAMENT_BOOKS.has(englishBookName) ? 'new' : 'old');
+    setBookName(nextBookName);
+    setChapterNumber(1);
+    setQuery('');
+    setSelected([]);
+    setSelectionAnchor(null);
+    setHoveredVerseReference(null);
+    setBible(readyBibles.get(nextLanguage) ?? null);
+  };
+
   if (!open) return null;
 
   return (
@@ -268,7 +310,7 @@ export default function ScripturePickerModal({
         <div className="border-b border-white/10 p-4">
           <label className="mb-3 flex items-center justify-between gap-3 text-xs text-white/60">
             Scripture language
-            <select value={language} onChange={(event) => { setLanguage(event.target.value as 'en' | 'ceb'); setQuery(''); setSelected([]); setSelectionAnchor(null); setHoveredVerseReference(null); setBible(readyBibles.get(event.target.value as BibleLanguage) ?? null); }} className="rounded-lg border border-white/10 bg-[#091521] px-3 py-2 text-sm text-white outline-none focus:border-brand">
+            <select value={language} onChange={(event) => changeLanguage(event.target.value as BibleLanguage)} className="rounded-lg border border-white/10 bg-[#091521] px-3 py-2 text-sm text-white outline-none focus:border-brand">
               <option value="en">English · King James Version</option>
               <option value="ceb">Bisaya · Cebuano</option>
             </select>
