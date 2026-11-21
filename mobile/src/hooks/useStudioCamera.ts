@@ -94,11 +94,13 @@ export function useStudioCamera() {
     local.current?.getTracks().forEach((track) => track.stop());
   }, []);
 
-  const connect = useCallback(async (address: string, code: string, shareMicrophone = false) => {
+  const connect = useCallback(async (address: string | string[], code: string, shareMicrophone = false) => {
     if (isActiveConnection(connectionRef.current.phase)) return;
-    const host = address.trim().replace(/^https?:\/\//, '').replace(/^wss?:\/\//, '').replace(/\/$/, '');
+    const hosts = [...new Set((Array.isArray(address) ? address : [address])
+      .map((value) => value.trim().replace(/^https?:\/\//, '').replace(/^wss?:\/\//, '').replace(/\/$/, ''))
+      .filter(Boolean))];
     const pin = code.trim();
-    if (!host || !/^\d{6}$/.test(pin)) {
+    if (!hosts.length || !/^\d{6}$/.test(pin)) {
       Alert.alert('Enter Studio details', 'Enter the local network address shown in Studio and its six-digit pairing code.');
       return;
     }
@@ -132,20 +134,10 @@ export function useStudioCamera() {
       setPhoneMicrophoneEnabled(microphoneTracks.length > 0);
       transition({ phase: 'connecting' });
 
-      const ws = new WebSocket(`ws://${host}/?code=${encodeURIComponent(pin)}&role=phone`);
       const queuedIce: RTCIceCandidateInit[] = [];
       let hasRemoteDescription = false;
       let terminalFailure = false;
-      socket.current = ws;
-
-      ws.onerror = () => {
-        if (attempt !== attemptId.current) return;
-        terminalFailure = true;
-        transition({ phase: 'failed', message: 'Could not reach Studio. Check Wi-Fi and address.' });
-        ws.close();
-      };
-      ws.onclose = () => {
-        if (attempt !== attemptId.current) return;
+      const finishAsDisconnected = () => {
         orientationSubscription.current?.remove();
         orientationSubscription.current = null;
         peer.current?.close();
@@ -156,72 +148,105 @@ export function useStudioCamera() {
         setPhoneMicrophoneEnabled(false);
         if (!terminalFailure) transition({ phase: 'disconnected' });
       };
-      ws.onopen = () => {
+      const connectToHost = (hostIndex: number) => {
         if (attempt !== attemptId.current) return;
-        transition({ phase: 'waiting-for-studio' });
-        orientationSubscription.current?.remove();
-        const sendOrientation = (orientation: CameraOrientation) => {
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'orientation', orientation }));
-        };
-        const updateForOrientation = (width: number, height: number) => {
-          const nextOrientation: CameraOrientation = width > height ? 'landscape' : 'portrait';
-          sendOrientation(nextOrientation);
-        };
-        const initialScreen = Dimensions.get('screen');
-        orientationSubscription.current = Dimensions.addEventListener('change', ({ screen: nextScreen }) => {
-          void updateForOrientation(nextScreen.width, nextScreen.height);
-        });
-        void updateForOrientation(initialScreen.width, initialScreen.height);
-      };
-      ws.onmessage = async (event) => {
-        if (attempt !== attemptId.current) return;
-        let message: Signal;
-        try { message = JSON.parse(String(event.data)); } catch { return; }
-        if (message.type === 'error') {
+        const ws = new WebSocket(`ws://${hosts[hostIndex]}/?code=${encodeURIComponent(pin)}&role=phone`);
+        let joined = false;
+        let movedToNextHost = false;
+        let joinTimer: ReturnType<typeof setTimeout> | undefined;
+        socket.current = ws;
+        const tryNextHost = () => {
+          if (joined || movedToNextHost || terminalFailure || attempt !== attemptId.current) return;
+          movedToNextHost = true;
+          if (joinTimer) clearTimeout(joinTimer);
+          ws.onerror = null;
+          ws.onclose = null;
+          try { ws.close(); } catch { /* Socket may already be closed. */ }
+          if (hostIndex + 1 < hosts.length) {
+            connectToHost(hostIndex + 1);
+            return;
+          }
           terminalFailure = true;
-          transition({ phase: 'failed', message: message.message || 'Pairing failed' });
-          ws.close();
-          return;
-        }
-        if (message.type === 'joined') { transition({ phase: 'connected' }); return; }
+          finishAsDisconnected();
+          transition({ phase: 'failed', message: 'Studio did not respond at the scanned addresses. Check Wi-Fi, address, and firewall.' });
+        };
+        ws.onerror = tryNextHost;
+        ws.onclose = () => {
+          if (attempt !== attemptId.current || socket.current !== ws) return;
+          if (!joined) {
+            if (terminalFailure) finishAsDisconnected();
+            else tryNextHost();
+            return;
+          }
+          finishAsDisconnected();
+        };
+        ws.onopen = () => {
+          if (attempt !== attemptId.current) return;
+          transition({ phase: 'waiting-for-studio' });
+          joinTimer = setTimeout(tryNextHost, 4000);
+        };
+        ws.onmessage = async (event) => {
+          if (attempt !== attemptId.current || socket.current !== ws) return;
+          let message: Signal;
+          try { message = JSON.parse(String(event.data)); } catch { return; }
+          if (message.type === 'error') {
+            terminalFailure = true;
+            transition({ phase: 'failed', message: message.message || 'Pairing failed' });
+            ws.close();
+            return;
+          }
+          if (message.type === 'joined') {
+            joined = true;
+            if (joinTimer) clearTimeout(joinTimer);
+            transition({ phase: 'connected' });
+            orientationSubscription.current?.remove();
+            const sendOrientation = (orientation: CameraOrientation) => {
+              if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'orientation', orientation }));
+            };
+            const updateForOrientation = (width: number, height: number) => sendOrientation(width > height ? 'landscape' : 'portrait');
+            const initialScreen = Dimensions.get('screen');
+            orientationSubscription.current = Dimensions.addEventListener('change', ({ screen: nextScreen }) => {
+              updateForOrientation(nextScreen.width, nextScreen.height);
+            });
+            updateForOrientation(initialScreen.width, initialScreen.height);
+            return;
+          }
 
-        if (message.type === 'offer' && message.sdp) {
-          const connection = new NativeRTCPeerConnection({ iceServers: [] });
-          peer.current = connection;
-          (local.current ?? localStream).getTracks().forEach((track) => connection.addTrack(track, local.current ?? localStream));
-          connection.onicecandidate = (event) => {
-            if (event.candidate && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'ice', candidate: event.candidate.toJSON() }));
+          if (message.type === 'offer' && message.sdp) {
+            const connection = new NativeRTCPeerConnection({ iceServers: [] });
+            peer.current = connection;
+            (local.current ?? localStream).getTracks().forEach((track) => connection.addTrack(track, local.current ?? localStream));
+            connection.onicecandidate = (event) => {
+              if (event.candidate && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ice', candidate: event.candidate.toJSON() }));
+            };
+            connection.onconnectionstatechange = () => {
+              if (attempt !== attemptId.current) return;
+              if (connection.connectionState === 'connected') transition({ phase: 'publishing' });
+              else if (connection.connectionState === 'failed') {
+                terminalFailure = true;
+                transition({ phase: 'failed', message: 'Camera connection failed. Reconnect to Studio and try again.' });
+                ws.close();
+              } else if (connection.connectionState === 'disconnected') transition({ phase: 'reconnecting' });
+              else if (connection.connectionState === 'closed') transition({ phase: 'disconnected' });
+              else transition({ phase: 'connecting' });
+            };
+            await connection.setRemoteDescription({ type: 'offer', sdp: message.sdp });
+            hasRemoteDescription = true;
+            for (const candidate of queuedIce.splice(0)) {
+              try { await connection.addIceCandidate(candidate); } catch { /* Ignore stale ICE candidates. */ }
             }
-          };
-          connection.onconnectionstatechange = () => {
-            if (attempt !== attemptId.current) return;
-            if (connection.connectionState === 'connected') transition({ phase: 'publishing' });
-            else if (connection.connectionState === 'failed') {
-              terminalFailure = true;
-              transition({ phase: 'failed', message: 'Camera connection failed. Reconnect to Studio and try again.' });
-              ws.close();
-            } else if (connection.connectionState === 'disconnected') transition({ phase: 'reconnecting' });
-            else if (connection.connectionState === 'closed') transition({ phase: 'disconnected' });
-            else transition({ phase: 'connecting' });
-          };
-          await connection.setRemoteDescription({ type: 'offer', sdp: message.sdp });
-          hasRemoteDescription = true;
-          for (const candidate of queuedIce.splice(0)) {
-            try { await connection.addIceCandidate(candidate); } catch { /* Ignore stale ICE candidates. */ }
-          }
-          const answer = await connection.createAnswer();
-          await connection.setLocalDescription(answer);
-          ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp }));
-        } else if (message.type === 'ice' && message.candidate && peer.current) {
-          if (!hasRemoteDescription) queuedIce.push(message.candidate);
-          else {
-            try { await peer.current.addIceCandidate(message.candidate); } catch { /* Ignore stale ICE candidates. */ }
-          }
-        } else if (message.type === 'ice' && message.candidate) {
-          queuedIce.push(message.candidate);
-        }
+            const answer = await connection.createAnswer();
+            await connection.setLocalDescription(answer);
+            ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp }));
+          } else if (message.type === 'ice' && message.candidate && peer.current) {
+            if (!hasRemoteDescription) queuedIce.push(message.candidate);
+            else {
+              try { await peer.current.addIceCandidate(message.candidate); } catch { /* Ignore stale ICE candidates. */ }
+            }
+          } else if (message.type === 'ice' && message.candidate) queuedIce.push(message.candidate);
+        };
       };
+      connectToHost(0);
     } catch (error) {
       if (attempt !== attemptId.current) return;
       disconnect();

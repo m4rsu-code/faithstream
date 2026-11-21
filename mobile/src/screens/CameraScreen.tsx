@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Keyboard,
   KeyboardAvoidingView,
   NativeModules,
@@ -26,24 +27,32 @@ export default function CameraScreen() {
   const [cameraFullscreen, setCameraFullscreen] = useState(false);
   const [shareMicrophone, setShareMicrophone] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
-  const hadCameraStream = useRef(false);
+  const connectionStartedAt = useRef<number | null>(null);
   const scrollRef = useRef<ScrollView | null>(null);
   const codeInputRef = useRef<TextInput | null>(null);
   const { camera, connect, disconnect, flipCamera, phase, status, stream, phoneMicrophoneEnabled, togglePhoneMicrophone } = useStudioCamera();
 
+  const connectWithLoading = (targetAddress: string | string[], pairingCode: string) => {
+    connectionStartedAt.current = Date.now();
+    void connect(targetAddress, pairingCode, shareMicrophone);
+  };
+
   const useScannedPairing = (pairing: ScannedPairing) => {
-    setAddress(pairing.address);
+    setAddress(pairing.addresses[0] ?? '');
     setCode(pairing.code);
     setScannerOpen(false);
     // Let Expo Camera release the preview before the WebRTC camera opens.
-    setTimeout(() => { void connect(pairing.address, pairing.code, shareMicrophone); }, 350);
+    setTimeout(() => { connectWithLoading(pairing.addresses, pairing.code); }, 350);
   };
 
   useEffect(() => {
-    if (stream && !hadCameraStream.current) setCameraFullscreen(true);
-    if (!stream) setCameraFullscreen(false);
-    hadCameraStream.current = stream !== null;
-  }, [stream]);
+    if (phase === 'publishing') {
+      const startedAt = connectionStartedAt.current ?? Date.now();
+      const timer = setTimeout(() => setCameraFullscreen(true), Math.max(0, 1000 - (Date.now() - startedAt)));
+      return () => clearTimeout(timer);
+    }
+    setCameraFullscreen(false);
+  }, [phase]);
 
   const keepFocusedInputVisible = () => {
     // KeyboardAvoidingView shrinks the available area; this delayed scroll
@@ -78,18 +87,18 @@ export default function CameraScreen() {
           onScrollBeginDrag={Keyboard.dismiss}
         >
           <BrandHeader />
-          <CameraPreview camera={camera} onFlip={() => void flipCamera()} onFullscreen={() => setCameraFullscreen(true)} status={status} stream={stream} />
+          <CameraPreview camera={camera} connecting={['requesting-permission', 'connecting', 'waiting-for-studio', 'connected', 'publishing'].includes(phase)} onFlip={() => void flipCamera()} onFullscreen={() => setCameraFullscreen(true)} status={status} stream={stream} />
           <ConnectionForm
             address={address}
             code={code}
-            connected={stream !== null}
+            connected={phase === 'publishing' || phase === 'connected'}
             phase={phase}
             codeInputRef={codeInputRef}
             onAddressChange={setAddress}
             onAddressSubmit={() => codeInputRef.current?.focus()}
             onCodeChange={setCode}
             onScanQr={() => setScannerOpen(true)}
-            onConnect={() => void connect(address, code, shareMicrophone)}
+            onConnect={() => connectWithLoading(address, code)}
             onDisconnect={disconnect}
             onInputFocus={keepFocusedInputVisible}
             shareMicrophone={shareMicrophone}

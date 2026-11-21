@@ -76,7 +76,7 @@ export default function ConnectionForm({
       </TouchableOpacity>
       <View accessibilityLiveRegion="polite" style={styles.statusRow}>
         <View style={[styles.statusDot, { backgroundColor: indicatorColor }]} />
-        <Text style={[styles.status, disconnected && styles.disconnectedStatus]}>{disconnected ? 'Disconnected from Studio' : status}</Text>
+        <Text style={[styles.status, disconnected && styles.disconnectedStatus]}>{phase === 'failed' ? status : disconnected ? 'Disconnected from Studio' : status}</Text>
       </View>
     </View>
   );

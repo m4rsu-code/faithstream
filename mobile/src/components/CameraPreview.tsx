@@ -1,17 +1,18 @@
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { RTCView, type MediaStream } from 'react-native-webrtc';
 import type { CameraFacing } from '../hooks/useStudioCamera';
 import { colors } from '../theme/colors';
 
 type Props = {
   camera: CameraFacing;
+  connecting: boolean;
   onFullscreen: () => void;
   onFlip: () => void;
   status: string;
   stream: MediaStream | null;
 };
 
-export default function CameraPreview({ camera, onFullscreen, onFlip, status, stream }: Props) {
+export default function CameraPreview({ camera, connecting, onFullscreen, onFlip, status, stream }: Props) {
   const isOnAir = status.startsWith('On air');
 
   return (
@@ -25,6 +26,7 @@ export default function CameraPreview({ camera, onFullscreen, onFlip, status, st
           <Text style={styles.muted}>Connect to Studio to send this camera</Text>
         </View>
       )}
+      {connecting && <View style={styles.connecting} pointerEvents="none"><ActivityIndicator color={colors.orange} /><Text style={styles.connectingText}>Connecting to Studio…</Text></View>}
       <View style={styles.liveBadge}>
         <View style={[styles.dot, { backgroundColor: isOnAir ? colors.green : colors.orange }]} />
         <Text style={styles.badgeText}>{isOnAir ? 'CONNECTED' : 'CAMERA'}</Text>
@@ -44,6 +46,8 @@ const styles = StyleSheet.create({
   emptyTitle: { color: colors.text, fontSize: 14, fontWeight: '700' },
   muted: { color: colors.muted, marginTop: 5, fontSize: 11 },
   liveBadge: { position: 'absolute', top: 12, left: 12, borderRadius: 20, flexDirection: 'row', gap: 6, alignItems: 'center', backgroundColor: '#09131eee', paddingHorizontal: 10, paddingVertical: 6 },
+  connecting: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', gap: 9, backgroundColor: '#03070b55' },
+  connectingText: { color: colors.text, fontSize: 12, fontWeight: '700', backgroundColor: '#09131eee', overflow: 'hidden', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 7 },
   dot: { width: 7, height: 7, borderRadius: 4 },
   badgeText: { color: colors.text, fontWeight: '800', fontSize: 9, letterSpacing: 0.7 },
   flip: { position: 'absolute', bottom: 12, right: 12, backgroundColor: '#09131eee', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 20 },

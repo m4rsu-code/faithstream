@@ -3,7 +3,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Alert, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors } from '../theme/colors';
 
-export type ScannedPairing = { address: string; code: string };
+export type ScannedPairing = { addresses: string[]; code: string };
 
 type Props = {
   visible: boolean;
@@ -24,7 +24,7 @@ function readPairingQr(value: string): ScannedPairing | null {
       : [];
     const code = typeof payload.code === 'string' ? payload.code.trim() : '';
     if (payload.app !== 'faithstream-cam-pairing' || payload.version !== 1 || !addresses.length || !/^\d{6}$/.test(code)) return null;
-    return { address: addresses[0].trim(), code };
+    return { addresses: addresses.map((address) => address.trim()), code };
   } catch {
     return null;
   }

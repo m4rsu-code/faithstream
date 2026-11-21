@@ -20,6 +20,10 @@ const withApkInstaller = (config) => {
 
     const application = manifest.application?.[0];
     if (!application) throw new Error('FaithStream APK installer could not find the Android application manifest.');
+    // FaithStream Cam pairs with Studio over a local ws:// connection. Android
+    // blocks cleartext traffic in release builds unless this is present in the
+    // main manifest (the debug manifest setting does not carry over to release).
+    application.$['android:usesCleartextTraffic'] = 'true';
     application.provider ??= [];
     if (!application.provider.some((provider) => provider.$['android:name'] === 'androidx.core.content.FileProvider')) {
       application.provider.push({

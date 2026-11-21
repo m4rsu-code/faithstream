@@ -2,9 +2,9 @@
   "expo": {
     "name": "FaithStream Cam",
     "slug": "faithstream-cam",
-    "version": "1.0.1",
+    "version": "1.0.5",
     "android": {
-      "versionCode": 2,
+      "versionCode": 6,
       "package": "com.anonymous.faithstreamcam",
       "adaptiveIcon": {
         "foregroundImage": "./assets/camera-launcher-icon.png",
