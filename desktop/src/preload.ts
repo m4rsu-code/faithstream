@@ -42,7 +42,13 @@ contextBridge.exposeInMainWorld('faithstreamWindow', {
     ipcRenderer.invoke('presentation:render-pptx', webUtils.getPathForFile(file)) as Promise<{
       ok: boolean;
       message?: string;
-      slides?: { name: string; data: string }[];
+      slides?: {
+        name: string;
+        width: number;
+        height: number;
+        backgroundColor: string;
+        elements: { kind: 'text' | 'image' | 'shape'; shapeKind?: 'rectangle' | 'circle' | 'triangle' | 'star' | 'arrow'; order: number; x: number; y: number; w: number; h: number; textBase64?: string; textRuns?: { textBase64: string; font?: string; size?: number; color?: string; bold?: boolean; italic?: boolean; underline?: boolean }[]; font?: string; size?: number; color?: string; bold?: boolean; italic?: boolean; underline?: boolean; align?: 'left' | 'center' | 'right' | 'justify'; valign?: 'top' | 'middle' | 'bottom'; autoSize?: boolean; padding?: { top: number; right: number; bottom: number; left: number }; fillColor?: string; fillOpacity?: number; data?: string; mimeType?: string }[];
+      }[];
     }>,
   optimizeVideo: (file: File) =>
     ipcRenderer.invoke('media:optimize-video', webUtils.getPathForFile(file)) as Promise<{

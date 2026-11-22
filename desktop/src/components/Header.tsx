@@ -131,7 +131,9 @@ const Header: React.FC<HeaderProps> = ({
   }, []);
 
   useEffect(() => {
-    if (updateStatus.status === 'available' && lastNotifiedUpdateStatus.current !== 'available') {
+    const updateHasStartedDownloading = updateStatus.status === 'downloading';
+    const updateWasAlreadyAnnounced = ['available', 'downloading'].includes(lastNotifiedUpdateStatus.current);
+    if ((updateStatus.status === 'available' || updateHasStartedDownloading) && !updateWasAlreadyAnnounced) {
       window.dispatchEvent(new CustomEvent('faithstream:notification', { detail: {
         id: `studio-update-${Date.now()}`,
         title: 'FaithStream Studio update available',

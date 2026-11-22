@@ -11,7 +11,7 @@ const IGNORED_FILES = /^(\.|~\$)|^(thumbs\.db|desktop\.ini)$/i;
 export const isIgnoredFile = (name: string) => IGNORED_FILES.test(name);
 
 export const isSlideImage = (file: File) => /^image\/(png|jpe?g|webp|gif|bmp)$/i.test(file.type) || /\.(png|jpe?g|webp|gif|bmp)$/i.test(file.name);
-export const isPowerPoint = (file: File) => /\.pptx$/i.test(file.name);
+export const isPowerPoint = (file: File) => /\.pptx?$/i.test(file.name);
 export const isBackgroundMedia = (file: File) => file.type.startsWith('image/') || file.type.startsWith('video/')
   || /\.(png|jpe?g|webp|gif|bmp|mp4|mov|m4v|webm|mkv|avi)$/i.test(file.name);
 

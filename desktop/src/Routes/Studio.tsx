@@ -45,10 +45,11 @@ import { backgroundClasses, backgroundStyle, customBackgroundStops } from '../ut
 import { SHOW_SONG_EVENT, SONG_SAVED_EVENT, SONG_SLIDE_SETTINGS_EVENT, compareSongs, firstLine, loadLibrary, loadSongSlideSettings, searchSongs, songLineKey, songSlideLayouts, songStyleFor, type Song, type SongStyle, type SongTextLayout } from '../utils/songbooks';
 import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimization';
 import { getAccountDatabaseName, getAccountStorageKey } from '../utils/accountStorage';
+import GOOGLE_FONT_FAMILIES from '../data/google-font-families.json';
 
 /* ---------- Data ---------- */
 
-type Slide = { text: string; ref?: string; bg?: string; bgImage?: string; bgPosition?: { x: number; y: number }; bgVideo?: string; bgVideoMuted?: boolean; bgAssetId?: string; dim?: number; backgroundOpacity?: number; textColor?: string; title?: string; countdown?: CountdownSettings };
+type Slide = { text: string; ref?: string; bg?: string; canvasAspect?: number; bgImage?: string; bgImageFit?: 'cover' | 'contain'; bgPosition?: { x: number; y: number }; bgVideo?: string; bgVideoMuted?: boolean; bgAssetId?: string; dim?: number; backgroundOpacity?: number; textColor?: string; title?: string; countdown?: CountdownSettings };
 
 type PresentationTextBox = {
   text: string; font: string; size: number; color: string; bold: boolean; italic: boolean;
@@ -61,19 +62,35 @@ type PresentationTextBox = {
   valign?: 'top' | 'middle' | 'bottom';
   /** Single lines aligned differently from the box (index = line number; null = follow the box). */
   lineAligns?: ('left' | 'center' | 'right' | 'justify' | null)[];
+  importedRuns?: { text: string; font: string; size: number; letterSpacing?: number; color: string; bold: boolean; italic: boolean; underline: boolean }[];
+  importedPadding?: { top: number; right: number; bottom: number; left: number };
+  powerPointImported?: boolean;
+  powerPointTextFit?: boolean;
   animation?: StudioAnimation;
   animationDuration?: number;
   animationDelay?: number;
   animationEasing?: 'smooth' | 'linear' | 'snappy';
 };
 type StudioAnimation = 'none' | 'fade' | 'rise' | 'pop' | 'typewriter' | 'slide-left' | 'slide-right' | 'slide-up' | 'slide-down' | 'zoom' | 'drift' | 'bounce' | 'spin' | 'blur';
+const requestedStudioFonts = new Set<string>();
+const studioFontKey = (family: string) => family.normalize('NFKD').toLocaleLowerCase().replace(/[^a-z0-9]/g, '');
+const resolveStudioFont = (family: string) => (GOOGLE_FONT_FAMILIES as string[]).find((candidate) => studioFontKey(candidate) === studioFontKey(family)) ?? family.trim();
+const loadStudioFont = (family: string) => {
+  const resolvedFamily = resolveStudioFont(family);
+  if (!(GOOGLE_FONT_FAMILIES as string[]).includes(resolvedFamily) || requestedStudioFonts.has(resolvedFamily)) return;
+  requestedStudioFonts.add(resolvedFamily);
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(resolvedFamily)}&display=swap`;
+  document.head.appendChild(link);
+};
 const studioAnimationStyle = (item: { animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' }) => ({
   animationDuration: `${item.animationDuration ?? (item.animation === 'typewriter' ? 1500 : 700)}ms`,
   animationDelay: `${item.animationDelay ?? 0}ms`,
   animationTimingFunction: item.animationEasing === 'linear' ? 'linear' : item.animationEasing === 'snappy' ? 'cubic-bezier(.16,1,.3,1)' : 'cubic-bezier(.2,.75,.25,1)',
   animationFillMode: 'both' as const,
 });
-type PresentationPicture = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; poster?: string; muted?: boolean; layerOrder?: number | 'back' | 'front'; animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' };
+type PresentationPicture = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; poster?: string; muted?: boolean; fitToBox?: boolean; layerOrder?: number | 'back' | 'front'; animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' };
 type PresentationShape = { id: number; kind: string; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number; animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' };
 type PresentationDesign = {
   box?: PresentationTextBox | null;
@@ -172,9 +189,11 @@ type SavedPresentationSlide = {
   id: number;
   title?: string;
   bg?: string;
+  canvasAspect?: number;
   dim?: number;
   backgroundOpacity?: number;
   bgImage?: string;
+  bgImageFit?: 'cover' | 'contain';
   bgPosition?: { x: number; y: number };
   bgVideo?: string;
   bgVideoMuted?: boolean;
@@ -186,6 +205,25 @@ type SavedPresentationSlide = {
   countdown?: CountdownSettings;
 };
 type SavedPresentation = { id: string; name: string; slides: SavedPresentationSlide[]; locked?: boolean };
+let deviceSavedPresentations: SavedPresentation[] = [];
+const readDeviceSavedPresentations = async (): Promise<SavedPresentation[]> => {
+  const request = indexedDB.open(getAccountDatabaseName('faithstream.presentation-data'), 1);
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains('projects')) request.result.createObjectStore('projects', { keyPath: 'id' });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction('projects', 'readonly');
+    const storeRequest = transaction.objectStore('projects').getAll();
+    storeRequest.onsuccess = () => resolve((storeRequest.result as SavedPresentation[]).filter((item) => Array.isArray(item.slides)));
+    storeRequest.onerror = () => reject(storeRequest.error);
+    transaction.oncomplete = () => db.close();
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+  });
+};
 type StudioMedia = { id: string; type: 'image' | 'video'; blob: Blob; thumbnailBlob?: Blob; originalBlob?: Blob; optimized?: boolean };
 type StudioMediaUrlMap = Record<string, { type: 'image' | 'video'; url: string; thumbnailUrl?: string; sizeBytes?: number; originalBytes?: number; optimized?: boolean }>;
 type StudioMusicAsset = { id: string; name: string; path: string; createdAt: number };
@@ -221,7 +259,9 @@ const syncPresentationSlides = (scene: Scene, presentation: SavedPresentation): 
       title: savedSlide.title || existing?.title || `Slide ${index + 1}`,
       text: text || savedSlide.title || existing?.text || '',
       bg: savedSlide.bg ?? existing?.bg ?? 'from-slate-600 to-slate-950',
+      canvasAspect: savedSlide.canvasAspect ?? existing?.canvasAspect,
       bgImage: savedSlide.bgImage ?? existing?.bgImage,
+      bgImageFit: savedSlide.bgImageFit ?? existing?.bgImageFit,
       bgPosition: savedSlide.bgPosition,
       bgVideo: savedSlide.bgVideo ?? existing?.bgVideo,
       bgVideoMuted: savedSlide.bgVideoMuted ?? existing?.bgVideoMuted,
@@ -263,7 +303,7 @@ const loadStudioScenes = (): Scene[] => {
   try {
     const saved = JSON.parse(localStorage.getItem(getAccountStorageKey(STUDIO_SCENES_KEY)) ?? '[]') as Scene[];
     if (!Array.isArray(saved)) return [];
-    const presentations = JSON.parse(localStorage.getItem(getAccountStorageKey('faithstream.presentations')) ?? '[]') as SavedPresentation[];
+    const presentations = readSavedPresentations();
     return upgradeScriptureScenes(saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides))
       .filter((scene) => !scene.presentationId || presentations.some((item) => item.id === scene.presentationId))
       .map((scene) => {
@@ -294,7 +334,10 @@ const loadSlideshowScenes = (): Scene[] => {
 const readSavedPresentations = (): SavedPresentation[] => {
   try {
     const saved = JSON.parse(localStorage.getItem(getAccountStorageKey('faithstream.presentations')) ?? '[]') as SavedPresentation[];
-    return Array.isArray(saved) ? saved.filter((presentation) => presentation?.id && Array.isArray(presentation.slides)) : [];
+    const combined = new Map<string, SavedPresentation>();
+    if (Array.isArray(saved)) saved.filter((presentation) => presentation?.id && Array.isArray(presentation.slides)).forEach((presentation) => combined.set(presentation.id, presentation));
+    deviceSavedPresentations.forEach((presentation) => combined.set(presentation.id, presentation));
+    return [...combined.values()];
   } catch { return []; }
 };
 
@@ -553,8 +596,18 @@ function ProgramTextBox({ box, defaultLayerOrder = 3000, animate = false }: { bo
   const inner = useRef<HTMLDivElement>(null);
   const [fitScale, setFitScale] = useState(1);
   useEffect(() => {
+    loadStudioFont(box.font);
+    box.importedRuns?.forEach((run) => loadStudioFont(run.font));
     const fit = () => {
-      if (!wrap.current || !inner.current || !box.autoSize || !inner.current.offsetHeight) {
+      if (!wrap.current || !inner.current || !inner.current.offsetHeight) {
+        setFitScale(1);
+        return;
+      }
+      if (box.powerPointImported) {
+        setFitScale(1);
+        return;
+      }
+      if (!box.autoSize) {
         setFitScale(1);
         return;
       }
@@ -562,20 +615,27 @@ function ProgramTextBox({ box, defaultLayerOrder = 3000, animate = false }: { bo
     };
     fit();
     const observer = new ResizeObserver(fit);
+    const fontSet = document.fonts;
+    fontSet?.addEventListener('loadingdone', fit);
     if (wrap.current) observer.observe(wrap.current);
     if (inner.current) observer.observe(inner.current);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      fontSet?.removeEventListener('loadingdone', fit);
+    };
   }, [box]);
   return (
-    <div ref={wrap} className={`absolute flex ${box.valign === 'top' ? 'items-start' : box.valign === 'bottom' ? 'items-end' : 'items-center'} overflow-hidden ${animate && box.animation && box.animation !== 'none' ? `slide-content-${box.animation}` : ''}`} style={{ ...(animate && box.animation && box.animation !== 'none' ? studioAnimationStyle(box) : {}), left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`, zIndex: typeof box.layerOrder === 'number' ? box.layerOrder : box.layerOrder === 'front' ? 5000 : box.layerOrder === 'back' ? 0 : defaultLayerOrder, background: box.boxBgOn ? box.boxBg : undefined, borderRadius: '1cqw' }}>
-      <div ref={inner} className="w-full whitespace-pre-wrap wrap-break-word" style={{ textAlign: box.align, textAlignLast: box.align === 'justify' ? 'left' : undefined, transform: `scale(${fitScale})`, transformOrigin: box.valign === 'top' ? 'top center' : box.valign === 'bottom' ? 'bottom center' : 'center', lineHeight: box.lineHeight, letterSpacing: `${(box.letterSpacing / 1280) * 100}cqw` }}>
-        <div className="whitespace-pre-wrap" style={{ fontFamily: `"${box.font.replaceAll('"', '')}", sans-serif`, fontSize: `${(box.size / 1280) * 100}cqw`, fontWeight: box.bold ? 800 : 500, fontStyle: box.italic ? 'italic' : 'normal', textDecoration: box.underline ? 'underline' : 'none', textTransform: box.uppercase ? 'uppercase' : undefined, color: box.color, textShadow: box.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : undefined }}>{hasLineAligns(box.lineAligns)
+    <div ref={wrap} className={`absolute flex ${box.valign === 'top' ? 'items-start' : box.valign === 'bottom' ? 'items-end' : 'items-center'} ${box.powerPointImported ? 'overflow-visible' : 'overflow-hidden'} ${animate && box.animation && box.animation !== 'none' ? `slide-content-${box.animation}` : ''}`} style={{ ...(animate && box.animation && box.animation !== 'none' ? studioAnimationStyle(box) : {}), left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`, zIndex: typeof box.layerOrder === 'number' ? box.layerOrder : box.layerOrder === 'front' ? 5000 : box.layerOrder === 'back' ? 0 : defaultLayerOrder, background: box.boxBgOn ? box.boxBg : undefined, borderRadius: '1cqw' }}>
+      <div ref={inner} className={`w-full whitespace-pre-wrap ${box.powerPointImported ? '' : 'wrap-break-word'}`} style={{ textAlign: box.align, textAlignLast: box.align === 'justify' ? 'left' : undefined, transform: `scale(${fitScale})`, transformOrigin: box.valign === 'top' ? 'top center' : box.valign === 'bottom' ? 'bottom center' : 'center', lineHeight: box.lineHeight, letterSpacing: `${(box.letterSpacing / 1280) * 100}cqw`, ...(box.importedPadding ? { padding: `${(box.importedPadding.top / 1280) * 100}cqw ${(box.importedPadding.right / 1280) * 100}cqw ${(box.importedPadding.bottom / 1280) * 100}cqw ${(box.importedPadding.left / 1280) * 100}cqw` } : {}) }}>
+        <div className="whitespace-pre-wrap" style={{ fontFamily: `"${resolveStudioFont(box.font).replaceAll('"', '')}", sans-serif`, fontSize: `${(box.size / 1280) * 100}cqw`, fontWeight: box.bold ? (box.powerPointImported ? 700 : 800) : 500, fontStyle: box.italic ? 'italic' : 'normal', textDecoration: box.underline ? 'underline' : 'none', textTransform: box.uppercase ? 'uppercase' : undefined, color: box.color, textShadow: box.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : undefined }}>{box.importedRuns?.length
+          ? box.importedRuns.map((run, index) => <span key={index} style={{ fontFamily: `"${resolveStudioFont(run.font).replaceAll('"', '')}", sans-serif`, fontSize: `${(run.size / 1280) * 100}cqw`, letterSpacing: `${((run.letterSpacing ?? box.letterSpacing) / 1280) * 100}cqw`, color: run.color, fontWeight: run.bold ? 700 : 500, fontStyle: run.italic ? 'italic' : 'normal', textDecoration: run.underline ? 'underline' : 'none' }}>{run.text}</span>)
+          : hasLineAligns(box.lineAligns)
           ? box.text.split('\n').map((line, lineIndex) => {
             const lineAlign = lineAlignAt(box.align, box.lineAligns, lineIndex);
             return <div key={lineIndex} style={{ textAlign: lineAlign, textAlignLast: lineAlign === 'justify' ? 'left' : undefined }}>{line || ' '}</div>;
           })
           : box.text}</div>
-      </div>
+        </div>
     </div>
   );
 }
@@ -604,19 +664,27 @@ function SlideView({
   if (slide?.design) {
     const boxes = [slide.design.box, ...(slide.design.extraBoxes ?? []).map((item) => item.box)]
       .filter((box): box is PresentationTextBox => !!box);
+    const canvasAspect = slide.canvasAspect ?? 16 / 9;
+    const canvasFrameStyle = {
+      width: `${Math.min(1, canvasAspect / (16 / 9)) * 100}%`,
+      height: `${Math.min(1, (16 / 9) / canvasAspect) * 100}%`,
+      aspectRatio: `${canvasAspect}`,
+    };
     return (
-       <div className={`relative isolate h-full w-full overflow-hidden bg-linear-to-br ${backgroundClasses(slide.bg ?? bg)}`} style={{ containerType: 'inline-size', ...backgroundStyle(slide.bg ?? bg) }}>
-        <SlideBackgroundLayer imageUrl={slide.bgImage} videoUrl={slide.bgVideo} posterUrl={slide.bgImage} opacity={slide.backgroundOpacity ?? 100} dim={slide.dim ?? 0} muted={slide.bgVideoMuted ?? true} position={`${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%`} seamless={seamlessBackground} eager={!deferMedia} />
+      <div className="flex h-full w-full items-center justify-center overflow-hidden bg-black">
+       <div className={`relative isolate overflow-hidden bg-linear-to-br ${backgroundClasses(slide.bg ?? bg)}`} style={{ ...canvasFrameStyle, containerType: 'inline-size', ...backgroundStyle(slide.bg ?? bg) }}>
+        <SlideBackgroundLayer imageUrl={slide.bgImage} videoUrl={slide.bgVideo} posterUrl={slide.bgImage} opacity={slide.backgroundOpacity ?? 100} dim={slide.dim ?? 0} muted={slide.bgVideoMuted ?? true} position={`${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%`} imageFit={slide.bgImageFit} seamless={seamlessBackground} eager={!deferMedia} />
         {slide.design.pictures?.map((picture, index) => {
           const zIndex = typeof picture.layerOrder === 'number' ? picture.layerOrder : picture.layerOrder === 'front' ? 5000 : picture.layerOrder === 'back' ? 0 : 1000 + index;
           const style = { ...(animate && picture.animation && picture.animation !== 'none' ? studioAnimationStyle(picture) : {}), left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, zIndex };
           return picture.mediaType === 'video'
             ? <video key={`${animationSlideKey}:${picture.id}`} src={picture.src} poster={picture.poster} controls playsInline muted={picture.muted ?? false} className={`absolute object-contain ${animate && picture.animation && picture.animation !== 'none' ? `slide-content-${picture.animation}` : ''}`} style={style} />
-            : <img key={`${animationSlideKey}:${picture.id}`} src={picture.src} alt="" loading={deferMedia ? 'lazy' : 'eager'} decoding="async" draggable={false} className={`absolute object-contain ${animate && picture.animation && picture.animation !== 'none' ? `slide-content-${picture.animation}` : ''}`} style={style} />;
+            : <img key={`${animationSlideKey}:${picture.id}`} src={picture.src} alt="" loading={deferMedia ? 'lazy' : 'eager'} decoding="async" draggable={false} className={`absolute ${picture.fitToBox ? 'object-fill' : 'object-contain'} ${animate && picture.animation && picture.animation !== 'none' ? `slide-content-${picture.animation}` : ''}`} style={style} />;
         })}
         {slide.design.shapes?.map((shape, index) => <div key={`${animationSlideKey}:${shape.id}`} className={`absolute ${animate && shape.animation && shape.animation !== 'none' ? `slide-content-${shape.animation}` : ''}`} style={{ ...(animate && shape.animation && shape.animation !== 'none' ? studioAnimationStyle(shape) : {}), left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
         {boxes.map((box, index) => <ProgramTextBox key={`${animationSlideKey}:${index}`} box={box} defaultLayerOrder={3000 + index} animate={animate} />)}
         {slide.countdown && <CountdownDisplay countdown={slide.countdown} />}
+       </div>
       </div>
     );
   }
@@ -625,7 +693,7 @@ function SlideView({
        className={`relative isolate flex h-full w-full flex-col items-center justify-center overflow-hidden bg-linear-to-br p-2 text-center text-white ${backgroundClasses(slide?.bg ?? bg)}`}
       style={backgroundStyle(slide?.bg ?? bg)}
     >
-      <SlideBackgroundLayer imageUrl={slide?.bgImage} videoUrl={slide?.bgVideo} posterUrl={slide?.bgImage} opacity={slide?.backgroundOpacity ?? 100} dim={slide ? slide.dim ?? 20 : 0} muted={slide?.bgVideoMuted ?? true} seamless={seamlessBackground} eager={!deferMedia} />
+      <SlideBackgroundLayer imageUrl={slide?.bgImage} videoUrl={slide?.bgVideo} posterUrl={slide?.bgImage} opacity={slide?.backgroundOpacity ?? 100} dim={slide ? slide.dim ?? 20 : 0} muted={slide?.bgVideoMuted ?? true} imageFit={slide?.bgImageFit} seamless={seamlessBackground} eager={!deferMedia} />
       {slide?.countdown && <CountdownDisplay countdown={slide.countdown} />}
       {slide && scale && (
         <div className="relative z-10" style={{ fontSize: `clamp(${minRem}rem, ${scale}cqw, ${maxRem}rem)`, color: slide.textColor ?? '#fff' }}>
@@ -700,6 +768,7 @@ function ScriptureDesignModal({
           ownDesign
           designLabel="scripture passage"
           showDefaultActions={false}
+          rememberStyle
           fixedVerseSlides
           fixedVerseTexts={editedVerses}
           onTextChange={({ index, text }) => setEditedVerses((current) => current.map((verse, verseIndex) => {
@@ -1720,7 +1789,8 @@ export default function Studio() {
   }, [slideshowScenes]);
 
   useEffect(() => {
-    const refreshLinkedPresentationTitles = () => {
+    const refreshLinkedPresentationTitles = async () => {
+      try { deviceSavedPresentations = await readDeviceSavedPresentations(); } catch { /* Keep using the cached library if storage is briefly unavailable. */ }
       const presentations = readSavedPresentations();
       const byId = new Map(presentations.map((presentation) => [presentation.id, presentation]));
       const refresh = (current: Scene[]) => current
@@ -1744,6 +1814,7 @@ export default function Studio() {
     window.addEventListener('faithstream:presentations-updated', refreshLinkedPresentationTitles);
     window.addEventListener('faithstream:media-updated', onMediaUpdated);
     window.addEventListener('storage', onPresentationsStorage);
+    void refreshLinkedPresentationTitles();
     return () => {
       window.removeEventListener('faithstream:presentations-updated', refreshLinkedPresentationTitles);
       window.removeEventListener('faithstream:media-updated', onMediaUpdated);
@@ -2119,6 +2190,7 @@ export default function Studio() {
         title: slide.title,
         text: textParts.join('\n') || slide.title || '',
         bg: slide.bg ?? 'from-slate-600 to-slate-950',
+        canvasAspect: slide.canvasAspect,
         bgAssetId: slide.bgAssetId,
         bgImage: asset?.type === 'image' ? asset.url : asset?.type === 'video' ? asset.thumbnailUrl : slide.bgAssetId ? undefined : slide.bgImage,
         bgPosition: slide.bgPosition,
@@ -2129,8 +2201,6 @@ export default function Studio() {
         textColor: slide.box?.color,
         countdown: slide.countdown,
         design: {
-          box: slide.box,
-          extraBoxes: slide.extraBoxes,
           pictures: slide.pictures?.map((picture) => {
             const pictureAsset = picture.assetId ? mediaUrlsRef.current[picture.assetId] : undefined;
             return pictureAsset ? { ...picture, src: pictureAsset.url, poster: pictureAsset.thumbnailUrl } : picture;
@@ -2616,7 +2686,9 @@ export default function Studio() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
-      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return; // sliders use arrow keys too
+      const target = e.target as HTMLElement;
+      if (target.isContentEditable || target.closest('[contenteditable="true"], [contenteditable="plaintext-only"]')
+        || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return; // Keep typing and slider keys inside their controls.
       if (studioOutputTab === 'stream' && previewMode && e.key === 'Enter' && tag !== 'BUTTON' && tag !== 'A') {
         e.preventDefault();
         setOnAir(preview);
@@ -4567,6 +4639,9 @@ export function StudioDisplayOutput() {
     };
     window.addEventListener('storage', onStorage);
     const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.isContentEditable || target.closest('[contenteditable="true"], [contenteditable="plaintext-only"]')
+        || ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName)) return;
       if (event.key === 'Escape') {
         void window.faithstreamWindow?.closeStudioDisplay();
         return;

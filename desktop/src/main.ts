@@ -464,9 +464,16 @@ const optimizeImportedVideo = async (sourcePath: string) => {
   }
 };
 
-const exportPowerPointSlides = async (sourcePath: string) => {
-  if (process.platform !== 'win32' || path.extname(sourcePath).toLowerCase() !== '.pptx') {
-    throw new Error('PowerPoint slide rendering is only available for .pptx files on Windows.');
+type PowerPointTextRun = { textBase64: string; font?: string; size?: number; letterSpacing?: number; color?: string; bold?: boolean; italic?: boolean; underline?: boolean };
+type PowerPointRenderedElement = { kind: 'text' | 'image' | 'shape'; shapeKind?: 'rectangle' | 'circle' | 'triangle' | 'star' | 'arrow'; order: number; x: number; y: number; w: number; h: number; textBase64?: string; textRuns?: PowerPointTextRun[]; font?: string; size?: number; letterSpacing?: number; lineHeight?: number; color?: string; bold?: boolean; italic?: boolean; underline?: boolean; align?: 'left' | 'center' | 'right' | 'justify'; valign?: 'top' | 'middle' | 'bottom'; autoSize?: boolean; padding?: { top: number; right: number; bottom: number; left: number }; fillColor?: string; fillOpacity?: number; data?: string; mimeType?: string };
+type PowerPointRenderedSlide = { name: string; width: number; height: number; backgroundColor: string; elements: PowerPointRenderedElement[] };
+const exportPowerPointSlides = async (sourcePath: string): Promise<PowerPointRenderedSlide[]> => {
+  const extension = path.extname(sourcePath).toLowerCase();
+  if (process.platform !== 'win32') {
+    throw new Error('PowerPoint import currently requires Windows with the desktop Microsoft PowerPoint app installed.');
+  }
+  if (!['.pptx', '.ppt'].includes(extension)) {
+    throw new Error('Choose a PowerPoint presentation saved as .pptx or .ppt.');
   }
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'faithstream-pptx-'));
   const sourceBase64 = Buffer.from(sourcePath, 'utf8').toString('base64');
@@ -475,18 +482,187 @@ const exportPowerPointSlides = async (sourcePath: string) => {
 $ErrorActionPreference = 'Stop'
 $source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${sourceBase64}'))
 $outDir = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${outputBase64}'))
+function To-HexColor($value) {
+  $number = [int]$value
+  $red = $number -band 255
+  $green = ($number -shr 8) -band 255
+  $blue = ($number -shr 16) -band 255
+  return ('#{0:X2}{1:X2}{2:X2}' -f $red, $green, $blue)
+}
 $app = $null
 $presentation = $null
 try {
   $app = New-Object -ComObject PowerPoint.Application
   $presentation = $app.Presentations.Open($source, $true, $false, $false)
+  $slideWidth = [double]$presentation.PageSetup.SlideWidth
+  $slideHeight = [double]$presentation.PageSetup.SlideHeight
+  $scale = [Math]::Min((1920.0 / $slideWidth), (1080.0 / $slideHeight))
+  $renderWidth = [Math]::Max(1, [int][Math]::Round($slideWidth * $scale))
+  $renderHeight = [Math]::Max(1, [int][Math]::Round($slideHeight * $scale))
   $slides = @()
   for ($i = 1; $i -le $presentation.Slides.Count; $i++) {
-    $file = Join-Path $outDir ('slide-' + $i.ToString('D4') + '.png')
-    $presentation.Slides.Item($i).Export($file, 'PNG', 1920, 1080)
-    $slides += [PSCustomObject]@{ name = ('Slide ' + $i); data = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file)) }
+    $slide = $presentation.Slides.Item($i)
+    $elements = @()
+    # Keep the slide background and inherited layout artwork as its own selectable image layer.
+    $backgroundData = $null
+    $backgroundSlide = $null
+    try {
+      $backgroundSlideRange = $slide.Duplicate()
+      $backgroundSlide = $backgroundSlideRange.Item(1)
+      for ($backgroundShapeIndex = $backgroundSlide.Shapes.Count; $backgroundShapeIndex -ge 1; $backgroundShapeIndex--) {
+        $backgroundSlide.Shapes.Item($backgroundShapeIndex).Delete()
+      }
+      $backgroundFile = Join-Path $outDir ('slide-' + $i.ToString('D4') + '-background.png')
+      $backgroundSlide.Export($backgroundFile, 'PNG', $renderWidth, $renderHeight)
+      if ([IO.File]::Exists($backgroundFile)) {
+        $backgroundData = [Convert]::ToBase64String([IO.File]::ReadAllBytes($backgroundFile))
+      }
+    } catch { }
+    finally { if ($backgroundSlide -ne $null) { try { $backgroundSlide.Delete() } catch { } } }
+    if ($backgroundData) {
+      $elements += [PSCustomObject]@{
+        kind = 'image'; order = 0; x = 0; y = 0; w = 100; h = 100
+        data = $backgroundData; mimeType = 'image/png'
+      }
+    }
+    $order = 0
+    foreach ($shape in $slide.Shapes) {
+      $order++
+      try { $order = [int]$shape.ZOrderPosition } catch { }
+      $left = [double]$shape.Left
+      $top = [double]$shape.Top
+      $width = [double]$shape.Width
+      $height = [double]$shape.Height
+      if ($width -le 0 -or $height -le 0) { continue }
+      $hasText = $false
+      try { $hasText = ($shape.HasTextFrame -eq -1 -and $shape.TextFrame.HasText -eq -1) } catch { $hasText = $false }
+      if ($hasText) {
+        try {
+          $text = [string]$shape.TextFrame.TextRange.Text
+          $text = $text.TrimEnd([char]13, [char]10).Replace([char]13, [char]10).Replace([char]11, [char]10)
+          if ([string]::IsNullOrWhiteSpace($text)) { continue }
+          $textBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text))
+          $textRuns = @()
+          $font = $shape.TextFrame.TextRange.Font
+          try {
+            $runCount = $shape.TextFrame.TextRange.Runs().Count
+            for ($runIndex = 1; $runIndex -le $runCount; $runIndex++) {
+              $run = $shape.TextFrame.TextRange.Runs($runIndex, 1)
+              $runText = [string]$run.Text
+              if ($runIndex -eq $runCount) { $runText = $runText.TrimEnd([char]13, [char]10) }
+              $runText = $runText.Replace([char]13, [char]10).Replace([char]11, [char]10)
+              $runFont = $run.Font
+              $runFontColor = '#FFFFFF'
+              try { $runFontColor = To-HexColor $runFont.Color.RGB } catch { }
+              $runFontName = [regex]::Replace([string]$runFont.Name, '[\x00-\x1F]', '')
+              $runFontSize = [double]$runFont.Size
+              if ($runFontSize -le 0) { $runFontSize = 24 }
+              $runFontSpacing = 0.0
+              try { $runFontSpacing = [double]$runFont.Spacing } catch { }
+              $textRuns += [PSCustomObject]@{
+                textBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($runText))
+                font = $runFontName; size = $runFontSize; letterSpacing = $runFontSpacing; color = $runFontColor
+                bold = ($runFont.Bold -eq -1); italic = ($runFont.Italic -eq -1); underline = ($runFont.Underline -ne 0)
+              }
+            }
+            if ($textRuns.Count -gt 0) { $font = $shape.TextFrame.TextRange.Runs(1, 1).Font }
+          } catch { $textRuns = @() }
+          $fontName = [regex]::Replace([string]$font.Name, '[\x00-\x1F]', '')
+          $fontSize = [double]$font.Size
+          if ($fontSize -le 0) { $fontSize = 24 }
+          $fontSpacing = 0.0
+          try { $fontSpacing = [double]$font.Spacing } catch { }
+          $fontColor = '#FFFFFF'
+          try { $fontColor = To-HexColor $font.Color.RGB } catch { }
+          $fillColor = '#000000'
+          $fillOpacity = 0
+          try {
+            if ($shape.Fill.Visible -eq -1) {
+              $fillColor = To-HexColor $shape.Fill.ForeColor.RGB
+              $fillOpacity = [Math]::Round((1.0 - [double]$shape.Fill.Transparency) * 100)
+            }
+          } catch { }
+          $lineHeight = 1.0
+          try {
+            $paragraphFormat = $shape.TextFrame.TextRange.ParagraphFormat
+            $spaceWithin = [double]$paragraphFormat.SpaceWithin
+            if ($spaceWithin -gt 0) {
+              if ($paragraphFormat.LineRuleWithin -eq -1) { $lineHeight = $spaceWithin }
+              elseif ($fontSize -gt 0) { $lineHeight = $spaceWithin / $fontSize }
+            }
+          } catch { }
+          $lineHeight = [Math]::Max(0.5, [Math]::Min(3.0, $lineHeight))
+          $align = 'left'
+          try {
+            switch ([int]$shape.TextFrame.TextRange.ParagraphFormat.Alignment) {
+              2 { $align = 'center' }
+              3 { $align = 'right' }
+              4 { $align = 'justify' }
+            }
+          } catch { }
+          $valign = 'middle'
+          try {
+            switch ([int]$shape.TextFrame.VerticalAnchor) {
+              1 { $valign = 'top' }
+              4 { $valign = 'bottom' }
+            }
+          } catch { }
+          $elements += [PSCustomObject]@{
+            kind = 'text'; order = $order
+            x = [Math]::Round(($left / $slideWidth) * 100, 4); y = [Math]::Round(($top / $slideHeight) * 100, 4)
+            w = [Math]::Round(($width / $slideWidth) * 100, 4); h = [Math]::Round(($height / $slideHeight) * 100, 4)
+            textBase64 = $textBase64; textRuns = @($textRuns); font = $fontName; size = $fontSize; letterSpacing = $fontSpacing
+            color = $fontColor; bold = ($font.Bold -eq -1); italic = ($font.Italic -eq -1)
+            underline = ($font.Underline -ne 0); align = $align; valign = $valign; lineHeight = $lineHeight
+            autoSize = ([int]$shape.TextFrame.AutoSize -eq 2)
+            padding = @{ top = [double]$shape.TextFrame.MarginTop; right = [double]$shape.TextFrame.MarginRight; bottom = [double]$shape.TextFrame.MarginBottom; left = [double]$shape.TextFrame.MarginLeft }
+            fillColor = $fillColor; fillOpacity = $fillOpacity
+          }
+          continue
+        } catch { }
+      }
+      $nativeShape = $null
+      try {
+        switch ([int]$shape.AutoShapeType) {
+          1 { $nativeShape = 'rectangle' }
+          7 { $nativeShape = 'triangle' }
+          9 { $nativeShape = 'circle' }
+          12 { $nativeShape = 'star' }
+          13 { $nativeShape = 'arrow' }
+        }
+      } catch { }
+      if ($nativeShape) {
+        try {
+          $shapeFill = To-HexColor $shape.Fill.ForeColor.RGB
+          $elements += [PSCustomObject]@{
+            kind = 'shape'; shapeKind = $nativeShape; order = $order; fillColor = $shapeFill
+            x = [Math]::Round(($left / $slideWidth) * 100, 4); y = [Math]::Round(($top / $slideHeight) * 100, 4)
+            w = [Math]::Round(($width / $slideWidth) * 100, 4); h = [Math]::Round(($height / $slideHeight) * 100, 4)
+          }
+          continue
+        } catch { }
+      }
+      $file = Join-Path $outDir ('slide-' + $i.ToString('D4') + '-shape-' + $order.ToString('D4') + '.png')
+      try {
+        $shape.Export($file, 2, $renderWidth, $renderHeight, 1)
+        if ([IO.File]::Exists($file)) {
+          $elements += [PSCustomObject]@{
+            kind = 'image'; order = $order
+            x = [Math]::Round(($left / $slideWidth) * 100, 4); y = [Math]::Round(($top / $slideHeight) * 100, 4)
+            w = [Math]::Round(($width / $slideWidth) * 100, 4); h = [Math]::Round(($height / $slideHeight) * 100, 4)
+            data = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file)); mimeType = 'image/png'
+          }
+        }
+      } catch { }
+    }
+    $backgroundColor = '#101820'
+    try { if ($slide.Background.Fill.Visible -eq -1) { $backgroundColor = To-HexColor $slide.Background.Fill.ForeColor.RGB } } catch { }
+    # Return PowerPoint's actual point dimensions. The visual export above may be capped
+    # for storage/render performance, but that export size must never
+    # become the editable canvas size or the font-size conversion basis.
+    $slides += [PSCustomObject]@{ name = ('Slide ' + $i); width = $slideWidth; height = $slideHeight; backgroundColor = $backgroundColor; elements = @($elements) }
   }
-  ConvertTo-Json -InputObject @($slides) -Compress -Depth 4
+  ConvertTo-Json -InputObject @($slides) -Compress -Depth 8
 } finally {
   if ($presentation -ne $null) { $presentation.Close() }
   if ($app -ne $null) { $app.Quit() }
@@ -508,9 +684,21 @@ try {
         else resolve(stdout.trim());
       });
     });
-    const slides = JSON.parse(json) as { name: string; data: string }[];
+    const slides = JSON.parse(json) as PowerPointRenderedSlide[];
     if (!Array.isArray(slides) || slides.length === 0) throw new Error('No slides were found in this PowerPoint file.');
     return slides;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'PowerPoint could not open this file.';
+    if (/class not registered|class factory|80040154/i.test(detail)) {
+      throw new Error('The desktop Microsoft PowerPoint app is not installed or registered on this computer. Install or repair PowerPoint, then try again.');
+    }
+    if (/password|encrypted|protected|permission/i.test(detail)) {
+      throw new Error('This PowerPoint file is password-protected or restricted. Remove its protection in PowerPoint, save a copy, and import that copy.');
+    }
+    if (/corrupt|damaged|repair|invalid file/i.test(detail)) {
+      throw new Error('PowerPoint could not read this file. Open it in PowerPoint, repair or resave it as .pptx, then import the new copy.');
+    }
+    throw error;
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -898,8 +1086,10 @@ app.whenReady().then(() => {
   if (app.isPackaged && process.platform === 'win32' && isUpdateFeedConfigured) {
     autoUpdater.setFeedURL({ url: __FAITHSTREAM_UPDATE_FEED_URL__.trim().replace(/\/$/, '') });
     autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking', 'Checking for updates…'));
-    autoUpdater.on('update-available', () => sendUpdateStatus('available', 'A new FaithStream Studio update is available. Downloading it now.'));
-    autoUpdater.on('download-progress', (progress) => sendUpdateStatus('downloading', `Downloading the update… ${Math.round(progress.percent)}%`));
+    // Electron's built-in Windows updater downloads in the background but does
+    // not expose a download-progress event. The downloaded event signals when
+    // the installer is ready to run.
+    autoUpdater.on('update-available', () => sendUpdateStatus('downloading', 'A new FaithStream Studio update is downloading. The install button will appear when it is ready.'));
     autoUpdater.on('update-not-available', () => {
       updateCheckInProgress = false;
       sendUpdateStatus('not-available', 'You’re using the latest version.');

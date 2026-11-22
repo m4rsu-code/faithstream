@@ -5,7 +5,8 @@ import SlideBackgroundLayer from './SlideBackgroundLayer';
 import { PRESERVED_BLANK_LINE } from '../utils/slideLibrary';
 import { backgroundClasses, backgroundStyle, customBackground, parseCustomBackground } from '../utils/slideBackground';
 import { activeAlign, alignText, hasLineAligns, lineAlignAt, remapLineAligns } from '../utils/lineAlign';
-import { rememberSongBackground, SONG_BACKGROUNDS, SONG_FONTS, songLineKey, songSlideLayouts, songTextArea, withSlideLineAligns, type Song, type SongTextAlign, type SongSlideLayout, type SongStyle, type SongTextLayout } from '../utils/songbooks';
+import GOOGLE_FONT_FAMILIES from '../data/google-font-families.json';
+import { loadSongSlideSettings, rememberSongBackground, saveSongSlideSettings, SONG_BACKGROUNDS, SONG_FONTS, songLineKey, songSlideLayouts, songTextArea, withSlideLineAligns, type Song, type SongTextAlign, type SongSlideLayout, type SongStyle, type SongTextLayout } from '../utils/songbooks';
 
 /** One text area of a song slide, sized like Studio's text boxes (and shrunk if it would overflow). */
 function PreviewText({ layout }: { layout: SongTextLayout }) {
@@ -82,6 +83,8 @@ const HANDLE_CLASS: Record<Exclude<Handle, 'move'>, string> = {
 // normally treats a blank line as a new slide, so retain it as an invisible line marker.
 const encodeSlideText = (text: string) => text.replace(/\n[ \t]*\n/g, `\n${PRESERVED_BLANK_LINE}\n`);
 const decodeSlideText = (text: string) => text.replaceAll(PRESERVED_BLANK_LINE, '');
+const SONG_FONT_CATALOG = [...new Set([...SONG_FONTS, ...(GOOGLE_FONT_FAMILIES as string[])])].sort((a, b) => a.localeCompare(b));
+const resolveSongFont = (font: string) => SONG_FONT_CATALOG.find((candidate) => candidate.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '') === font.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '')) ?? font;
 
 /**
  * The lyrics area drawn over the preview, resized like a Canva text box:
@@ -234,6 +237,7 @@ export default function SongDesignPanel({
   onMakeDefault,
   designLabel = 'song',
   showDefaultActions = true,
+  rememberStyle = false,
   fixedVerseSlides = false,
   fixedVerseTexts,
 }: {
@@ -249,6 +253,8 @@ export default function SongDesignPanel({
   /** Allows the same designer to be reused for scripture passages. */
   designLabel?: string;
   showDefaultActions?: boolean;
+  /** Persist this design as the shared Scripture/Songbook style while it is being edited. */
+  rememberStyle?: boolean;
   /** Keep Scripture passages as exactly one slide per verse. */
   fixedVerseSlides?: boolean;
   /** Structured verse data lets the designer preserve intentional blank lines inside a verse. */
@@ -258,6 +264,15 @@ export default function SongDesignPanel({
   const [library, setLibrary] = useState<BackgroundItem[]>([]);
   const [collection, setCollection] = useState('All');
   const [backgroundBrowserOpen, setBackgroundBrowserOpen] = useState(false);
+  useEffect(() => {
+    const family = resolveSongFont(style.font);
+    if (!(GOOGLE_FONT_FAMILIES as string[]).includes(family)) return;
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(family)}&display=swap`;
+    document.head.appendChild(link);
+    return () => { link.remove(); };
+  }, [style.font]);
   const thumbs = useRef<(HTMLButtonElement | null)[]>([]);
   // Keep the selected slide's thumbnail in view when moving between slides.
   useEffect(() => { thumbs.current[index]?.scrollIntoView({ block: 'nearest' }); }, [index]);
@@ -293,17 +308,20 @@ export default function SongDesignPanel({
   const lineRange = lineEditable && textRange && textRange.end <= textDraft.length ? textRange : null;
   const shownAlign = activeAlign(textDraft, style.align, slideLineAligns, lineRange);
   const chooseAlign = (value: SongTextAlign) => {
-    if (!current || !lineRange) { onChange({ align: value }); return; }
+    if (!current || !lineRange) { changeStyle({ align: value }); return; }
     const result = alignText(textDraft, style.align, slideLineAligns, value, lineRange);
     // Everything highlighted: align the whole design, as before.
-    if (!result.lineAligns && result.align === value && value !== style.align) { onChange({ align: value, lineAligns: withSlideLineAligns(style.lineAligns, current.text, undefined) }); return; }
-    onChange({ lineAligns: withSlideLineAligns(style.lineAligns, current.text, result.lineAligns) });
+    if (!result.lineAligns && result.align === value && value !== style.align) { changeStyle({ align: value, lineAligns: withSlideLineAligns(style.lineAligns, current.text, undefined) }); return; }
+    changeStyle({ lineAligns: withSlideLineAligns(style.lineAligns, current.text, result.lineAligns) });
   };
   const backgroundItem = style.backgroundAssetId ? library.find((item) => item.id === style.backgroundAssetId) : undefined;
   const collections = ['All', ...[...new Set(library.map((item) => item.collection || 'Uploads'))].sort()];
   const visibleLibrary = collection === 'All' ? library : library.filter((item) => (item.collection || 'Uploads') === collection);
   const changeStyle = (patch: Partial<SongStyle>) => {
     onChange(patch);
+    if (rememberStyle || !ownDesign) {
+      saveSongSlideSettings({ ...loadSongSlideSettings(), ...style, ...patch });
+    }
     if (!('background' in patch) && !('backgroundAssetId' in patch) && !('dim' in patch) && !('backgroundOpacity' in patch)) return;
     rememberSongBackground({
       background: patch.background ?? style.background,
@@ -358,8 +376,8 @@ export default function SongDesignPanel({
         {current ? <>
           <FitStage>
             <div className="relative select-none overflow-hidden rounded-lg border border-white/10 shadow-2xl shadow-black/40">
-              <SongSlidePreview layout={current} background={backgroundItem} />
-              {current.kind === 'lyrics' && <AreaEditor area={songTextArea(style)} style={style} texts={layouts.filter((layout) => layout.kind === 'lyrics').map((layout) => layout.box.text)} textSize={current.box.size} onChange={onChange} />}
+          <SongSlidePreview layout={current} background={backgroundItem} />
+              {current.kind === 'lyrics' && <AreaEditor area={songTextArea(style)} style={style} texts={layouts.filter((layout) => layout.kind === 'lyrics').map((layout) => layout.box.text)} textSize={current.box.size} onChange={changeStyle} />}
             </div>
           </FitStage>
           <div className="flex shrink-0 items-center justify-between gap-3">
@@ -388,7 +406,7 @@ export default function SongDesignPanel({
           {ownDesign ? `This ${designLabel} has its own design.` : `This ${designLabel} uses the default style. Change anything to customize it.`}
           {showDefaultActions && <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
             {ownDesign && <button type="button" onClick={onUseDefault} className="font-semibold text-brand hover:underline">Use default style</button>}
-            <button type="button" onClick={onMakeDefault} className="font-semibold text-brand hover:underline">Make this the default for all songs</button>
+            <button type="button" onClick={onMakeDefault} className="font-semibold text-brand hover:underline">Make this the default for Scripture and songs</button>
           </div>}
         </div>
 
@@ -401,7 +419,7 @@ export default function SongDesignPanel({
               if (current.kind === 'lyrics' && hasLineAligns(current.box.lineAligns)) {
                 const nextText = encodeSlideText(text);
                 const moved = remapLineAligns(current.text, nextText, current.box.lineAligns);
-                onChange({ lineAligns: withSlideLineAligns(withSlideLineAligns(style.lineAligns, current.text, undefined), nextText, moved) });
+                changeStyle({ lineAligns: withSlideLineAligns(withSlideLineAligns(style.lineAligns, current.text, undefined), nextText, moved) });
               }
               setTextDraft(text);
               onTextChange({ index, kind: current.kind, oldText: current.text, occurrence: layouts.slice(0, index).filter((layout) => layout.kind === current.kind && layout.text === current.text).length, text: current.kind === 'lyrics' ? encodeSlideText(text) : text });
@@ -412,10 +430,10 @@ export default function SongDesignPanel({
 
         <Section title="Text style">
           <div className="flex items-center gap-0.5">
-            <ToggleIcon label="Bold" active={style.bold} onClick={() => onChange({ bold: !style.bold })}><Bold size={15} /></ToggleIcon>
-            <ToggleIcon label="Italic" active={style.italic} onClick={() => onChange({ italic: !style.italic })}><Italic size={15} /></ToggleIcon>
-            <ToggleIcon label="Underline" active={style.underline} onClick={() => onChange({ underline: !style.underline })}><Underline size={15} /></ToggleIcon>
-            <ToggleIcon label={style.caps ? 'All caps on (click for normal text)' : 'All caps'} active={style.caps} onClick={() => onChange({ caps: !style.caps })}><span className="text-[12px] font-bold leading-none tracking-tight">{style.caps ? 'AA' : 'Aa'}</span></ToggleIcon>
+            <ToggleIcon label="Bold" active={style.bold} onClick={() => changeStyle({ bold: !style.bold })}><Bold size={15} /></ToggleIcon>
+            <ToggleIcon label="Italic" active={style.italic} onClick={() => changeStyle({ italic: !style.italic })}><Italic size={15} /></ToggleIcon>
+            <ToggleIcon label="Underline" active={style.underline} onClick={() => changeStyle({ underline: !style.underline })}><Underline size={15} /></ToggleIcon>
+            <ToggleIcon label={style.caps ? 'All caps on (click for normal text)' : 'All caps'} active={style.caps} onClick={() => changeStyle({ caps: !style.caps })}><span className="text-[12px] font-bold leading-none tracking-tight">{style.caps ? 'AA' : 'Aa'}</span></ToggleIcon>
             <span className="mx-1 h-5 w-px bg-white/10" />
             <ToggleIcon label="Align left" active={shownAlign === 'left'} onClick={() => chooseAlign('left')}><AlignLeft size={15} /></ToggleIcon>
             <ToggleIcon label="Align center" active={shownAlign === 'center'} onClick={() => chooseAlign('center')}><AlignCenter size={15} /></ToggleIcon>
@@ -424,53 +442,53 @@ export default function SongDesignPanel({
           </div>
           <div className="flex items-center gap-0.5 text-[11px] text-warm-white/65">
             <span className="mr-1.5">Position in box</span>
-            <ToggleIcon label="Text at top of the box" active={style.valign === 'top'} onClick={() => onChange({ valign: 'top' })}><AlignVerticalJustifyStart size={15} /></ToggleIcon>
-            <ToggleIcon label="Text in middle of the box" active={(style.valign ?? 'middle') === 'middle'} onClick={() => onChange({ valign: 'middle' })}><AlignVerticalJustifyCenter size={15} /></ToggleIcon>
-            <ToggleIcon label="Text at bottom of the box" active={style.valign === 'bottom'} onClick={() => onChange({ valign: 'bottom' })}><AlignVerticalJustifyEnd size={15} /></ToggleIcon>
+            <ToggleIcon label="Text at top of the box" active={style.valign === 'top'} onClick={() => changeStyle({ valign: 'top' })}><AlignVerticalJustifyStart size={15} /></ToggleIcon>
+            <ToggleIcon label="Text in middle of the box" active={(style.valign ?? 'middle') === 'middle'} onClick={() => changeStyle({ valign: 'middle' })}><AlignVerticalJustifyCenter size={15} /></ToggleIcon>
+            <ToggleIcon label="Text at bottom of the box" active={style.valign === 'bottom'} onClick={() => changeStyle({ valign: 'bottom' })}><AlignVerticalJustifyEnd size={15} /></ToggleIcon>
           </div>
-          <select aria-label="Font" value={style.font} onChange={(event) => onChange({ font: event.target.value })} className={select} style={{ fontFamily: `"${style.font}", sans-serif` }}>
-            {[...new Set([style.font, ...SONG_FONTS])].map((font) => <option key={font} value={font} style={{ fontFamily: `"${font}", sans-serif` }}>{font}</option>)}
+          <select aria-label="Font" value={style.font} onChange={(event) => changeStyle({ font: event.target.value })} className={select} style={{ fontFamily: `"${resolveSongFont(style.font)}", sans-serif` }}>
+            {[...new Set([style.font, ...SONG_FONT_CATALOG])].map((font) => <option key={font} value={font} style={{ fontFamily: `"${resolveSongFont(font)}", sans-serif` }}>{font}</option>)}
           </select>
-          <label className="text-[11px] text-warm-white/65"><span className="flex justify-between">Text size <span className="tabular-nums text-warm-white/85">{style.fontSize}</span></span>
-            <input type="range" min={24} max={120} step={2} value={style.fontSize} onChange={(event) => onChange({ fontSize: Number(event.target.value) })} className={slider} />
+          <label className="flex items-center justify-between gap-2 text-[11px] text-warm-white/65">Text size
+            <input type="number" min={1} max={1000} step={1} value={style.fontSize} onChange={(event) => { const value = Number(event.target.value); if (Number.isFinite(value) && value > 0) changeStyle({ fontSize: value }); }} className="w-24 rounded-md border border-white/10 bg-[#091521] px-2 py-1.5 text-right text-xs text-white outline-none focus:border-brand" />
           </label>
           <label className="flex cursor-pointer items-center gap-2 text-[11px] text-warm-white/70">
-            <input type="checkbox" checked={style.autoFit} onChange={(event) => onChange({ autoFit: event.target.checked })} className="h-3.5 w-3.5 accent-brand" />
+            <input type="checkbox" checked={style.autoFit} onChange={(event) => changeStyle({ autoFit: event.target.checked })} className="h-3.5 w-3.5 accent-brand" />
             Shrink long parts to fit (same size on every slide)
           </label>
         </Section>
 
         <Section title="Spacing">
           <label className="text-[11px] text-warm-white/65"><span className="flex justify-between">Line spacing <span className="tabular-nums text-warm-white/85">{style.lineHeight.toFixed(2)}</span></span>
-            <input type="range" min={0.8} max={2.2} step={0.05} value={style.lineHeight} onChange={(event) => onChange({ lineHeight: Number(event.target.value) })} className={slider} />
+            <input type="range" min={0.8} max={2.2} step={0.05} value={style.lineHeight} onChange={(event) => changeStyle({ lineHeight: Number(event.target.value) })} className={slider} />
           </label>
           <label className="text-[11px] text-warm-white/65"><span className="flex justify-between">Letter spacing <span className="tabular-nums text-warm-white/85">{style.letterSpacing ?? 0}px</span></span>
-            <input type="range" min={-4} max={20} step={1} value={style.letterSpacing ?? 0} onChange={(event) => onChange({ letterSpacing: Number(event.target.value) })} className={slider} />
+            <input type="range" min={-4} max={20} step={1} value={style.letterSpacing ?? 0} onChange={(event) => changeStyle({ letterSpacing: Number(event.target.value) })} className={slider} />
           </label>
         </Section>
 
         <Section title="Look">
           <div className="flex items-center gap-3 text-[11px] text-warm-white/70">
-            <label className="flex items-center gap-2">Colour <input type="color" value={style.color} onChange={(event) => onChange({ color: event.target.value.toUpperCase() })} className="h-7 w-10 cursor-pointer rounded border border-white/15 bg-transparent" /></label>
-            <label className="flex cursor-pointer items-center gap-2"><input type="checkbox" checked={style.shadow} onChange={(event) => onChange({ shadow: event.target.checked })} className="h-3.5 w-3.5 accent-brand" /> Shadow</label>
+            <label className="flex items-center gap-2">Colour <input type="color" value={style.color} onChange={(event) => changeStyle({ color: event.target.value.toUpperCase() })} className="h-7 w-10 cursor-pointer rounded border border-white/15 bg-transparent" /></label>
+            <label className="flex cursor-pointer items-center gap-2"><input type="checkbox" checked={style.shadow} onChange={(event) => changeStyle({ shadow: event.target.checked })} className="h-3.5 w-3.5 accent-brand" /> Shadow</label>
           </div>
           <div className="flex items-center gap-3 text-[11px] text-warm-white/70">
-            <label className="flex items-center gap-2">Box background <input type="color" aria-label="Box background color" value={style.boxBg ?? '#000000'} onChange={(event) => onChange({ boxBg: event.target.value.toUpperCase(), boxBgOn: true })} className="h-7 w-10 cursor-pointer rounded border border-white/15 bg-transparent" /></label>
-            <label className="flex cursor-pointer items-center gap-2"><input type="checkbox" checked={style.boxBgOn ?? false} onChange={(event) => onChange({ boxBgOn: event.target.checked })} className="h-3.5 w-3.5 accent-brand" /> Show</label>
+            <label className="flex items-center gap-2">Box background <input type="color" aria-label="Box background color" value={style.boxBg ?? '#000000'} onChange={(event) => changeStyle({ boxBg: event.target.value.toUpperCase(), boxBgOn: true })} className="h-7 w-10 cursor-pointer rounded border border-white/15 bg-transparent" /></label>
+            <label className="flex cursor-pointer items-center gap-2"><input type="checkbox" checked={style.boxBgOn ?? false} onChange={(event) => changeStyle({ boxBgOn: event.target.checked })} className="h-3.5 w-3.5 accent-brand" /> Show</label>
           </div>
         </Section>
 
         <Section title="Layout">
           <div className="-mb-1 flex items-center justify-between">
             <p className="text-[11px] text-warm-white/55">Position {style.area && <span className="text-brand">· placed by hand</span>}</p>
-            {style.area && <button type="button" onClick={() => onChange({ area: undefined })} className="text-[10px] font-semibold text-brand hover:underline">Reset position</button>}
+            {style.area && <button type="button" onClick={() => changeStyle({ area: undefined })} className="text-[10px] font-semibold text-brand hover:underline">Reset position</button>}
           </div>
-          <Choice label="Text position" value={style.area ? 'custom' : style.position} options={[{ value: 'top', label: 'Top' }, { value: 'middle', label: 'Middle' }, { value: 'bottom', label: 'Bottom' }]} onChange={(value) => { if (value !== 'custom') onChange({ position: value as SongStyle['position'], area: undefined }); }} />
+          <Choice label="Text position" value={style.area ? 'custom' : style.position} options={[{ value: 'top', label: 'Top' }, { value: 'middle', label: 'Middle' }, { value: 'bottom', label: 'Bottom' }]} onChange={(value) => { if (value !== 'custom') changeStyle({ position: value as SongStyle['position'], area: undefined }); }} />
           {!fixedVerseSlides && <>
             <p className="-mb-1 text-[11px] text-warm-white/55">Lines per slide</p>
-            <Choice label="Lines per slide" value={style.linesPerSlide} options={[2, 3, 4, 5, 6, 8].map((value) => ({ value, label: String(value) }))} onChange={(value) => onChange({ linesPerSlide: value })} />
+            <Choice label="Lines per slide" value={style.linesPerSlide} options={[2, 3, 4, 5, 6, 8].map((value) => ({ value, label: String(value) }))} onChange={(value) => changeStyle({ linesPerSlide: value })} />
             <p className="-mb-1 text-[11px] text-warm-white/55">Title slide</p>
-            <Choice label="Title slide" value={style.titleSlide ? 'on' : 'off'} options={[{ value: 'on', label: 'Show' }, { value: 'off', label: 'Hide' }]} onChange={(value) => onChange({ titleSlide: value === 'on' })} />
+            <Choice label="Title slide" value={style.titleSlide ? 'on' : 'off'} options={[{ value: 'on', label: 'Show' }, { value: 'off', label: 'Hide' }]} onChange={(value) => changeStyle({ titleSlide: value === 'on' })} />
           </>}
         </Section>
 

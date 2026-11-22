@@ -643,7 +643,7 @@ export const cleanSongStyle = (value: unknown, base: SongStyle = DEFAULT_SONG_ST
   const legacySize = raw.size === 'small' ? 56 : raw.size === 'large' ? 80 : raw.size === 'medium' ? 68 : undefined;
   return {
     font: pick(raw.font, (font) => typeof font === 'string' && font.length > 0 && font.length < 60, base.font),
-    fontSize: Math.round(pick(raw.fontSize ?? legacySize, isNum(24, 140), base.fontSize)),
+    fontSize: Math.round(pick(raw.fontSize ?? legacySize, isNum(1, 1000), base.fontSize)),
     autoFit: pick(raw.autoFit, isBool, base.autoFit),
     lineHeight: pick(raw.lineHeight, isNum(0.8, 2.5), base.lineHeight),
     bold: pick(raw.bold, isBool, base.bold),

@@ -16,6 +16,7 @@ export default function SlideBackgroundLayer({
   dim = 0,
   muted = true,
   position,
+  imageFit = 'cover',
   seamless = false,
   still = false,
   eager = true,
@@ -28,6 +29,7 @@ export default function SlideBackgroundLayer({
   dim?: number;
   muted?: boolean;
   position?: string;
+  imageFit?: 'cover' | 'contain';
   seamless?: boolean;
   still?: boolean;
   eager?: boolean;
@@ -39,7 +41,7 @@ export default function SlideBackgroundLayer({
 
   return <>
     {(image || video) && <div className="absolute inset-0" style={{ opacity: opacity / 100 }}>
-      {image && <img src={image} alt="" draggable={false} loading={eager ? 'eager' : 'lazy'} decoding="async" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition }} />}
+      {image && <img src={image} alt="" draggable={false} loading={eager ? 'eager' : 'lazy'} decoding="async" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition, objectFit: imageFit }} />}
       {video && (still
         ? poster
           ? <img src={poster} alt="" draggable={false} loading="lazy" decoding="async" className="absolute inset-0 h-full w-full object-cover" style={{ objectPosition }} />

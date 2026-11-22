@@ -120,6 +120,8 @@ export default function SlideTextEditor({ text, align, lineAligns, onChange, onS
   const composing = useRef(false);
   const pendingSelection = useRef<[number, number] | null>(null);
   const selectionListener = useRef(onSelectionChange);
+  const undoStack = useRef<string[]>([]);
+  const redoStack = useRef<string[]>([]);
 
   useLayoutEffect(() => {
     latestText.current = text;
@@ -179,17 +181,60 @@ export default function SlideTextEditor({ text, align, lineAligns, onChange, onS
     const element = root.current;
     if (!element || composing.current) return;
     const next = readLines(element).join('\n');
-    if (next !== latestText.current) onChange(next);
+    if (next !== latestText.current) {
+      undoStack.current.push(latestText.current);
+      if (undoStack.current.length > 100) undoStack.current.shift();
+      redoStack.current = [];
+      onChange(next);
+    }
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    // The Studio uses the same arrow keys for slide navigation. Let the editor
+    // keep them for caret movement (including up/down between wrapped lines).
+    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) {
+      event.stopPropagation();
+      return;
+    }
     if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
       event.preventDefault();
       replaceSelection('\n');
       return;
     }
-    // Undo / redo are handled by the editor's own history (it listens on the window).
-    if ((event.ctrlKey || event.metaKey) && ['z', 'y'].includes(event.key.toLowerCase())) event.preventDefault();
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+      event.preventDefault();
+      event.stopPropagation();
+      const element = root.current;
+      const current = element ? readLines(element).join('\n') : latestText.current;
+      if (event.shiftKey) {
+        const next = redoStack.current.pop();
+        if (next === undefined) return;
+        undoStack.current.push(current);
+        const caret = Math.min(current.length, next.length);
+        pendingSelection.current = [caret, caret];
+        onChange(next);
+      } else {
+        const previous = undoStack.current.pop();
+        if (previous === undefined) return;
+        redoStack.current.push(current);
+        const caret = Math.min(previous.length, current.length);
+        pendingSelection.current = [caret, caret];
+        onChange(previous);
+      }
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+      event.preventDefault();
+      event.stopPropagation();
+      const element = root.current;
+      const current = element ? readLines(element).join('\n') : latestText.current;
+      const next = redoStack.current.pop();
+      if (next === undefined) return;
+      undoStack.current.push(current);
+      const caret = Math.min(current.length, next.length);
+      pendingSelection.current = [caret, caret];
+      onChange(next);
+    }
   };
 
   const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {

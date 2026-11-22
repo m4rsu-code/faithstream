@@ -29,7 +29,13 @@ interface Window {
     renderPowerPointSlides: (file: File) => Promise<{
       ok: boolean;
       message?: string;
-      slides?: { name: string; data: string }[];
+      slides?: {
+        name: string;
+        width: number;
+        height: number;
+        backgroundColor: string;
+        elements: { kind: 'text' | 'image' | 'shape'; shapeKind?: 'rectangle' | 'circle' | 'triangle' | 'star' | 'arrow'; order: number; x: number; y: number; w: number; h: number; textBase64?: string; textRuns?: { textBase64: string; font?: string; size?: number; letterSpacing?: number; color?: string; bold?: boolean; italic?: boolean; underline?: boolean }[]; font?: string; size?: number; letterSpacing?: number; lineHeight?: number; color?: string; bold?: boolean; italic?: boolean; underline?: boolean; align?: 'left' | 'center' | 'right' | 'justify'; valign?: 'top' | 'middle' | 'bottom'; autoSize?: boolean; padding?: { top: number; right: number; bottom: number; left: number }; fillColor?: string; fillOpacity?: number; data?: string; mimeType?: string }[];
+      }[];
     }>;
     optimizeVideo: (file: File) => Promise<{
       ok: boolean;

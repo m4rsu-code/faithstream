@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  memo,
   useRef,
   useState,
   type PointerEvent as RPointerEvent,
@@ -129,20 +130,71 @@ type TextBox = {
   valign?: VAlign;
   /** Alignment of single lines that differ from the box's `align` (index = line number; null = follow the box). */
   lineAligns?: (Align | null)[];
+  /** Formatting preserved from mixed-style text imported from PowerPoint. */
+  importedRuns?: { text: string; font: string; size: number; letterSpacing?: number; color: string; bold: boolean; italic: boolean; underline: boolean }[];
+  importedPadding?: { top: number; right: number; bottom: number; left: number };
+  powerPointImported?: boolean;
+  /** The original PowerPoint text-to-fit setting, if known. */
+  powerPointTextFit?: boolean;
   animation?: EntranceAnimation;
   animationDuration?: number;
   animationDelay?: number;
   animationEasing?: AnimationEasing;
 };
 
-/** Applies a change to a text box; editing the text keeps each line's own alignment. */
+const remapImportedRuns = (runs: NonNullable<TextBox['importedRuns']>, previousText: string, nextText: string) => {
+  if (!runs.length) return undefined;
+  let prefix = 0;
+  while (prefix < previousText.length && prefix < nextText.length && previousText[prefix] === nextText[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < previousText.length - prefix && suffix < nextText.length - prefix
+    && previousText[previousText.length - 1 - suffix] === nextText[nextText.length - 1 - suffix]) suffix += 1;
+  const result: NonNullable<TextBox['importedRuns']> = [];
+  let sourceOffset = 0;
+  const append = (text: string, style: NonNullable<TextBox['importedRuns']>[number]) => {
+    if (!text) return;
+    const previous = result[result.length - 1];
+    if (previous && previous.font === style.font && previous.size === style.size && previous.letterSpacing === style.letterSpacing
+      && previous.color === style.color && previous.bold === style.bold && previous.italic === style.italic && previous.underline === style.underline) previous.text += text;
+    else result.push({ ...style, text });
+  };
+  const appendSourceRange = (start: number, end: number) => {
+    sourceOffset = 0;
+    for (const run of runs) {
+      const runEnd = sourceOffset + run.text.length;
+      const overlapStart = Math.max(start, sourceOffset);
+      const overlapEnd = Math.min(end, runEnd);
+      if (overlapEnd > overlapStart) append(run.text.slice(overlapStart - sourceOffset, overlapEnd - sourceOffset), run);
+      sourceOffset = runEnd;
+      if (sourceOffset >= end) break;
+    }
+  };
+  const styleAt = (position: number) => {
+    let offset = 0;
+    for (const run of runs) {
+      if (position < offset + run.text.length) return run;
+      offset += run.text.length;
+    }
+    return runs[runs.length - 1];
+  };
+  appendSourceRange(0, prefix);
+  const inserted = nextText.slice(prefix, nextText.length - suffix);
+  append(inserted, styleAt(Math.max(0, prefix - 1)) ?? runs[0]);
+  appendSourceRange(previousText.length - suffix, previousText.length);
+  return result;
+};
+
+/** Applies a change to a text box; editing the text keeps its imported run styling. */
 const patchTextBox = (box: TextBox, patch: Partial<TextBox>): TextBox => {
   const next = { ...box, ...patch };
+  if (patch.text !== undefined && box.importedRuns?.length) next.importedRuns = remapImportedRuns(box.importedRuns, box.text, patch.text);
+  else if (['font', 'color', 'bold', 'italic', 'underline', 'uppercase'].some((key) => key in patch)
+    || ('size' in patch && !('importedRuns' in patch))) next.importedRuns = undefined;
   if (patch.text !== undefined && !('lineAligns' in patch) && box.lineAligns) next.lineAligns = remapLineAligns(box.text, patch.text, box.lineAligns);
   return next;
 };
 
-type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; poster?: string; muted?: boolean; aspectRatio?: number; lockAspectRatio?: boolean; layerOrder?: number | 'back' | 'front'; animation?: EntranceAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: AnimationEasing };
+type PictureT = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; poster?: string; muted?: boolean; aspectRatio?: number; lockAspectRatio?: boolean; fitToBox?: boolean; layerOrder?: number | 'back' | 'front'; animation?: EntranceAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: AnimationEasing };
 type ShapeT = { id: number; kind: 'rectangle' | 'circle' | 'triangle' | 'line' | 'star' | 'arrow'; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number; animation?: EntranceAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: AnimationEasing };
 type MediaAsset = { id: string; name: string; type: 'image' | 'video'; category?: 'background' | 'slide'; collection?: string; blob: Blob; thumbnailBlob?: Blob; originalBlob?: Blob; optimized?: boolean; createdAt: number; url: string; thumbnailUrl?: string; fromFolder?: boolean; protected?: boolean; byteSize?: number };
 type StoredMediaAsset = Omit<MediaAsset, 'url' | 'thumbnailUrl'>;
@@ -168,7 +220,12 @@ type SlideT = {
   bg: string; // tailwind gradient classes
   dim: number; // 0-80, % darkening over the background
   backgroundOpacity?: number;
+  /** Imported PowerPoint canvas ratio; custom slides default to widescreen. */
+  canvasAspect?: number;
+  canvasWidthPoints?: number;
+  canvasHeightPoints?: number;
   bgImage?: string;
+  bgImageFit?: 'cover' | 'contain';
   bgPosition?: { x: number; y: number };
   bgVideo?: string;
   bgVideoMuted?: boolean;
@@ -209,14 +266,32 @@ const FONTS: Record<string, string> = {
   Verdana: "Verdana, Geneva, sans-serif",
 };
 const GOOGLE_FONTS = GOOGLE_FONT_FAMILIES as string[];
-const requestedGoogleFonts = new Set<string>();
+const fontFamilyKey = (family: string) => family.normalize('NFKD').toLocaleLowerCase().replace(/[^a-z0-9]/g, '');
+const resolveGoogleFont = (family: string) => GOOGLE_FONTS.find((candidate) => fontFamilyKey(candidate) === fontFamilyKey(family)) ?? family.trim();
+const requestedGoogleFonts = new Map<string, Promise<void>>();
 const loadGoogleFont = (family: string) => {
-  if (!GOOGLE_FONTS.includes(family) || requestedGoogleFonts.has(family)) return;
-  requestedGoogleFonts.add(family);
+  const resolvedFamily = resolveGoogleFont(family);
+  if (!GOOGLE_FONTS.includes(resolvedFamily)) return Promise.resolve();
+  const existing = requestedGoogleFonts.get(resolvedFamily);
+  if (existing) return existing;
   const link = document.createElement('link');
   link.rel = 'stylesheet';
-  link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(family)}&display=swap`;
+  link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(resolvedFamily)}&display=swap`;
   document.head.appendChild(link);
+  const promise = new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = window.setTimeout(finish, 8000);
+    link.onload = () => { void document.fonts.load(`16px "${resolvedFamily.replaceAll('"', '')}"`).finally(finish); };
+    link.onerror = finish;
+  });
+  requestedGoogleFonts.set(resolvedFamily, promise);
+  return promise;
 };
 
 const BGS = [
@@ -248,7 +323,9 @@ const defaultBox = (text: string, size = 96): TextBox => ({
   x: 15,
   y: 25,
   w: 70,
-  h: 50,
+  // Start with a frame close to the text's natural height instead of a tall
+  // 50%-slide box that only collapses after the user first resizes it.
+  h: Math.min(90, Math.max(10, (size / 1280) * (16 / 9) * 100 * 1.15 * Math.max(1, text.split('\n').length) + 2.5)),
 });
 
 /**
@@ -340,6 +417,8 @@ const STORAGE_KEY = 'faithstream.presentation';
 const PROJECTS_STORAGE_KEY = 'faithstream.presentations';
 const MEDIA_DB = 'faithstream.media';
 const MEDIA_STORE = 'assets';
+const PROJECT_DATA_DB = 'faithstream.presentation-data';
+const PROJECT_DATA_STORE = 'projects';
 
 /** `colors`: background colours saved for this presentation only (same format as a slide's `bg`). */
 type PresentationProject = { id: string; name: string; slides: SlideT[]; updatedAt: number; locked?: boolean; deviceOnly?: boolean; hasLocalMedia?: boolean; colors?: string[] };
@@ -376,15 +455,81 @@ const loadProjects = (): PresentationProject[] => {
     if (rawProjects) {
       const parsed = JSON.parse(rawProjects) as PresentationProject[];
       if (Array.isArray(parsed)) {
-        const ids = parsed.flatMap((project) => project.slides.map((slide) => slide.id));
+        const normalized = parsed.map((project) => ({ ...project, slides: Array.isArray(project.slides) ? project.slides : [] }));
+        const ids = normalized.flatMap((project) => project.slides.map((slide) => slide.id));
         if (ids.length) nextId = Math.max(nextId, ...ids) + 1;
-        return parsed;
+        return normalized;
       }
     }
   } catch {
     /* start with an empty presentation library */
   }
   return [];
+};
+
+const openProjectDataDb = (dbName = getAccountDatabaseName(PROJECT_DATA_DB)) => new Promise<IDBDatabase>((resolve, reject) => {
+  const request = indexedDB.open(dbName, 1);
+  request.onupgradeneeded = () => {
+    if (!request.result.objectStoreNames.contains(PROJECT_DATA_STORE)) request.result.createObjectStore(PROJECT_DATA_STORE, { keyPath: 'id' });
+  };
+  request.onsuccess = () => resolve(request.result);
+  request.onerror = () => reject(request.error);
+});
+
+const readDeviceProjects = async (): Promise<PresentationProject[]> => {
+  const dbName = getAccountDatabaseName(PROJECT_DATA_DB);
+  const db = await openProjectDataDb(dbName);
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(PROJECT_DATA_STORE, 'readonly');
+    const request = transaction.objectStore(PROJECT_DATA_STORE).getAll();
+    request.onsuccess = () => resolve((request.result as PresentationProject[]).filter((project) => project.deviceOnly));
+    request.onerror = () => reject(request.error);
+    transaction.oncomplete = () => db.close();
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+  });
+};
+
+let projectDataWriteQueue: Promise<void> = Promise.resolve();
+/** Imported files can exceed localStorage's small quota, so keep their slide data in IndexedDB. */
+const saveProjectList = (projects: PresentationProject[]) => {
+  const key = getAccountStorageKey(PROJECTS_STORAGE_KEY);
+  const dbName = getAccountDatabaseName(PROJECT_DATA_DB);
+  const lightweightList = projects.map((project) => project.deviceOnly ? {
+    ...project,
+    slides: project.slides.map((slide) => ({
+      ...slide,
+      bgImage: slide.bgAssetId ? undefined : (slide.bgImage?.startsWith('data:') ? undefined : slide.bgImage),
+      bgVideo: undefined,
+      bgPictureRestore: slide.bgPictureRestore ? { ...slide.bgPictureRestore, src: '' } : undefined,
+      pictures: slide.pictures?.map((picture) => picture.assetId || picture.src.startsWith('data:') || picture.src.startsWith('blob:') ? { ...picture, src: '' } : picture),
+    })),
+  } : project);
+  try {
+    localStorage.setItem(key, JSON.stringify(lightweightList));
+  } catch {
+    // If older inline images already filled localStorage, keep the library card metadata
+    // there and restore full editable slides from IndexedDB on the next launch.
+    const metadataOnly = projects.map((project) => project.deviceOnly ? {
+      ...project,
+      slides: project.slides.map((slide) => ({ id: slide.id, title: slide.title } as SlideT)),
+    } : project);
+    try { localStorage.setItem(key, JSON.stringify(metadataOnly)); } catch { /* IndexedDB remains the durable copy for imported decks. */ }
+  }
+  const deviceProjects = projects.filter((project) => project.deviceOnly);
+  const task = projectDataWriteQueue.catch(() => undefined).then(async () => {
+    const db = await openProjectDataDb(dbName);
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(PROJECT_DATA_STORE, 'readwrite');
+      const store = transaction.objectStore(PROJECT_DATA_STORE);
+      store.clear();
+      deviceProjects.forEach((project) => store.put(project));
+      transaction.oncomplete = () => { db.close(); window.dispatchEvent(new CustomEvent('faithstream:presentations-updated')); resolve(); };
+      transaction.onerror = () => { db.close(); reject(transaction.error); };
+      transaction.onabort = () => { db.close(); reject(transaction.error); };
+    });
+  });
+  projectDataWriteQueue = task;
+  return task;
 };
 
 const openMediaDb = () => new Promise<IDBDatabase>((resolve, reject) => {
@@ -515,6 +660,28 @@ const saveMediaAsset = async (file: File, category: 'background' | 'slide' = 'ba
   });
 };
 
+/** Store a deck's media in one IndexedDB transaction instead of opening one per item. */
+const saveMediaAssetsBatch = async (files: { file: File; category: 'background' | 'slide'; collection?: string; optimize?: boolean }[]): Promise<StoredMediaAsset[]> => {
+  if (!files.length) return [];
+  const assets: StoredMediaAsset[] = [];
+  for (const { file, category, collection, optimize = true } of files) {
+    const prepared = optimize ? await prepareMediaFile(file) : { file };
+    const type = file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(file.name) ? 'video' : 'image';
+    assets.push({ id: crypto.randomUUID(), name: file.name, type, category, ...(collection ? { collection } : {}), blob: prepared.file, ...(type === 'video' ? { thumbnailBlob: await makeVideoThumbnail(prepared.file) } : {}), originalBlob: prepared.originalFile, optimized: !!prepared.originalFile, createdAt: Date.now() });
+  }
+  const db = await openMediaDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(MEDIA_STORE, 'readwrite');
+    const store = transaction.objectStore(MEDIA_STORE);
+    assets.forEach((asset) => store.put(asset));
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+    transaction.onabort = () => { db.close(); reject(transaction.error); };
+  });
+  window.dispatchEvent(new CustomEvent('faithstream:media-updated'));
+  return assets;
+};
+
 /** Saves changed details (such as a collection name) for existing library items. */
 const updateMediaAssetsInDb = async (assets: StoredMediaAsset[]) => {
   if (!assets.length) return;
@@ -564,6 +731,62 @@ const getImageAspectRatio = (src: string) => new Promise<number>((resolve) => {
   image.onerror = () => resolve(32 / 44);
   image.src = src;
 });
+const normalizeImportedPicture = (picture: PictureT, asset?: MediaAsset, canvasAspect = 16 / 9) => {
+  const match = asset?.type === 'image' ? /-item-(\d+)\.svg$/i.exec(asset.name) : null;
+  if (!match || Number(match[1]) === 0) return picture;
+  return { ...picture, fitToBox: true, aspectRatio: (picture.w / Math.max(0.01, picture.h)) * canvasAspect };
+};
+const restorePowerPointAspect = (slide: SlideT, assets: Map<string, MediaAsset>) => {
+  if (slide.canvasAspect && slide.canvasWidthPoints) return slide;
+  const backgroundPicture = slide.pictures?.find((picture) => {
+    const asset = picture.assetId ? assets.get(picture.assetId) : undefined;
+    return asset?.type === 'image' && /-item-0\.svg$/i.test(asset.name);
+  });
+  const aspect = backgroundPicture?.aspectRatio;
+  if (!aspect || !Number.isFinite(aspect) || aspect <= 0) return slide;
+  const scaleX = Math.min(1, aspect / (16 / 9));
+  const scaleY = Math.min(1, (16 / 9) / aspect);
+  const offsetX = (1 - scaleX) / 2;
+  const offsetY = (1 - scaleY) / 2;
+  const estimatedWidthPoints = aspect * 540;
+  // Older imports used the capped SVG export width as their font-size basis. Rebuild
+  // the same old width from the slide ratio, then translate those saved sizes to
+  // the original-point-size basis used by current imports.
+  const legacyRenderWidth = Math.min(1920, 1080 * aspect);
+  const fontScale = legacyRenderWidth / estimatedWidthPoints;
+  const restoreText = (box: TextBox): TextBox => ({
+    ...box,
+    size: box.size * fontScale,
+    importedRuns: box.importedRuns?.map((run) => ({ ...run, size: run.size * fontScale, letterSpacing: (run.letterSpacing ?? 0) * fontScale })),
+    importedPadding: box.importedPadding ? {
+      top: box.importedPadding.top * fontScale,
+      right: box.importedPadding.right * fontScale,
+      bottom: box.importedPadding.bottom * fontScale,
+      left: box.importedPadding.left * fontScale,
+    } : undefined,
+  });
+  const restore = <T extends { x: number; y: number; w: number; h: number },>(item: T): T => ({
+    ...item,
+    x: ((item.x / 100 - offsetX) / scaleX) * 100,
+    y: ((item.y / 100 - offsetY) / scaleY) * 100,
+    w: (item.w / scaleX),
+    h: (item.h / scaleY),
+  });
+  return {
+    ...slide,
+    canvasAspect: aspect,
+    canvasWidthPoints: estimatedWidthPoints,
+    canvasHeightPoints: 540,
+    box: slide.box ? restore(restoreText(slide.box)) : slide.box,
+    extraBoxes: slide.extraBoxes?.map((item) => ({ ...item, box: restore(restoreText(item.box)) })),
+    pictures: slide.pictures?.map(restore),
+    shapes: slide.shapes?.map(restore),
+  };
+};
+const fitCanvasSize = (aspect: number) => ({
+  width: `${Math.min(1, aspect / (16 / 9)) * 100}%`,
+  height: `${Math.min(1, (16 / 9) / aspect) * 100}%`,
+});
 const toLocalDateTimeInput = (value: string) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
@@ -572,49 +795,71 @@ const toLocalDateTimeInput = (value: string) => {
 const slideName = (s: SlideT) => s.title;
 
 /** A still, lightweight version for library and slide-list cards. Video layers use cached posters when available. */
-function SlideThumbnail({ slide, assets }: { slide: SlideT; assets: MediaAsset[] }) {
+const SlideThumbnail = memo(function SlideThumbnail({ slide, assets }: { slide: SlideT; assets: MediaAsset[] }) {
   let containsVideo = !!slide.bgVideo;
+  const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
   const backgroundAsset = assets.find((asset) => asset.id === slide.bgAssetId || asset.url === slide.bgVideo);
+  const hasImportedVectorDesign = slide.pictures?.some((picture) => {
+      const asset = assetsById.get(picture.assetId ?? '');
+      return asset?.type === 'image' && /-item-\d+\.svg$/i.test(asset.name);
+    }) ?? false;
+  const restoredSlide = restorePowerPointAspect(slide, assetsById);
   const thumbnailSlide: SlideT = {
-    ...slide,
+    ...restoredSlide,
+    ...(hasImportedVectorDesign ? {
+      box: restoredSlide.box ? { ...restoredSlide.box, autoSize: typeof restoredSlide.box.powerPointTextFit === 'boolean' ? restoredSlide.box.autoSize : false, powerPointImported: true } : restoredSlide.box,
+      extraBoxes: restoredSlide.extraBoxes?.map((item) => ({ ...item, box: { ...item.box, autoSize: typeof item.box.powerPointTextFit === 'boolean' ? item.box.autoSize : false, powerPointImported: true } })),
+    } : {}),
     bgImage: backgroundAsset?.type === 'video' ? backgroundAsset.thumbnailUrl : backgroundAsset?.type === 'image' ? backgroundAsset.url : slide.bgImage,
     bgVideo: undefined,
     bgAssetId: undefined,
-    pictures: (slide.pictures ?? []).flatMap((picture) => {
+    pictures: (restoredSlide.pictures ?? []).flatMap((picture) => {
       const asset = assets.find((item) => item.id === picture.assetId || item.url === picture.src);
-      if (picture.mediaType !== 'video') return [asset?.type === 'image' ? { ...picture, src: asset.url } : picture];
+      if (picture.mediaType !== 'video') return [asset?.type === 'image' ? { ...normalizeImportedPicture(picture, asset, restoredSlide.canvasAspect ?? 16 / 9), src: asset.url } : picture];
       containsVideo = true;
       return asset?.thumbnailUrl ? [{ ...picture, src: asset.thumbnailUrl, mediaType: 'image' as const, assetId: undefined }] : [];
     }),
   };
-  return <div className="absolute inset-0">
-    <SlideRender slide={thumbnailSlide} />
+  return <div className="absolute inset-0 flex items-center justify-center">
+    <div className="relative overflow-hidden" style={fitCanvasSize(thumbnailSlide.canvasAspect ?? 16 / 9)}>
+      <SlideRender slide={thumbnailSlide} />
+    </div>
     {containsVideo && <span className="absolute bottom-1.5 right-1.5 z-10 rounded bg-black/70 px-1.5 py-1 text-white/90" aria-label="Contains video"><Video size={11} /></span>}
   </div>;
-}
+});
 
 /* ---------- Slide rendering (used by the canvas, thumbnails, templates and preview) ---------- */
 
-function TextBoxView({ box, defaultLayerOrder = 3000, animate = false }: { box: TextBox; defaultLayerOrder?: number; animate?: boolean }) {
+const TextBoxView = memo(function TextBoxView({ box, defaultLayerOrder = 3000, animate = false, hidden = false }: { box: TextBox; defaultLayerOrder?: number; animate?: boolean; hidden?: boolean }) {
   const wrap = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
 
-  // Auto sizing: shrink the text until it fits inside the box.
+  // Keep type and proportions intact: scale the whole text uniformly only when
+  // its natural layout would exceed either edge of the text box.
   const fit = useCallback(() => {
     const w = wrap.current;
     const i = inner.current;
     if (!w || !i) return;
-    if (!box.autoSize || i.offsetHeight === 0) return setScale(1);
-    setScale(Math.min(1, w.clientHeight / i.offsetHeight));
-  }, [box.autoSize]);
+    if (i.offsetHeight === 0 || w.clientHeight === 0 || w.clientWidth === 0) return setScale(1);
+    const heightFit = w.clientHeight / i.offsetHeight;
+    const widthFit = i.scrollWidth > i.clientWidth ? i.clientWidth / i.scrollWidth : 1;
+    return setScale(Math.min(1, heightFit, widthFit));
+  }, []);
 
   useLayoutEffect(() => {
+    void loadGoogleFont(box.font);
+    box.importedRuns?.forEach((run) => { void loadGoogleFont(run.font); });
     fit();
     const ro = new ResizeObserver(fit);
+    const fontSet = document.fonts;
+    fontSet?.addEventListener('loadingdone', fit);
     if (wrap.current) ro.observe(wrap.current);
     if (inner.current) ro.observe(inner.current);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      fontSet?.removeEventListener('loadingdone', fit);
+    };
   }, [fit]);
 
   const shadow = box.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : undefined;
@@ -637,22 +882,27 @@ function TextBoxView({ box, defaultLayerOrder = 3000, animate = false }: { box: 
     >
       <div
         ref={inner}
-        className="w-full whitespace-pre-wrap wrap-break-word"
+        className={`w-full whitespace-pre-wrap ${hidden ? 'invisible' : ''}`}
         style={{
           textAlign: box.align,
           textAlignLast: box.align === 'justify' ? 'left' : undefined,
+          overflowWrap: 'normal',
+          wordBreak: 'normal',
+          boxSizing: 'border-box',
+          minWidth: 0,
           transform: `scale(${scale})`,
           transformOrigin: VALIGN_ORIGIN[box.valign ?? 'middle'],
           lineHeight: box.lineHeight,
           letterSpacing: cqw(box.letterSpacing),
+          ...(box.importedPadding ? { padding: `${cqw(box.importedPadding.top)} ${cqw(box.importedPadding.right)} ${cqw(box.importedPadding.bottom)} ${cqw(box.importedPadding.left)}` } : {}),
         }}
       >
         <div
-          className="whitespace-pre-wrap"
+          className="max-w-full whitespace-pre-wrap"
           style={{
-            fontFamily: FONTS[box.font] ?? `"${box.font.replaceAll('"', '')}", sans-serif`,
+            fontFamily: FONTS[box.font.trim()] ?? `"${resolveGoogleFont(box.font).replaceAll('"', '')}", sans-serif`,
             fontSize: cqw(box.size),
-            fontWeight: box.bold ? 800 : 500,
+            fontWeight: box.bold ? (box.powerPointImported ? 700 : 800) : 500,
             fontStyle: box.italic ? 'italic' : 'normal',
             textDecoration: box.underline ? 'underline' : 'none',
             textTransform: box.uppercase ? 'uppercase' : undefined,
@@ -660,42 +910,54 @@ function TextBoxView({ box, defaultLayerOrder = 3000, animate = false }: { box: 
             textShadow: shadow,
           }}
         >
-          {hasLineAligns(box.lineAligns)
+          {box.importedRuns?.length
+            ? box.importedRuns.map((run, index) => <span key={index} style={{ fontFamily: FONTS[run.font.trim()] ?? `"${resolveGoogleFont(run.font).replaceAll('"', '')}", sans-serif`, fontSize: cqw(run.size), letterSpacing: cqw(run.letterSpacing ?? box.letterSpacing), color: run.color, fontWeight: run.bold ? 700 : 500, fontStyle: run.italic ? 'italic' : 'normal', textDecoration: run.underline ? 'underline' : 'none' }}>{run.text}</span>)
+            : hasLineAligns(box.lineAligns)
             ? box.text.split('\n').map((line, lineIndex) => {
               const lineAlign = lineAlignAt(box.align, box.lineAligns, lineIndex);
               return <div key={lineIndex} style={{ textAlign: lineAlign, textAlignLast: lineAlign === 'justify' ? 'left' : undefined }}>{line || ' '}</div>;
             })
             : box.text}
-        </div>
       </div>
     </div>
+    </div>
   );
-}
+});
 
-/** Fills its (relative, 16:9) parent. Everything inside scales with the slide's width. */
-function SlideRender({ slide, onVideoSelect, editingTextBoxId, animate = false, seamlessBackground = false, eagerMedia = false }: { slide: SlideT; onVideoSelect?: (id: number) => void; editingTextBoxId?: number | null; animate?: boolean; seamlessBackground?: boolean; eagerMedia?: boolean }) {
+/** Fills its parent using the slide's own aspect ratio. Everything scales with slide width. */
+type SlideRenderProps = { slide: SlideT; onVideoSelect?: (id: number) => void; animate?: boolean; seamlessBackground?: boolean; eagerMedia?: boolean; editingTextBoxId?: number | null };
+
+const SlideArtwork = memo(function SlideArtwork({ slide, onVideoSelect, animate = false, seamlessBackground = false, eagerMedia = false }: SlideRenderProps) {
   const renderPicture = (picture: PictureT, index: number) => {
     const zIndex = typeof picture.layerOrder === 'number' ? picture.layerOrder : picture.layerOrder === 'front' ? 5000 : picture.layerOrder === 'back' ? 0 : 1000 + index;
     const style = { ...(animate && picture.animation && picture.animation !== 'none' ? animationCssStyle(picture) : {}), left: `${picture.x}%`, top: `${picture.y}%`, width: `${picture.w}%`, height: `${picture.h}%`, zIndex };
     const animationClass = animate && picture.animation && picture.animation !== 'none' ? `slide-content-${picture.animation}` : '';
     return picture.mediaType === 'video'
       ? <video key={`${slide.id}:${picture.id}`} data-slide-video-id={picture.id} src={picture.src} poster={picture.poster} controls playsInline preload={eagerMedia ? 'auto' : 'metadata'} muted={picture.muted ?? false} onPointerDown={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} onClick={(event) => { event.stopPropagation(); onVideoSelect?.(picture.id); }} className={`pointer-events-auto absolute object-contain ${animationClass}`} style={style} />
-      : <img key={`${slide.id}:${picture.id}`} src={picture.src} alt="" loading={eagerMedia ? 'eager' : 'lazy'} decoding="async" draggable={false} className={`absolute object-contain ${animationClass}`} style={style} />;
+      : <img key={`${slide.id}:${picture.id}`} src={picture.src} alt="" loading={eagerMedia ? 'eager' : 'lazy'} decoding="async" draggable={false} className={`absolute ${picture.fitToBox ? 'object-fill' : 'object-contain'} ${animationClass}`} style={style} />;
   };
 
-  return (
-    <div
-      className={`absolute isolate inset-0 overflow-hidden bg-linear-to-br ${backgroundClasses(slide.bg)}`}
-      style={{ containerType: 'inline-size', ...backgroundStyle(slide.bg) }}
-    >
-      <SlideBackgroundLayer imageUrl={slide.bgImage} videoUrl={slide.bgVideo} opacity={slide.backgroundOpacity ?? 100} dim={slide.dim} muted={slide.bgVideoMuted ?? true} position={`${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%`} seamless={seamlessBackground} eager={eagerMedia} />
-      {slide.pictures?.map(renderPicture)}
-      {slide.shapes?.map((shape, index) => <div key={`${slide.id}:${shape.id}`} className={`absolute ${animate && shape.animation && shape.animation !== 'none' ? `slide-content-${shape.animation}` : ''}`} style={{ ...(animate && shape.animation && shape.animation !== 'none' ? animationCssStyle(shape) : {}), left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
-      {slide.box && editingTextBoxId !== null && <TextBoxView key={`${slide.id}:main`} box={slide.box} animate={animate} />}
-      {slide.extraBoxes?.filter(({ id }) => editingTextBoxId !== id).map(({ id, box }, index) => <TextBoxView key={`${slide.id}:${id}`} box={box} defaultLayerOrder={3001 + index} animate={animate} />)}
-      {slide.countdown && <CountdownDisplay countdown={slide.countdown} />}
-    </div>
-  );
+  return <>
+    <SlideBackgroundLayer imageUrl={slide.bgImage} videoUrl={slide.bgVideo} opacity={slide.backgroundOpacity ?? 100} dim={slide.dim} muted={slide.bgVideoMuted ?? true} position={`${slide.bgPosition?.x ?? 50}% ${slide.bgPosition?.y ?? 50}%`} imageFit={slide.bgImageFit} seamless={seamlessBackground} eager={eagerMedia} />
+    {slide.pictures?.map(renderPicture)}
+    {slide.shapes?.map((shape, index) => <div key={`${slide.id}:${shape.id}`} className={`absolute ${animate && shape.animation && shape.animation !== 'none' ? `slide-content-${shape.animation}` : ''}`} style={{ ...(animate && shape.animation && shape.animation !== 'none' ? animationCssStyle(shape) : {}), left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
+  </>;
+}, (previous, next) => previous.slide.bg === next.slide.bg
+  && previous.slide.bgImage === next.slide.bgImage && previous.slide.bgImageFit === next.slide.bgImageFit
+  && previous.slide.bgVideo === next.slide.bgVideo && previous.slide.bgVideoMuted === next.slide.bgVideoMuted
+  && previous.slide.backgroundOpacity === next.slide.backgroundOpacity && previous.slide.dim === next.slide.dim
+  && previous.slide.bgPosition === next.slide.bgPosition && previous.slide.pictures === next.slide.pictures
+  && previous.slide.shapes === next.slide.shapes && previous.animate === next.animate
+  && previous.seamlessBackground === next.seamlessBackground && previous.eagerMedia === next.eagerMedia
+  && previous.onVideoSelect === next.onVideoSelect);
+
+function SlideRender({ slide, onVideoSelect, animate = false, seamlessBackground = false, eagerMedia = false, editingTextBoxId }: SlideRenderProps) {
+  return <div className={`absolute isolate inset-0 overflow-hidden bg-linear-to-br ${backgroundClasses(slide.bg)}`} style={{ containerType: 'inline-size', ...backgroundStyle(slide.bg) }}>
+    <SlideArtwork slide={slide} onVideoSelect={onVideoSelect} animate={animate} seamlessBackground={seamlessBackground} eagerMedia={eagerMedia} />
+    {slide.box && <TextBoxView key={`${slide.id}:main`} box={slide.box} animate={animate} hidden={editingTextBoxId === null} />}
+    {slide.extraBoxes?.map(({ id, box }, index) => <TextBoxView key={`${slide.id}:${id}`} box={box} defaultLayerOrder={3001 + index} animate={animate} hidden={editingTextBoxId === id} />)}
+    {slide.countdown && <CountdownDisplay countdown={slide.countdown} />}
+  </div>;
 }
 
 /* ---------- Small UI pieces ---------- */
@@ -881,6 +1143,8 @@ function PreviewOverlay({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose, slides.length]);
 
+  const aspect = slides[i]?.canvasAspect ?? 16 / 9;
+
   return (
     <BodyPortal><div
       role="dialog"
@@ -890,7 +1154,7 @@ function PreviewOverlay({
     >
       <div
         className="relative"
-        style={{ width: 'min(100vw, calc(100vh * 16 / 9))', aspectRatio: '16 / 9' }}
+        style={{ width: `min(100vw, calc(100vh * ${aspect}))`, aspectRatio: `${aspect}` }}
       >
         <SlideRender slide={slides[i]} animate seamlessBackground eagerMedia />
       </div>
@@ -1005,6 +1269,7 @@ export default function Presentation() {
   const [alignmentGuides, setAlignmentGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
   const [fontPickerOpen, setFontPickerOpen] = useState(false);
   const [fontSearch, setFontSearch] = useState('');
+  const [fontVisibleCount, setFontVisibleCount] = useState(60);
   const [fontPreview, setFontPreview] = useState<{ slideId: number; boxId: number | null; family: string } | null>(null);
   const [fontSizeDraft, setFontSizeDraft] = useState<string | null>(null);
   const [accountSyncStatus, setAccountSyncStatus] = useState('Connecting to your account…');
@@ -1023,7 +1288,11 @@ export default function Presentation() {
   const [backgroundDragOver, setBackgroundDragOver] = useState(false);
   const fontPickerRef = useRef<HTMLDivElement>(null);
   const undoHistoryRef = useRef<SlideT[][]>([]);
+  const redoHistoryRef = useRef<SlideT[][]>([]);
   const previousSlidesRef = useRef(slides);
+  const textEditUndoTimerRef = useRef<number | undefined>(undefined);
+  const textEditUndoActiveRef = useRef(false);
+  const textEditUndoRecordedRef = useRef(false);
   const skipUndoRecordingRef = useRef(false);
   const undoHistoryProjectRef = useRef(activeProjectId);
   const originalProjectRef = useRef<PresentationProject | null>(null);
@@ -1031,12 +1300,49 @@ export default function Presentation() {
   const accountTokenRef = useRef<string | null>(null);
   const accountSyncReadyRef = useRef(false);
   const projectsRef = useRef(projects);
+  const projectSaveTimerRef = useRef<number | undefined>(undefined);
+  const pendingProjectSaveRef = useRef<{ id: string; name: string; slides: SlideT[] } | null>(null);
   projectsRef.current = projects;
+
+  const cancelPendingProjectSave = () => {
+    if (projectSaveTimerRef.current !== undefined) window.clearTimeout(projectSaveTimerRef.current);
+    projectSaveTimerRef.current = undefined;
+    pendingProjectSaveRef.current = null;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    void readDeviceProjects().then((storedProjects) => {
+      if (cancelled) return;
+      const merged = new Map(projectsRef.current.map((project) => [project.id, project]));
+      for (const stored of storedProjects) {
+        const existing = merged.get(stored.id);
+        if (!existing || stored.updatedAt >= existing.updatedAt || !existing.slides.length) merged.set(stored.id, stored);
+      }
+      const restored = [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+      projectsRef.current = restored;
+      setProjects(restored);
+      // Migrate any older imported decks that were still stored inline in localStorage.
+      void saveProjectList(restored);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  const markTextEditUndoGroup = () => {
+    if (!textEditUndoActiveRef.current) textEditUndoRecordedRef.current = false;
+    textEditUndoActiveRef.current = true;
+    window.clearTimeout(textEditUndoTimerRef.current);
+    textEditUndoTimerRef.current = window.setTimeout(() => {
+      textEditUndoActiveRef.current = false;
+      textEditUndoRecordedRef.current = false;
+    }, 700);
+  };
 
   useLayoutEffect(() => {
     if (undoHistoryProjectRef.current !== activeProjectId) {
       undoHistoryProjectRef.current = activeProjectId;
       undoHistoryRef.current = [];
+      redoHistoryRef.current = [];
       previousSlidesRef.current = slides;
       skipUndoRecordingRef.current = false;
       return;
@@ -1047,8 +1353,12 @@ export default function Presentation() {
       return;
     }
     if (previousSlidesRef.current !== slides) {
-      undoHistoryRef.current.push(previousSlidesRef.current);
-      if (undoHistoryRef.current.length > 100) undoHistoryRef.current.shift();
+      if (!textEditUndoActiveRef.current || !textEditUndoRecordedRef.current) {
+        undoHistoryRef.current.push(previousSlidesRef.current);
+        if (undoHistoryRef.current.length > 100) undoHistoryRef.current.shift();
+        redoHistoryRef.current = [];
+        if (textEditUndoActiveRef.current) textEditUndoRecordedRef.current = true;
+      }
       previousSlidesRef.current = slides;
     }
   }, [slides, activeProjectId]);
@@ -1093,7 +1403,7 @@ export default function Presentation() {
           if (!remote || project.updatedAt >= remote.updatedAt) merged.set(project.id, project);
         }
         const next = [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt);
-        localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
+        void saveProjectList(next).catch(() => undefined);
         accountSyncReadyRef.current = true;
         setProjects(next);
         setAccountSyncStatus('Connected — syncing presentations');
@@ -1159,15 +1469,29 @@ export default function Presentation() {
     let cancelled = false;
     const attach = (assets: MediaAsset[]) => {
       const byId = new Map(assets.map((asset) => [asset.id, asset]));
-      const withMedia = (slide: SlideT): SlideT => {
+      const withMedia = (sourceSlide: SlideT): SlideT => {
+        const slide = restorePowerPointAspect(sourceSlide, byId);
         const asset = slide.bgAssetId ? byId.get(slide.bgAssetId) : undefined;
+        const hasImportedVectorDesign = slide.pictures?.some((picture) => {
+            const pictureAsset = picture.assetId ? byId.get(picture.assetId) : undefined;
+            return pictureAsset?.type === 'image' && /-item-\d+\.svg$/i.test(pictureAsset.name);
+          }) ?? false;
         const pictures = slide.pictures?.map((picture) => {
           const pictureAsset = picture.assetId ? byId.get(picture.assetId) : undefined;
-          return pictureAsset ? { ...picture, src: pictureAsset.url, poster: pictureAsset.thumbnailUrl } : picture;
+          return pictureAsset ? { ...normalizeImportedPicture(picture, pictureAsset, slide.canvasAspect ?? 16 / 9), src: pictureAsset.url, poster: pictureAsset.thumbnailUrl } : picture;
         });
         const restoreAsset = slide.bgPictureRestore?.assetId ? byId.get(slide.bgPictureRestore.assetId) : undefined;
         const bgPictureRestore = restoreAsset && slide.bgPictureRestore ? { ...slide.bgPictureRestore, src: restoreAsset.url } : slide.bgPictureRestore;
-        return { ...slide, ...(asset ? { bgImage: asset.type === 'image' ? asset.url : asset.thumbnailUrl, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}), bgPictureRestore, pictures };
+        return {
+          ...slide,
+          ...(hasImportedVectorDesign ? {
+            box: slide.box ? { ...slide.box, autoSize: typeof slide.box.powerPointTextFit === 'boolean' ? slide.box.autoSize : false, powerPointImported: true } : slide.box,
+            extraBoxes: slide.extraBoxes?.map((item) => ({ ...item, box: { ...item.box, autoSize: typeof item.box.powerPointTextFit === 'boolean' ? item.box.autoSize : false, powerPointImported: true } })),
+          } : {}),
+          ...(asset ? { bgImage: asset.type === 'image' ? asset.url : asset.thumbnailUrl, bgVideo: asset.type === 'video' ? asset.url : undefined } : {}),
+          bgPictureRestore,
+          pictures,
+        };
       };
       skipUndoRecordingRef.current = true;
       setSlides((current) => current.map(withMedia));
@@ -1237,22 +1561,42 @@ export default function Presentation() {
   useEffect(() => {
     slides.forEach((slide) => {
       [slide.box, ...(slide.extraBoxes ?? []).map((item) => item.box)].forEach((textBox) => {
-        if (textBox) loadGoogleFont(textBox.font);
+        if (textBox) {
+          loadGoogleFont(textBox.font);
+          textBox.importedRuns?.forEach((run) => loadGoogleFont(run.font));
+        }
       });
     });
-  }, [slides]);
+  // Deck fonts are unchanged by typing or dragging; re-scan only when the open deck or
+  // its slide count changes. The font picker loads a newly selected font immediately.
+  }, [activeProjectId, slides.length]);
 
   useEffect(() => {
     if (!activeProjectId) return;
-    const savedSlides = slides.map((slide) => ({ ...slide, bgImage: slide.bgAssetId ? undefined : slide.bgImage, bgVideo: undefined, bgPictureRestore: slide.bgPictureRestore?.assetId ? { ...slide.bgPictureRestore, src: '' } : slide.bgPictureRestore, pictures: slide.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) }));
-    setProjects((current) => {
-      const next = current.map((project) => project.id === activeProjectId
-        ? { ...project, name: projectName.trim() || 'Untitled presentation', slides: savedSlides, updatedAt: Date.now() }
-        : project);
-      localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
-      window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
-      return next;
-    });
+  const savedSlides = slides.map((slide) => ({ ...slide, bgImage: slide.bgAssetId ? undefined : slide.bgImage, bgVideo: undefined, bgPictureRestore: slide.bgPictureRestore?.assetId ? { ...slide.bgPictureRestore, src: '' } : slide.bgPictureRestore, pictures: slide.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) }));
+    const projectId = activeProjectId;
+    const name = projectName.trim() || 'Untitled presentation';
+    const flushProjectSave = () => {
+      const pending = pendingProjectSaveRef.current;
+      if (!pending) return;
+      pendingProjectSaveRef.current = null;
+      setProjects((current) => {
+        const next = current.map((project) => project.id === pending.id
+          ? { ...project, name: pending.name, slides: pending.slides, updatedAt: Date.now() }
+          : project);
+        void saveProjectList(next).catch(() => undefined);
+        window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
+        return next;
+      });
+    };
+    if (projectSaveTimerRef.current) {
+      window.clearTimeout(projectSaveTimerRef.current);
+      if (pendingProjectSaveRef.current?.id !== projectId) flushProjectSave();
+    }
+    pendingProjectSaveRef.current = { id: projectId, name, slides: savedSlides };
+    // Text edits and pointer movement can update the active slide many times a second.
+    // Persist once after the interaction settles instead of serializing every keystroke.
+    projectSaveTimerRef.current = window.setTimeout(flushProjectSave, 450);
   }, [slides, activeProjectId, projectName]);
 
   // Close a presentation's ⋯ menu when clicking anywhere outside it, or pressing Esc.
@@ -1295,12 +1639,6 @@ export default function Presentation() {
   const stageRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const canvasTextRef = useRef<HTMLDivElement>(null);
-  const canvasTextMeasureRef = useRef<HTMLDivElement>(null);
-  /**
-   * Set while a text box is resized from a side or corner: its height then hugs the text
-   * (like Canva). `bottom` keeps the bottom edge still when a top corner is dragged.
-   */
-  const fitTextHeightRef = useRef<{ bottom: number | null } | null>(null);
   const [canvasTextScale, setCanvasTextScale] = useState(1);
   const slideImportInput = useRef<HTMLInputElement>(null);
   const portablePresentationInput = useRef<HTMLInputElement>(null);
@@ -1320,34 +1658,56 @@ export default function Presentation() {
 
   useLayoutEffect(() => {
     const textarea = canvasTextRef.current;
-    const measure = canvasTextMeasureRef.current;
-    if (!textarea || !measure || !isBoxSelected) return;
-    measure.textContent = box?.text || ' ';
-    const contentHeight = measure.getBoundingClientRect().height;
-    const scale = box?.autoSize && contentHeight > 0 ? Math.min(1, textarea.clientHeight / contentHeight) : 1;
+    if (!textarea || !isBoxSelected) return;
+    if (!box) return;
+    const frame = textarea.parentElement;
+    const availableHeight = frame?.clientHeight ?? 0;
+    const availableWidth = frame?.clientWidth ?? 0;
+    if (!frame || !availableHeight || !availableWidth) return;
+
+    // Measure an unscaled copy at the frame's exact width. Measuring the live
+    // contentEditable directly can report only its clipped viewport size while
+    // the user drags a handle, so overflowing text never gets a chance to fit.
+    const computed = window.getComputedStyle(textarea);
+    const measure = textarea.cloneNode(true) as HTMLDivElement;
+    measure.removeAttribute('id');
+    measure.style.position = 'fixed';
+    measure.style.left = '-10000px';
+    measure.style.top = '0';
+    measure.style.visibility = 'hidden';
+    measure.style.pointerEvents = 'none';
+    measure.style.transform = 'none';
+    measure.style.width = `${availableWidth}px`;
+    measure.style.height = 'auto';
+    measure.style.minHeight = '0';
+    measure.style.maxHeight = 'none';
+    measure.style.maxWidth = 'none';
+    measure.style.flex = 'none';
+    measure.style.overflow = 'visible';
+    measure.style.fontFamily = computed.fontFamily;
+    measure.style.fontSize = computed.fontSize;
+    measure.style.fontWeight = computed.fontWeight;
+    measure.style.fontStyle = computed.fontStyle;
+    measure.style.lineHeight = computed.lineHeight;
+    measure.style.letterSpacing = computed.letterSpacing;
+    measure.style.textTransform = computed.textTransform;
+    measure.style.whiteSpace = computed.whiteSpace;
+    measure.style.overflowWrap = computed.overflowWrap;
+    measure.style.wordBreak = computed.wordBreak;
+    measure.style.padding = computed.padding;
+    measure.style.boxSizing = computed.boxSizing;
+    document.body.appendChild(measure);
+    const contentWidth = Math.max(1, measure.scrollWidth);
+    const contentHeight = Math.max(1, measure.scrollHeight);
+    measure.remove();
+    const scale = Math.min(1, availableWidth / contentWidth, availableHeight / contentHeight);
     setCanvasTextScale((current) => Math.abs(current - scale) > 0.001 ? scale : current);
-    const room = textarea.clientHeight - contentHeight * scale;
-    const valign = box?.valign ?? 'middle';
-    textarea.style.paddingTop = `${Math.max(0, valign === 'top' ? 0 : valign === 'bottom' ? room : room / 2)}px`;
-    // Resizing: the box hugs its text, so making it narrower makes it taller instead of shrinking the words.
-    const stageHeight = stageRef.current?.getBoundingClientRect().height ?? 0;
-    const fit = fitTextHeightRef.current;
-    if (fit && box && stageHeight > 0 && contentHeight > 0) {
-      const needed = Math.max(3, (contentHeight / stageHeight) * 100 + 0.4);
-      if (fit.bottom !== null) {
-        const wanted = Math.min(fit.bottom, needed);
-        if (Math.abs(wanted - box.h) > 0.2 || Math.abs(fit.bottom - wanted - box.y) > 0.2) updateBoxById(selectedBoxId, { y: fit.bottom - wanted, h: wanted });
-      } else {
-        const wanted = Math.min(100 - box.y, needed);
-        if (Math.abs(wanted - box.h) > 0.2) updateBoxById(selectedBoxId, { h: wanted });
-      }
-    }
-  }, [box?.valign, box?.text, box?.size, box?.lineHeight, box?.letterSpacing, box?.font, fontPreview?.family, box?.w, box?.h, box?.autoSize, canvasTextScale, isBoxSelected, selectedBoxId, zoom]);
+  }, [box?.valign, box?.text, box?.size, box?.lineHeight, box?.letterSpacing, box?.font, box?.importedRuns, box?.importedPadding, box?.powerPointImported, box?.bold, box?.italic, box?.underline, box?.uppercase, box?.align, box?.lineAligns, fontPreview?.family, box?.w, box?.h, canvasTextScale, isBoxSelected, selectedBoxId, zoom]);
 
   useLayoutEffect(() => {
     if (!isBoxSelected) return;
     canvasTextRef.current?.focus();
-  }, [isBoxSelected, selectedBoxId]);
+  }, [isBoxSelected, selectedBoxId, box?.powerPointImported]);
 
   const selectedShape = (cur.shapes ?? []).find((shape) => shape.id === selectedShapeId);
   const selectedPicture = (cur.pictures ?? []).find((picture) => picture.id === selectedPictureId);
@@ -1365,9 +1725,8 @@ export default function Presentation() {
     ...(cur.box ? [{ id: null, box: cur.box }] : []),
     ...(cur.extraBoxes ?? []),
   ];
-  const fontOptions = [...new Set([...GOOGLE_FONTS, ...Object.keys(FONTS)])]
-    .filter((family) => family.toLocaleLowerCase().includes(fontSearch.trim().toLocaleLowerCase()))
-    .slice(0, 60);
+  const fontOptions = [...new Set([box?.font ?? '', ...(box?.importedRuns ?? []).map((run) => run.font), ...GOOGLE_FONTS, ...Object.keys(FONTS)].filter(Boolean))]
+    .filter((family) => family.toLocaleLowerCase().includes(fontSearch.trim().toLocaleLowerCase()));
 
   useEffect(() => {
     // Keep the text properties ready when a slide opens, including imported/template
@@ -1394,17 +1753,25 @@ export default function Presentation() {
   const updateSlideTitle = (id: number, title: string) =>
     setSlides((l) => l.map((s) => s.id === id && !s.locked ? { ...s, title } : s));
 
-  const updateBox = (patch: Partial<TextBox>) => !cur.locked && setSlides((l) => l.map((s, i) => {
+  const updateBox = (patch: Partial<TextBox>) => {
+    if (cur.locked) return;
+    if (patch.text !== undefined) markTextEditUndoGroup();
+    setSlides((l) => l.map((s, i) => {
     if (i !== index) return s;
     if (selectedBoxId === null) return s.box ? { ...s, box: patchTextBox(s.box, patch) } : s;
     return { ...s, extraBoxes: (s.extraBoxes ?? []).map((item) => item.id === selectedBoxId ? { ...item, box: patchTextBox(item.box, patch) } : item) };
-  }));
+    }));
+  };
 
-  const updateBoxById = (id: number | null, patch: Partial<TextBox>) => !cur.locked && setSlides((l) => l.map((s, i) => {
+  const updateBoxById = (id: number | null, patch: Partial<TextBox>) => {
+    if (cur.locked) return;
+    if (patch.text !== undefined) markTextEditUndoGroup();
+    setSlides((l) => l.map((s, i) => {
     if (i !== index) return s;
     if (id === null) return s.box ? { ...s, box: patchTextBox(s.box, patch) } : s;
     return { ...s, extraBoxes: (s.extraBoxes ?? []).map((item) => item.id === id ? { ...item, box: patchTextBox(item.box, patch) } : item) };
-  }));
+    }));
+  };
 
   /** The highlighted range in this box, if the highlight belongs to it. */
   const selectionIn = (id: number | null) => textSelection && textSelection.slideId === cur.id && textSelection.boxId === id ? textSelection : null;
@@ -1515,13 +1882,13 @@ export default function Presentation() {
     setSelectedPictureId(null);
     setPictureMenu(null);
   };
-  const selectPicture = (id: number) => {
+  const selectPicture = useCallback((id: number) => {
     setSelectedPictureId(id);
     setSelectedShapeId(null);
     setSelectedCountdown(false);
     setSelectedBoxId(null);
     setIsBoxSelected(false);
-  };
+  }, []);
   const startBackgroundDrag = (event: RPointerEvent<HTMLDivElement>) => {
     if (!backgroundEditing || cur.locked || !stageRef.current) return;
     event.preventDefault();
@@ -1816,8 +2183,8 @@ export default function Presentation() {
     const startX = event.clientX;
     const startY = event.clientY;
     const movePicture = (pointer: PointerEvent) => {
-      const rawX = clamp(picture.x + (pointer.clientX - startX) / rect.width * 100, 0, 100 - picture.w);
-      const rawY = clamp(picture.y + (pointer.clientY - startY) / rect.height * 100, 0, 100 - picture.h);
+      const rawX = clamp(picture.x + (pointer.clientX - startX) / rect.width * 100, -400, 400);
+      const rawY = clamp(picture.y + (pointer.clientY - startY) / rect.height * 100, -400, 400);
       const objects = [
         ...allBoxes.map((item) => item.box),
         ...(cur.pictures ?? []).filter((item) => item.id !== picture.id),
@@ -1868,26 +2235,24 @@ export default function Presentation() {
       if (lockRatio && (east || west) && (north || south)) {
         const widthFromX = picture.w + (east ? dx : -dx);
         const widthFromY = picture.w + (south ? dy * ratio : -dy * ratio);
-        width = Math.max(8, Math.abs(dx) >= Math.abs(dy * ratio) ? widthFromX : widthFromY);
+        width = clamp(Math.abs(dx) >= Math.abs(dy * ratio) ? widthFromX : widthFromY, 8, 400);
         height = width / ratio;
       } else if (lockRatio) {
         if (east || west) {
-          width = clamp(picture.w + (east ? dx : -dx), 8, 100);
+          width = clamp(picture.w + (east ? dx : -dx), 8, 400);
           height = width / ratio;
         } else {
-          height = clamp(picture.h + (south ? dy : -dy), 8, 100);
+          height = clamp(picture.h + (south ? dy : -dy), 8, 400);
           width = height * ratio;
         }
       } else {
-        if (east || west) width = clamp(picture.w + (east ? dx : -dx), 8, 100);
-        if (north || south) height = clamp(picture.h + (south ? dy : -dy), 8, 100);
+        if (east || west) width = clamp(picture.w + (east ? dx : -dx), 8, 400);
+        if (north || south) height = clamp(picture.h + (south ? dy : -dy), 8, 400);
       }
-      width = Math.min(width, west ? right : 100 - picture.x);
-      height = Math.min(height, north ? bottom : 100 - picture.y);
       let x = west ? right - width : picture.x;
       let y = north ? bottom - height : picture.y;
-      if (lockRatio && !(north || south)) y = clamp(picture.y + (picture.h - height) / 2, 0, 100 - height);
-      if (lockRatio && !(east || west)) x = clamp(picture.x + (picture.w - width) / 2, 0, 100 - width);
+      if (lockRatio && !(north || south)) y = picture.y + (picture.h - height) / 2;
+      if (lockRatio && !(east || west)) x = picture.x + (picture.w - width) / 2;
       updatePicture(picture.id, { x, y, w: width, h: height });
     };
     const stop = () => {
@@ -1907,16 +2272,19 @@ export default function Presentation() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !event.shiftKey) {
+      if ((event.ctrlKey || event.metaKey) && ['z', 'y'].includes(event.key.toLowerCase())) {
         const target = event.target as HTMLElement;
-        const isSlideTextField = target.id === 'slide-text' || target.getAttribute('aria-label') === 'Edit text on slide';
         const isEditableField = target.isContentEditable
           || target.tagName === 'TEXTAREA'
           || (target instanceof HTMLInputElement && !['range', 'color', 'checkbox', 'radio', 'file', 'button'].includes(target.type));
-        if (isEditableField && !isSlideTextField) return;
-        const previousSlides = undoHistoryRef.current.pop();
+        if (isEditableField) return;
+        const isUndo = event.key.toLowerCase() === 'z' && !event.shiftKey;
+        const history = isUndo ? undoHistoryRef.current : redoHistoryRef.current;
+        const previousSlides = history.pop();
         if (!previousSlides) return;
         event.preventDefault();
+        const currentSlides = previousSlidesRef.current;
+        (isUndo ? redoHistoryRef.current : undoHistoryRef.current).push(currentSlides);
         skipUndoRecordingRef.current = true;
         previousSlidesRef.current = previousSlides;
         setSlides(previousSlides);
@@ -2034,7 +2402,7 @@ export default function Presentation() {
   const addText = () => {
     if (cur.locked || projectLocked) return;
     const id = nextId++;
-    const newBox = { id, box: { ...defaultBox('Your text here'), layerOrder: nextFrontLayerOrder(), x: 24, y: 34, w: 52, h: 30, size: 72 } };
+    const newBox = { id, box: { ...defaultBox('Your text here', 72), layerOrder: nextFrontLayerOrder(), x: 24, y: 34, w: 52 } };
     updateSlide({ extraBoxes: [...(cur.extraBoxes ?? []), newBox] });
     setSelectedBoxId(id);
     setIsBoxSelected(true);
@@ -2073,7 +2441,6 @@ export default function Presentation() {
         x: 15 + offset * 4,
         y: 25 + offset * 4,
         w: 70,
-        h: 50,
       },
     };
     updateSlide({ extraBoxes: [...(cur.extraBoxes ?? []), presetBox] });
@@ -2110,8 +2477,7 @@ export default function Presentation() {
     const sx = e.clientX;
     const sy = e.clientY;
     const MIN = 3;
-    // Sides and corners keep the box hugging its text; only the top / bottom handles set a height by hand.
-    fitTextHeightRef.current = mode === 'move' || mode === 'n' || mode === 's' ? null : { bottom: mode === 'nw' || mode === 'ne' ? target.y + target.h : null };
+    // Resizing changes the frame only. Text size changes stay in the Format panel.
 
     const onMove = (ev: PointerEvent) => {
       const dx = ((ev.clientX - sx) / rect.width) * 100;
@@ -2169,15 +2535,14 @@ export default function Presentation() {
         updateBoxById(boxId, { y: ny, h: nh });
         return;
       }
-      // Corners scale the text with the box (like Canva); left / right sides only rewrap it.
-      // The height is left to follow the text (see fitTextHeightRef).
-      const factor = nw / w;
-      updateBoxById(boxId, mode.length === 2
-        ? { x: nx, w: nw, size: clamp(Math.round(target.size * factor), 8, 400), letterSpacing: target.letterSpacing * factor }
-        : { x: nx, w: nw });
+      if (mode.includes('s')) nh = clamp(h + dy, MIN, 100 - y);
+      if (mode.includes('n')) {
+        ny = clamp(y + dy, 0, y + h - MIN);
+        nh = h + (y - ny);
+      }
+      updateBoxById(boxId, { x: nx, y: ny, w: nw, h: nh });
     };
     const onUp = () => {
-      fitTextHeightRef.current = null;
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       setAlignmentGuides({ x: null, y: null });
@@ -2295,7 +2660,7 @@ export default function Presentation() {
         const colors = [...new Set(update(project.colors ?? []))].slice(0, MAX_PRESENTATION_COLORS);
         return { ...project, colors: colors.length ? colors : undefined, updatedAt: Date.now() };
       });
-      try { localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next)); } catch { /* kept for this session */ }
+      void saveProjectList(next).catch(() => undefined);
       return next;
     });
   };
@@ -2635,7 +3000,7 @@ export default function Presentation() {
       if (importedElementIds.length) nextId = Math.max(nextId, ...importedElementIds) + 1;
       stagedMediaAssets = (await readMediaAssets()).map(attachStoredMediaAsset);
       const next = [restored, ...projectsRef.current.filter((project) => project.id !== restored.id)];
-      localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
+      await saveProjectList(next);
       mediaLibraryCache = { db: getAccountDatabaseName(MEDIA_DB), assets: stagedMediaAssets };
       setMediaAssets((current) => { current.forEach(revokeMediaAssetUrls); return stagedMediaAssets; });
       setProjects(next);
@@ -2684,7 +3049,7 @@ export default function Presentation() {
     const project: PresentationProject = { id, name, slides: [firstSlide], updatedAt: Date.now() };
     const next = [project, ...projects];
     setProjects(next);
-    localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
+    void saveProjectList(next).catch(() => undefined);
     setSlides([firstSlide]);
     setIndex(0);
     setProjectName(name);
@@ -2698,36 +3063,106 @@ export default function Presentation() {
   type SlideImportGroup = { name: string; category?: string; images: File[]; powerpoint?: File };
 
   /** Turns image files and PowerPoint files into slides for one new presentation. */
-  const buildSlidesFromGroup = async (group: SlideImportGroup, report: (message: string) => void, step: () => void) => {
+  const buildSlidesFromGroup = async (group: SlideImportGroup, report: (message: string) => void, step: () => void, expandProgress: (additionalSteps: number) => void) => {
     const slidesOut: SlideT[] = [];
     const assetsOut: MediaAsset[] = [];
-    const asSlide = (asset: MediaAsset, title: string): SlideT => ({
-      id: nextId++, title, bg: BGS[4], dim: 0, bgImage: asset.url, bgAssetId: asset.id, box: null, extraBoxes: [], pictures: [], shapes: [],
+    const asSlide = (asset: MediaAsset, title: string, imageFit: 'cover' | 'contain' = 'cover'): SlideT => ({
+      id: nextId++, title, bg: BGS[4], dim: 0, bgImage: asset.url, bgImageFit: imageFit, bgAssetId: asset.id, box: null, extraBoxes: [], pictures: [], shapes: [],
     });
-    for (const file of group.images) {
-      report(`Saving ${file.name}`);
-      const stored = await saveMediaAsset(file, 'slide');
-      const asset: MediaAsset = attachStoredMediaAsset(stored);
-      assetsOut.push(asset);
-      slidesOut.push(asSlide(asset, file.name.replace(/\.[^.]+$/, '').trim() || `Slide ${slidesOut.length + 1}`));
-      step();
+    if (group.images.length) {
+      report(`Saving ${group.images.length} slide ${group.images.length === 1 ? 'image' : 'images'}`);
+      const storedAssets = await saveMediaAssetsBatch(group.images.map((file) => ({ file, category: 'slide' as const })));
+      const importedAssets = storedAssets.map(attachStoredMediaAsset);
+      assetsOut.push(...importedAssets);
+      importedAssets.forEach((asset, index) => {
+        const file = group.images[index];
+        slidesOut.push(asSlide(asset, file.name.replace(/\.[^.]+$/, '').trim() || `Slide ${slidesOut.length + 1}`));
+        step();
+      });
     }
     if (group.powerpoint) {
       report(`Reading ${group.powerpoint.name} in PowerPoint`);
       const rendered = await window.faithstreamWindow?.renderPowerPointSlides(group.powerpoint);
       if (!rendered?.ok || !rendered.slides?.length) throw new Error(rendered?.message || 'PowerPoint rendering is unavailable.');
+      // PowerPoint rendering completes as one operation; after it returns, track
+      // the editable conversion slide by slide instead of counting the whole deck once.
+      expandProgress(Math.max(0, rendered.slides.length - 1));
       for (const renderedSlide of rendered.slides) {
-        const binary = atob(renderedSlide.data);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-        const png = new File([bytes], `${renderedSlide.name}.png`, { type: 'image/png' });
-        const stored = await saveMediaAsset(png, 'slide');
-        const asset: MediaAsset = attachStoredMediaAsset(stored);
-        assetsOut.push(asset);
-        slidesOut.push(asSlide(asset, renderedSlide.name));
-        report(`Saving ${renderedSlide.name}`);
+        report(`Converting ${renderedSlide.name} into editable items`);
+        const boxes: TextBox[] = [];
+        const pictures: PictureT[] = [];
+        const shapes: ShapeT[] = [];
+        const sourceAspect = renderedSlide.width / Math.max(1, renderedSlide.height);
+        const importedFontScale = 1280 / Math.max(1, renderedSlide.width);
+        const fitPosition = (element: { x: number; y: number; w: number; h: number }) => element;
+        const orderedElements = [...renderedSlide.elements].sort((a, b) => a.order - b.order);
+        const imageElements = orderedElements.filter((element) => element.data && !(element.kind === 'shape' && element.shapeKind && element.fillColor));
+        const imageFiles = imageElements.map((element) => {
+          const mimeType = element.mimeType ?? 'image/png';
+          const binary = atob(element.data!);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+          const extension = mimeType === 'image/svg+xml' ? 'svg' : 'png';
+          const kindSuffix = element.kind === 'text' ? 'text' : 'item';
+          return new File([bytes], `${renderedSlide.name}-${kindSuffix}-${element.order}.${extension}`, { type: mimeType });
+        });
+        const storedSlideAssets = await saveMediaAssetsBatch(imageFiles.map((file) => ({ file, category: 'slide' as const, optimize: false })));
+        const slideAssets = storedSlideAssets.map(attachStoredMediaAsset);
+        assetsOut.push(...slideAssets);
+        const pictureAssetsByOrder = new Map(imageElements.map((element, imageIndex) => [element.order, slideAssets[imageIndex]]));
+        for (const element of orderedElements) {
+          const position = fitPosition(element);
+          const importedText = element.textBase64
+            ? new TextDecoder().decode(Uint8Array.from(atob(element.textBase64), (character) => character.charCodeAt(0)))
+            : '';
+          if (element.kind === 'text' && importedText) {
+            const decodedRuns = (element.textRuns ?? []).map((run) => ({
+              text: new TextDecoder().decode(Uint8Array.from(atob(run.textBase64), (character) => character.charCodeAt(0))),
+              font: run.font?.trim() || element.font?.trim() || 'Arial',
+              size: Math.max(4, Math.round((run.size ?? element.size ?? 24) * importedFontScale)),
+              letterSpacing: (run.letterSpacing ?? element.letterSpacing ?? 0) * importedFontScale,
+              color: run.color ?? element.color ?? '#FFFFFF',
+              bold: run.bold ?? element.bold ?? false,
+              italic: run.italic ?? element.italic ?? false,
+              underline: run.underline ?? element.underline ?? false,
+            }));
+            const importedRuns = decodedRuns.length && decodedRuns.map((run) => run.text).join('') === importedText ? decodedRuns : undefined;
+            const importedFontSize = decodedRuns[0]?.size ?? Math.round((element.size ?? 24) * importedFontScale);
+            const fill = element.fillColor ?? '#000000';
+            const [red, green, blue] = fill.match(/[a-f\d]{2}/gi)?.slice(0, 3).map((part) => Number.parseInt(part, 16)) ?? [0, 0, 0];
+            const fillOpacity = Math.max(0, Math.min(100, element.fillOpacity ?? 0)) / 100;
+            boxes.push({
+              ...defaultBox(importedText, Math.max(1, importedFontSize)),
+              font: element.font?.trim() || 'Arial', color: element.color ?? '#FFFFFF', bold: element.bold ?? false,
+              italic: element.italic ?? false, underline: element.underline ?? false, align: element.align ?? 'left',
+              valign: element.valign ?? 'middle', shadow: false, boxBg: `rgba(${red}, ${green}, ${blue}, ${fillOpacity})`,
+              boxBgOn: fillOpacity > 0, autoSize: !!element.autoSize,
+              lineHeight: element.lineHeight ?? 1, letterSpacing: (element.letterSpacing ?? 0) * importedFontScale, importedRuns,
+              importedPadding: element.padding ? { top: element.padding.top * importedFontScale, right: element.padding.right * importedFontScale, bottom: element.padding.bottom * importedFontScale, left: element.padding.left * importedFontScale } : undefined,
+              powerPointImported: true, powerPointTextFit: !!element.autoSize,
+              ...position, layerOrder: 100 + element.order,
+            });
+            continue;
+          }
+          if (element.kind === 'shape' && element.shapeKind && element.fillColor) {
+            shapes.push({ kind: element.shapeKind, fill: element.fillColor, ...position, id: nextId++, layerOrder: 100 + element.order });
+            continue;
+          }
+          const asset = pictureAssetsByOrder.get(element.order);
+          if (!asset) continue;
+          pictures.push({
+            id: nextId++, src: asset.url, assetId: asset.id, ...position,
+            aspectRatio: element.order === 0 ? await getImageAspectRatio(asset.url) : (position.w / Math.max(0.01, position.h)) * sourceAspect,
+            lockAspectRatio: true, fitToBox: element.order !== 0, layerOrder: 100 + element.order,
+          });
+        }
+        const boxesWithIds = boxes.map((box) => ({ id: nextId++, box }));
+        slidesOut.push({
+          id: nextId++, title: renderedSlide.name, canvasAspect: sourceAspect, canvasWidthPoints: renderedSlide.width, canvasHeightPoints: renderedSlide.height, bg: customBackground(renderedSlide.backgroundColor || '#101820'), dim: 0,
+          box: boxesWithIds[0]?.box ?? null, extraBoxes: boxesWithIds.slice(1), pictures, shapes,
+        });
+        step();
       }
-      step();
     }
     return { slides: slidesOut, assets: assetsOut };
   };
@@ -2739,26 +3174,35 @@ export default function Presentation() {
       flash('No slide images or PowerPoint files were found there.');
       return;
     }
-    const totalSteps = work.reduce((sum, group) => sum + group.images.length + (group.powerpoint ? 1 : 0), 0);
+    let totalSteps = work.reduce((sum, group) => sum + group.images.length + (group.powerpoint ? 1 : 0), 0);
     let done = 0;
-    setSlideImportProgress({ message: 'Preparing slides…', current: 0, total: totalSteps });
+    setSlideImportProgress({ message: 'Preparing slides…', current: 0, total: 0 });
     const created: PresentationProject[] = [];
     const createdCategories: Record<string, string> = {};
     const failures: string[] = [];
     let slideTotal = 0;
     let bytesTotal = 0;
+    // Let React paint the progress indicator before PowerPoint and media work begin.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     for (const group of work) {
-      const groupEnd = done + group.images.length + (group.powerpoint ? 1 : 0);
+      const groupStart = done;
+      const groupBaseSteps = group.images.length + (group.powerpoint ? 1 : 0);
+      let groupAdditionalSteps = 0;
       let message = 'Preparing slides…';
       try {
         const { slides: groupSlides, assets } = await buildSlidesFromGroup(group, (next) => {
           message = work.length > 1 ? `${group.name} · ${next}` : next;
-          setSlideImportProgress({ message, current: done, total: totalSteps });
+          // While PowerPoint itself is opening/rendering the file its duration is unknown,
+          // so show the moving indeterminate bar; then switch to slide-by-slide progress.
+          setSlideImportProgress({ message, current: done, total: next.startsWith('Reading ') ? 0 : totalSteps });
         }, () => {
           done += 1;
           setSlideImportProgress({ message, current: done, total: totalSteps });
+        }, (additionalSteps) => {
+          groupAdditionalSteps += additionalSteps;
+          totalSteps += additionalSteps;
+          setSlideImportProgress({ message, current: done, total: totalSteps });
         });
-        done = groupEnd;
         if (!groupSlides.length) continue;
         setMediaAssets((current) => [...assets, ...current]);
         const project: PresentationProject = { id: crypto.randomUUID(), name: group.name.slice(0, 120) || 'Imported slides', slides: serializable(groupSlides), updatedAt: Date.now() + created.length, deviceOnly: true };
@@ -2767,17 +3211,23 @@ export default function Presentation() {
         slideTotal += groupSlides.length;
         bytesTotal += assets.reduce((sum, asset) => sum + asset.blob.size, 0);
       } catch (error) {
-        done = groupEnd;
+        done = groupStart + groupBaseSteps + groupAdditionalSteps;
+        setSlideImportProgress({ message, current: done, total: totalSteps });
         failures.push(`${group.name}: ${error instanceof Error ? error.message : 'could not be imported'}`);
       }
     }
-    setSlideImportProgress(null);
     if (created.length) {
       const next = [...created.reverse(), ...projectsRef.current];
-      localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
+      // Update the ref immediately so a quick follow-up import cannot build on a stale list.
+      projectsRef.current = next;
       setProjects(next);
+      setLibrarySearch('');
+      setLibraryCategory('All');
+      try { await saveProjectList(next); }
+      catch { failures.push('Could not save the imported presentation on this device. Check available storage and try again.'); }
       if (Object.keys(createdCategories).length) updateCategories((current) => ({ ...current, ...createdCategories }));
     }
+    setSlideImportProgress(null);
     const summary = created.length
       ? `${created.length === 1 ? `“${created[0].name}”` : `${created.length} presentations`} imported · ${slideTotal} ${slideTotal === 1 ? 'slide' : 'slides'} · ${formatMediaSizeInKb(bytesTotal)} stored`
       : 'Nothing was imported.';
@@ -2788,10 +3238,20 @@ export default function Presentation() {
   const importSlideImages = async (files: FileList | null) => {
     const selected = Array.from(files ?? []);
     const images = selected.filter(isSlideImage).sort((a, b) => naturalCompare(a.name, b.name));
-    const powerpoint = selected.find(isPowerPoint);
-    if (!images.length && !powerpoint) return;
-    const name = (powerpoint?.name ?? images[0]?.name ?? 'Imported slides').replace(/\.[^.]+$/, '') || 'Imported slides';
-    await importSlideGroups([{ name, images, powerpoint, category: libraryCategory !== 'All' && libraryCategory !== 'Uncategorized' ? libraryCategory : undefined }]);
+    const powerpoints = selected.filter(isPowerPoint);
+    if (!images.length && !powerpoints.length) return;
+    const category = libraryCategory !== 'All' && libraryCategory !== 'Uncategorized' ? libraryCategory : undefined;
+    if (powerpoints.length <= 1) {
+      const powerpoint = powerpoints[0];
+      const name = (powerpoint?.name ?? images[0]?.name ?? 'Imported slides').replace(/\.[^.]+$/, '') || 'Imported slides';
+      await importSlideGroups([{ name, images, powerpoint, category }]);
+      return;
+    }
+    const groups: SlideImportGroup[] = powerpoints.map((powerpoint) => ({
+      name: powerpoint.name.replace(/\.[^.]+$/, '') || 'Imported slides', images: [], powerpoint, category,
+    }));
+    if (images.length) groups.unshift({ name: 'Imported slide images', images, category });
+    await importSlideGroups(groups);
   };
 
   /**
@@ -2869,7 +3329,7 @@ export default function Presentation() {
     const project: PresentationProject = { id: crypto.randomUUID(), name: song.title.slice(0, 120), slides: serializable(deck), updatedAt: Date.now() };
     const next = [project, ...projects];
     setProjects(next);
-    localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
+    void saveProjectList(next).catch(() => undefined);
     updateCategories((current) => ({ ...current, [project.id]: 'Songs' }));
     navigate('/presentations', { replace: true });
     openProject({ ...project, slides: deck });
@@ -2968,7 +3428,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
           setSlides((current) => current.map(clearSlide));
           setProjects((current) => {
             const next = current.map((project) => ({ ...project, slides: project.slides.map(clearSlide) }));
-            try { localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next)); } catch { /* Keep the editor usable if storage is full. */ }
+            void saveProjectList(next).catch(() => undefined);
             return next;
           });
           setBackgroundCollection('All');
@@ -2993,7 +3453,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
       ? { ...project, locked: !project.locked, updatedAt: Date.now() }
       : project);
     setProjects(next);
-    localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
+    void saveProjectList(next).catch(() => undefined);
     setProjectMenuFor(null);
   };
 
@@ -3007,7 +3467,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
         const next = projects.filter((item) => item.id !== id);
         updateCategories((current) => { const rest = { ...current }; delete rest[id]; return rest; });
         setProjects(next);
-        localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
+        void saveProjectList(next).catch(() => undefined);
         if (!project.deviceOnly && accountTokenRef.current) {
           void apiFetch(`presentations/${encodeURIComponent(project.id)}`, {
             method: 'DELETE',
@@ -3026,13 +3486,38 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
   };
 
   const openProject = (project: PresentationProject) => {
-    originalProjectRef.current = { ...project, slides: serializable(project.slides) };
+    const assetsById = new Map(mediaAssets.map((asset) => [asset.id, asset]));
+    const projectSlides = project.slides.map((sourceSlide) => {
+      const slide = restorePowerPointAspect(sourceSlide, assetsById);
+      const hasImportedVectorDesign = slide.pictures?.some((picture) => {
+          const asset = picture.assetId ? assetsById.get(picture.assetId) : undefined;
+          return asset?.type === 'image' && /-item-\d+\.svg$/i.test(asset.name);
+        }) ?? false;
+      const backgroundAsset = slide.bgAssetId ? assetsById.get(slide.bgAssetId) : undefined;
+      const pictures = slide.pictures?.map((picture) => {
+        const pictureAsset = picture.assetId ? assetsById.get(picture.assetId) : undefined;
+        return pictureAsset ? { ...normalizeImportedPicture(picture, pictureAsset, slide.canvasAspect ?? 16 / 9), src: pictureAsset.url, poster: pictureAsset.thumbnailUrl } : picture;
+      });
+      const restoreAsset = slide.bgPictureRestore?.assetId ? assetsById.get(slide.bgPictureRestore.assetId) : undefined;
+      const bgPictureRestore = restoreAsset && slide.bgPictureRestore
+        ? { ...slide.bgPictureRestore, src: restoreAsset.url, poster: restoreAsset.thumbnailUrl }
+        : slide.bgPictureRestore;
+      return {
+        ...slide,
+        ...(hasImportedVectorDesign ? {
+          box: slide.box ? { ...slide.box, autoSize: typeof slide.box.powerPointTextFit === 'boolean' ? slide.box.autoSize : false, powerPointImported: true } : slide.box,
+          extraBoxes: slide.extraBoxes?.map((item) => ({ ...item, box: { ...item.box, autoSize: typeof item.box.powerPointTextFit === 'boolean' ? item.box.autoSize : false, powerPointImported: true } })),
+        } : {}),
+        ...(backgroundAsset ? { bgImage: backgroundAsset.type === 'image' ? backgroundAsset.url : backgroundAsset.thumbnailUrl, bgVideo: backgroundAsset.type === 'video' ? backgroundAsset.url : undefined } : {}),
+        pictures,
+        bgPictureRestore,
+      };
+    });
+    const normalizedProject = { ...project, slides: projectSlides };
+    originalProjectRef.current = { ...normalizedProject, slides: serializable(normalizedProject.slides) };
     newDraftProjectIdRef.current = null;
     setLeaveConfirmationOpen(false);
-    setSlides(project.slides.map((slide) => {
-      const asset = mediaAssets.find((item) => item.id === slide.bgAssetId);
-      return asset ? { ...slide, bgImage: asset.type === 'image' ? asset.url : asset.thumbnailUrl, bgVideo: asset.type === 'video' ? asset.url : undefined } : slide;
-    }));
+    setSlides(projectSlides);
     setIndex(0);
     setProjectName(project.name);
     setActiveProjectId(project.id);
@@ -3073,7 +3558,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
             pictures: slide.pictures?.filter((picture) => picture.assetId !== asset.id),
           })),
         }));
-        try { localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next)); } catch { /* Keep the editor usable if storage is full. */ }
+        void saveProjectList(next).catch(() => undefined);
         return next;
       });
       setDeleteConfirmation(null);
@@ -3091,16 +3576,20 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
     setStatus('Saving your presentation…');
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     try {
+      // Do not let the debounced editor save overwrite this final, current snapshot later.
+      cancelPendingProjectSave();
       const id = activeProjectId ?? crypto.randomUUID();
+      const existingProject = projects.find((item) => item.id === id);
       const project: PresentationProject = {
+        ...existingProject,
         id,
         name: projectName.trim() || 'Untitled presentation',
         slides: serializable(),
         updatedAt: Date.now(),
-        colors: projects.find((item) => item.id === id)?.colors,
+        colors: existingProject?.colors,
       };
       const next = [project, ...projects.filter((item) => item.id !== id)];
-      localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
+      await saveProjectList(next);
       setProjects(next);
       window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
       originalProjectRef.current = null;
@@ -3110,7 +3599,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
       setStatus('');
       return true;
     } catch {
-      flash('Could not save: images are too large');
+      flash('Could not save this presentation on this device. Check available storage and try again.');
       return false;
     } finally {
       const remainingLoadingTime = 3000 - (Date.now() - savingStartedAt);
@@ -3129,6 +3618,8 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
   };
 
   const discardEditorChanges = () => {
+    // A scheduled autosave must not put discarded edits back after leaving the editor.
+    cancelPendingProjectSave();
     const original = originalProjectRef.current;
     const draftId = newDraftProjectIdRef.current;
     if (original || draftId) {
@@ -3136,7 +3627,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
         ? projects.filter((project) => project.id !== draftId)
         : projects.map((project) => project.id === original!.id ? original! : project);
       try {
-        localStorage.setItem(getAccountStorageKey(PROJECTS_STORAGE_KEY), JSON.stringify(next));
+        void saveProjectList(next).catch(() => undefined);
         setProjects(next);
         window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
       } catch {
@@ -3319,7 +3810,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                 <div role="menu" className="absolute right-0 top-full z-30 mt-2 w-72 rounded-xl border border-white/10 bg-navy p-1.5 text-sm text-warm-white shadow-xl">
                   <button role="menuitem" onClick={() => { setImportMenuOpen(false); slideImportInput.current?.click(); }} className="flex w-full items-start gap-3 rounded-lg px-3 py-2.5 text-left hover:bg-white/10">
                     <Upload size={17} className="mt-0.5 shrink-0 text-brand" />
-                    <span><span className="block font-semibold">Slide files</span><span className="block text-xs text-warm-white/50">Pick images or a PowerPoint — they become one presentation</span></span>
+                    <span><span className="block font-semibold">Slide files</span><span className="block text-xs text-warm-white/50">Pick images and one deck for a presentation, or select several PowerPoint files to import each separately</span></span>
                   </button>
                   <button role="menuitem" onClick={() => { setImportMenuOpen(false); slideFolderInput.current?.click(); }} className="flex w-full items-start gap-3 rounded-lg px-3 py-2.5 text-left hover:bg-white/10">
                     <FolderPlus size={17} className="mt-0.5 shrink-0 text-brand" />
@@ -3341,7 +3832,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
           <input
             ref={slideImportInput}
             type="file"
-          accept="image/png,image/jpeg,image/webp,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+          accept="image/png,image/jpeg,image/webp,.ppt,.pptx,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation"
             multiple
             hidden
             onChange={(event) => {
@@ -3631,13 +4122,13 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
               aria-label="Slide canvas. Select a text box and press Backspace or Delete to remove it."
               className="relative isolate"
               style={{
-                width: `calc(min(100cqw, 100cqh * 16 / 9) * ${ZOOMS[zoom]})`,
-                aspectRatio: '16 / 9',
+                width: `calc(min(100cqw, 100cqh * ${cur.canvasAspect ?? 16 / 9}) * ${ZOOMS[zoom]})`,
+                aspectRatio: `${cur.canvasAspect ?? 16 / 9}`,
                 containerType: 'inline-size',
               }}
             >
               <div className="absolute inset-0 overflow-hidden rounded-lg border border-white/10">
-                <SlideRender slide={cur} onVideoSelect={selectPicture} editingTextBoxId={isBoxSelected ? selectedBoxId : undefined} eagerMedia />
+                <SlideRender slide={cur} onVideoSelect={selectPicture} eagerMedia editingTextBoxId={isBoxSelected ? selectedBoxId : undefined} />
               </div>
 
               {alignmentGuides.x !== null && <div aria-hidden className="pointer-events-none absolute inset-y-0 z-30 border-l border-dashed border-cyan-300 shadow-[0_0_5px_rgba(103,232,249,.8)]" style={{ left: `${alignmentGuides.x}%` }} />}
@@ -3716,8 +4207,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                 const boxValign = textBox.valign ?? 'middle';
                 const previewFont = fontPreview?.slideId === cur.id && fontPreview.boxId === id ? fontPreview.family : textBox.font;
                 return <div data-slide-object key={id ?? 'main'} onPointerDown={startDrag('move', id, textBox)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); if (cur.locked) return; setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); setPictureMenu({ kind: 'text', id, x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 220) }); }} className={`absolute z-10 cursor-move ${selected ? 'border border-white' : 'border border-transparent'}`} onClick={(e) => { e.stopPropagation(); setSelectedBoxId(id); setIsBoxSelected(true); setSelectedPictureId(null); setSelectedShapeId(null); setSelectedCountdown(false); }} style={{ left: `${textBox.x}%`, top: `${textBox.y}%`, width: `${textBox.w}%`, height: `${textBox.h}%`, zIndex: typeof textBox.layerOrder === 'number' ? textBox.layerOrder : textBox.layerOrder === 'front' ? 5000 : textBox.layerOrder === 'back' ? 0 : id === null ? 3000 : 3001 + (cur.extraBoxes ?? []).findIndex((item) => item.id === id), touchAction: 'none' }}>
-                  {selected && <div className="absolute inset-0 z-0 overflow-hidden" style={{ background: textBox.boxBgOn ? textBox.boxBg : undefined }}>
-                    <div ref={canvasTextMeasureRef} aria-hidden className="pointer-events-none invisible absolute left-0 top-0 w-full whitespace-pre-wrap" style={{ overflowWrap: 'anywhere', fontFamily: FONTS[previewFont] ?? `"${previewFont.replaceAll('"', '')}", sans-serif`, fontSize: `${(textBox.size / 1280) * 100}cqw`, fontWeight: textBox.bold ? 800 : 500, fontStyle: textBox.italic ? 'italic' : 'normal', textTransform: textBox.uppercase ? 'uppercase' : undefined, lineHeight: textBox.lineHeight, letterSpacing: `${(textBox.letterSpacing / 1280) * 100}cqw` }}>{textBox.text || ' '}</div>
+                  {selected && <div className={`absolute inset-0 z-0 flex overflow-hidden ${VALIGN_ITEMS[boxValign]}`}>
                     <SlideTextEditor
                       editorRef={canvasTextRef}
                       label="Edit text on slide"
@@ -3728,22 +4218,35 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                       onSelectionChange={(start, end) => rememberSelection(id, start, end)}
                       onPointerDown={(event) => event.stopPropagation()}
                       onClick={(event) => event.stopPropagation()}
-                      className="absolute inset-0 h-full w-full cursor-text overflow-hidden border-0 bg-transparent p-0 outline-none"
+                      className="relative block w-full shrink-0 cursor-text overflow-hidden border-0 bg-transparent p-0 outline-none"
                       style={{
                         whiteSpace: 'pre-wrap',
-                        overflowWrap: 'anywhere',
-                        fontFamily: FONTS[previewFont] ?? `"${previewFont.replaceAll('"', '')}", sans-serif`,
-                        fontSize: `${(textBox.size * canvasTextScale / 1280) * 100}cqw`,
-                        fontWeight: textBox.bold ? 800 : 500,
+                        overflowWrap: 'normal',
+                        wordBreak: 'normal',
+                        fontFamily: FONTS[previewFont.trim()] ?? `"${resolveGoogleFont(previewFont).replaceAll('"', '')}", sans-serif`,
+                        fontSize: `${(textBox.size / 1280) * 100}cqw`,
+            fontWeight: textBox.bold ? (textBox.powerPointImported ? 700 : 800) : 500,
                         fontStyle: textBox.italic ? 'italic' : 'normal',
                         textDecoration: textBox.underline ? 'underline' : 'none',
                         textTransform: textBox.uppercase ? 'uppercase' : undefined,
                         lineHeight: textBox.lineHeight,
                         letterSpacing: `${(textBox.letterSpacing / 1280) * 100}cqw`,
+                        ...(textBox.importedPadding ? {
+                          padding: `${(textBox.importedPadding.top / 1280) * 100}cqw ${(textBox.importedPadding.right / 1280) * 100}cqw ${(textBox.importedPadding.bottom / 1280) * 100}cqw ${(textBox.importedPadding.left / 1280) * 100}cqw`,
+                        } : {}),
+                        transform: `scale(${canvasTextScale})`,
+                        transformOrigin: VALIGN_ORIGIN[boxValign],
+                        // Show the editable text itself while its rendered duplicate is hidden.
+                        // This keeps the visible letters, caret, and selection on the same layout,
+                        // especially for imported text with mixed font runs.
                         color: textBox.color,
-                        textShadow: textBox.shadow ? '0 0 1.2cqw rgba(0,0,0,0.65)' : undefined,
-                        paddingTop: 0,
-                        background: textBox.boxBgOn ? textBox.boxBg : undefined,
+                        WebkitTextFillColor: textBox.color,
+                        caretColor: textBox.color,
+                        textShadow: textBox.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : 'none',
+                        background: 'transparent',
+                        minWidth: 0,
+                        boxSizing: 'border-box',
+                        textAlignLast: textBox.align === 'justify' ? 'left' : undefined,
                       }}
                     />
                   </div>}
@@ -3798,7 +4301,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
               </button>
             </div>
             <div className="flex items-center gap-3">
-              <span>1280 × 720</span>
+              <span>{Math.round((cur.canvasAspect ?? 16 / 9) * 720)} × 720</span>
               <select
                 aria-label="Zoom"
                 value={zoom}
@@ -3991,7 +4494,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
               (selectedPicture ? (
                 <div className="flex flex-col gap-3">
                   <SectionTitle>{selectedPicture.mediaType === 'video' ? 'Slide video' : 'Slide image'}</SectionTitle>
-                  <p className="text-xs leading-relaxed text-warm-white/55">Drag the media on the slide to move it. Use the corner and side handles or the controls below to size it. The original upload stays unchanged.</p>
+                  <p className="text-xs leading-relaxed text-warm-white/55">Drag the media freely, including partly beyond the slide edge. Use the handles or controls to size it. Anything beyond the edge is clipped in the presentation; your original upload stays unchanged.</p>
                   {selectedPicture.mediaType === 'video' && <>
                     <button type="button" onClick={toggleSelectedVideoPlayback} className="flex items-center justify-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-xs font-semibold text-warm-white hover:bg-white/5"><Play size={14} /> Play / pause video</button>
                     <button type="button" aria-pressed={!(selectedPicture.muted ?? false)} onClick={() => updatePicture(selectedPicture.id, { muted: !(selectedPicture.muted ?? false) })} className="flex items-center justify-between rounded-lg border border-white/15 px-3 py-2 text-xs text-warm-white hover:bg-white/5"><span>Video audio</span><span className="font-semibold text-brand">{selectedPicture.muted ? 'Muted' : 'On'}</span></button>
@@ -3999,43 +4502,43 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                   <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs text-warm-white/75"><input type="checkbox" checked={selectedPicture.lockAspectRatio !== false} onChange={(event) => updatePicture(selectedPicture.id, { lockAspectRatio: event.target.checked })} className="h-3.5 w-3.5 accent-brand" /> Keep proportions</label>
                   <div className="grid grid-cols-2 gap-2">
                     <label className="text-xs text-warm-white/70">Width (%)
-                      <input type="number" min="8" max="100" value={Math.round(selectedPicture.w)} onChange={(event) => {
+                      <input type="number" min="8" max="400" value={Math.round(selectedPicture.w)} onChange={(event) => {
                         const ratio = (selectedPicture.aspectRatio ?? 16 / 9) * 9 / 16;
-                        let width = clamp(Number(event.target.value) || 8, 8, 100);
+                        let width = clamp(Number(event.target.value) || 8, 8, 400);
                         let height = selectedPicture.lockAspectRatio === false ? selectedPicture.h : width / ratio;
-                        if (height > 100) { height = 100; if (selectedPicture.lockAspectRatio !== false) width = height * ratio; }
-                        updatePicture(selectedPicture.id, { w: width, h: height, x: clamp(selectedPicture.x, 0, 100 - width), y: clamp(selectedPicture.y, 0, 100 - height) });
+                        if (height > 400) { height = 400; if (selectedPicture.lockAspectRatio !== false) width = height * ratio; }
+                        updatePicture(selectedPicture.id, { w: width, h: height });
                       }} className={`${fieldClass} mt-1`} />
                     </label>
                     <label className="text-xs text-warm-white/70">Height (%)
-                      <input type="number" min="8" max="100" value={Math.round(selectedPicture.h)} onChange={(event) => {
+                      <input type="number" min="8" max="400" value={Math.round(selectedPicture.h)} onChange={(event) => {
                         const ratio = (selectedPicture.aspectRatio ?? 16 / 9) * 9 / 16;
-                        let height = clamp(Number(event.target.value) || 8, 8, 100);
+                        let height = clamp(Number(event.target.value) || 8, 8, 400);
                         let width = selectedPicture.lockAspectRatio === false ? selectedPicture.w : height * ratio;
-                        if (width > 100) { width = 100; if (selectedPicture.lockAspectRatio !== false) height = width / ratio; }
-                        updatePicture(selectedPicture.id, { w: width, h: height, x: clamp(selectedPicture.x, 0, 100 - width), y: clamp(selectedPicture.y, 0, 100 - height) });
+                        if (width > 400) { width = 400; if (selectedPicture.lockAspectRatio !== false) height = width / ratio; }
+                        updatePicture(selectedPicture.id, { w: width, h: height });
                       }} className={`${fieldClass} mt-1`} />
                     </label>
                   </div>
                   <label className="text-xs text-warm-white/70">Width · {Math.round(selectedPicture.w)}%
-                    <input type="range" min="8" max="100" step="1" value={selectedPicture.w} onChange={(event) => {
+                    <input type="range" min="8" max="400" step="1" value={selectedPicture.w} onChange={(event) => {
                       const w = Number(event.target.value);
                       const ratio = (selectedPicture.aspectRatio ?? 16 / 9) * 9 / 16;
-                      const h = selectedPicture.lockAspectRatio === false ? selectedPicture.h : Math.min(100, w / ratio);
-                      updatePicture(selectedPicture.id, { w: selectedPicture.lockAspectRatio === false ? w : Math.min(w, h * ratio), h, x: clamp(selectedPicture.x, 0, 100 - w), y: clamp(selectedPicture.y, 0, 100 - h) });
+                      const h = selectedPicture.lockAspectRatio === false ? selectedPicture.h : Math.min(400, w / ratio);
+                      updatePicture(selectedPicture.id, { w: selectedPicture.lockAspectRatio === false ? w : Math.min(w, h * ratio), h });
                     }} className="mt-1 w-full accent-brand" />
                   </label>
                   <label className="text-xs text-warm-white/70">Height · {Math.round(selectedPicture.h)}%
-                    <input type="range" min="8" max="100" step="1" value={selectedPicture.h} onChange={(event) => {
+                    <input type="range" min="8" max="400" step="1" value={selectedPicture.h} onChange={(event) => {
                       const h = Number(event.target.value);
                       const ratio = (selectedPicture.aspectRatio ?? 16 / 9) * 9 / 16;
-                      const w = selectedPicture.lockAspectRatio === false ? selectedPicture.w : Math.min(100, h * ratio);
-                      updatePicture(selectedPicture.id, { w, h: selectedPicture.lockAspectRatio === false ? h : Math.min(h, w / ratio), x: clamp(selectedPicture.x, 0, 100 - w), y: clamp(selectedPicture.y, 0, 100 - h) });
+                      const w = selectedPicture.lockAspectRatio === false ? selectedPicture.w : Math.min(400, h * ratio);
+                      updatePicture(selectedPicture.id, { w, h: selectedPicture.lockAspectRatio === false ? h : Math.min(h, w / ratio) });
                     }} className="mt-1 w-full accent-brand" />
                   </label>
                   <div className="grid grid-cols-2 gap-2">
-                    <label className="text-xs text-warm-white/70">Left (%)<input type="number" min="0" max={Math.floor(100 - selectedPicture.w)} value={Math.round(selectedPicture.x)} onChange={(event) => updatePicture(selectedPicture.id, { x: clamp(Number(event.target.value) || 0, 0, 100 - selectedPicture.w) })} className={`${fieldClass} mt-1`} /></label>
-                    <label className="text-xs text-warm-white/70">Top (%)<input type="number" min="0" max={Math.floor(100 - selectedPicture.h)} value={Math.round(selectedPicture.y)} onChange={(event) => updatePicture(selectedPicture.id, { y: clamp(Number(event.target.value) || 0, 0, 100 - selectedPicture.h) })} className={`${fieldClass} mt-1`} /></label>
+                    <label className="text-xs text-warm-white/70">Left (%)<input type="number" min="-400" max="400" value={Math.round(selectedPicture.x)} onChange={(event) => updatePicture(selectedPicture.id, { x: clamp(Number(event.target.value) || 0, -400, 400) })} className={`${fieldClass} mt-1`} /></label>
+                    <label className="text-xs text-warm-white/70">Top (%)<input type="number" min="-400" max="400" value={Math.round(selectedPicture.y)} onChange={(event) => updatePicture(selectedPicture.id, { y: clamp(Number(event.target.value) || 0, -400, 400) })} className={`${fieldClass} mt-1`} /></label>
                   </div>
                 </div>
               ) : selectedShape ? (
@@ -4128,8 +4631,8 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                         aria-controls="font-picker-options"
                         placeholder="Search fonts…"
                         value={fontPickerOpen ? fontSearch : box.font}
-                        onFocus={() => { setFontSearch(''); setFontPreview(null); setFontPickerOpen(true); }}
-                        onChange={(event) => { setFontSearch(event.target.value); setFontPreview(null); setFontPickerOpen(true); }}
+                        onFocus={() => { setFontSearch(''); setFontVisibleCount(60); setFontPreview(null); setFontPickerOpen(true); }}
+                        onChange={(event) => { setFontSearch(event.target.value); setFontVisibleCount(60); setFontPreview(null); setFontPickerOpen(true); }}
                         onKeyDown={(event) => {
                           if (event.key === 'Enter' && fontOptions[0]) {
                             event.preventDefault();
@@ -4153,7 +4656,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                         }
                       }} className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-warm-white/55 transition hover:bg-white/10 hover:text-white"><ChevronDown size={14} className={`transition-transform ${fontPickerOpen ? 'rotate-180' : ''}`} /></button>
                       {fontPickerOpen && <div id="font-picker-options" role="listbox" onMouseLeave={() => setFontPreview(null)} className="absolute left-0 top-full z-50 mt-1 max-h-64 w-[min(280px,70vw)] overflow-y-auto rounded-lg border border-white/10 bg-[#101d2a] p-1 shadow-2xl">
-                        {fontOptions.length ? fontOptions.map((family) => <button key={family} type="button" role="option" aria-selected={box.font === family} onMouseEnter={() => {
+                        {fontOptions.length ? fontOptions.slice(0, fontVisibleCount).map((family) => <button key={family} type="button" role="option" aria-selected={box.font === family} onMouseEnter={() => {
                           setFontPreview({ slideId: cur.id, boxId: selectedBoxId, family });
                           loadGoogleFont(family);
                         }} onMouseDown={(event) => event.preventDefault()} onClick={() => {
@@ -4164,7 +4667,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                           setFontPickerOpen(false);
                         }} className={`block w-full truncate rounded px-2.5 py-2 text-left text-sm ${box.font === family ? 'bg-brand/15 text-brand' : 'text-warm-white hover:bg-white/10'}`} style={{ fontFamily: FONTS[family] ?? `"${family.replaceAll('"', '')}", sans-serif` }}>{family}</button>)
                           : <p className="px-2.5 py-3 text-xs text-warm-white/50">No fonts found.</p>}
-                        {fontOptions.length === 60 && <p className="px-2.5 py-2 text-[10px] text-warm-white/45">Showing first 60 matches. Type more to narrow the list.</p>}
+                        {fontOptions.length > fontVisibleCount && <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => setFontVisibleCount((current) => current + 60)} className="block w-full rounded px-2.5 py-2 text-left text-xs text-brand hover:bg-white/10">Show more ({fontOptions.length - fontVisibleCount} remaining)</button>}
                       </div>}
                     </div>
                     <input
@@ -4178,11 +4681,11 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                         const value = event.target.value;
                         setFontSizeDraft(value);
                         const size = Number(value);
-                        if (value.trim() && Number.isFinite(size) && size > 0) updateBox({ size, autoSize: false });
+                        if (value.trim() && Number.isFinite(size) && size > 0) updateBox({ size });
                       }}
                       onBlur={() => {
                         const size = Number(fontSizeDraft);
-                        if (fontSizeDraft?.trim() && Number.isFinite(size) && size > 0) updateBox({ size, autoSize: false });
+                        if (fontSizeDraft?.trim() && Number.isFinite(size) && size > 0) updateBox({ size });
                         setFontSizeDraft(null);
                       }}
                       onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
@@ -4237,16 +4740,6 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                       <ColorField label="Box background color" value={box.boxBg} onChange={(v) => updateBox({ boxBg: v, boxBgOn: true })} />
                       <Toggle label="Use box background" on={box.boxBgOn} onChange={(v) => updateBox({ boxBgOn: v })} />
                     </div>
-                  </div>
-
-                  <div className="border-t border-white/10 pt-3">
-                    <div className="flex items-center justify-between text-sm text-warm-white">
-                      Auto Sizing
-                      <Toggle label="Auto sizing" on={box.autoSize} onChange={(v) => updateBox({ autoSize: v })} />
-                    </div>
-                    <p className="mt-1 text-xs text-warm-white/50">
-                      Text shrinks to fit the text box when you drag it smaller.
-                    </p>
                   </div>
 
                   <Collapsible title="Position & Size">
