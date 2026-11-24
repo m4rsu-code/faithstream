@@ -1,4 +1,17 @@
-export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://192.168.1.189:3000/api'
+const DEFAULT_API_BASE = 'http://127.0.0.1:8000/api'
+const configuredApiBase = import.meta.env.VITE_API_BASE_URL?.trim() || DEFAULT_API_BASE
+
+export const API_BASE = (() => {
+  try {
+    const url = new URL(configuredApiBase)
+    if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
+      url.protocol = 'https:'
+    }
+    return url.toString().replace(/\/+$/, '')
+  } catch {
+    return DEFAULT_API_BASE
+  }
+})()
 export const WEBSITE_TOKEN_KEY = 'faithstream.website-token'
 export const WEBSITE_USER_KEY = 'faithstream.website-user'
 export const WEBSITE_ACCOUNT_EVENT = 'faithstream:website-account-changed'
