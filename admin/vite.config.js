@@ -20,10 +20,10 @@ function resolveApiBase(rawValue, isBuild) {
   const value = String(rawValue ?? '').trim();
 
   if (!isBuild) {
-    return value || FALLBACK_API_BASE;
+    if (!value) return FALLBACK_API_BASE;
   }
 
-  if (!value) {
+  if (isBuild && !value) {
     throw new Error(
       'VITE_API_BASE_URL is not set. Set it (for example in admin/.env.production) to the public API URL, such as https://api.example.com/api, before building the admin console.',
     );
@@ -34,6 +34,10 @@ function resolveApiBase(rawValue, isBuild) {
     url = new URL(value);
   } catch {
     throw new Error(`VITE_API_BASE_URL must be an absolute URL. Received "${value}".`);
+  }
+
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error('VITE_API_BASE_URL must not contain credentials, a query, or a fragment. Keep private keys in the server environment, never a frontend build variable.');
   }
 
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname))) {
