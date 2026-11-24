@@ -261,7 +261,7 @@
         </form>
     </main>
 
-    <script>
+    <script nonce="{{ request()->attributes->get('cspNonce') }}">
         document.querySelectorAll('[data-password-toggle]').forEach((button) => {
             button.addEventListener('click', () => {
                 const control = button.closest('.password-control');
