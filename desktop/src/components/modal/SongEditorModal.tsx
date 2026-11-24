@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BookOpen, Radio, RotateCcw, Trash2, X } from 'lucide-react';
 import { splitLyrics } from '../../utils/slideLibrary';
 import { cleanSongStyle, newId, saveSongSlideSettings, type Song, type Songbook, type SongStyle } from '../../utils/songbooks';
-import SongDesignPanel from '../SongDesignPanel';
+import SongScriptureDesignPanel from '../SongScriptureDesignPanel';
 import { useSongSlideSettings } from '../SongSlideSettingsButton';
 import BodyPortal from '../BodyPortal';
+import { registerModalEscape } from './modalEscape';
 
 const PART_LABELS = ['Verse', 'Chorus', 'Bridge', 'Pre-chorus', 'Ending'];
 
@@ -22,6 +23,7 @@ export default function SongEditorModal({
   onSave,
   onDelete,
   onRestore,
+  initialTab = 'lyrics',
 }: {
   open: boolean;
   /** The song to edit, or null to create a new one. */
@@ -34,6 +36,8 @@ export default function SongEditorModal({
   onSave: (song: Song) => Promise<void> | void;
   onDelete?: (song: Song) => void;
   onRestore?: (song: Song) => void;
+  /** Select which editor tab opens first. */
+  initialTab?: 'lyrics' | 'design';
 }) {
   const personalBooks = books.filter((book) => book.kind === 'personal');
   const isStandard = !!song && books.find((book) => book.id === song.bookId)?.kind === 'standard';
@@ -50,7 +54,25 @@ export default function SongEditorModal({
   const [ownStyle, setOwnStyle] = useState<SongStyle | null>(null);
   const defaultStyle = useSongSlideSettings();
   const effectiveStyle = ownStyle ?? defaultStyle;
+  const designSong = useMemo(() => ({ title, author, copyright, lyrics }), [title, author, copyright, lyrics]);
   const lyricsRef = useRef<HTMLTextAreaElement>(null);
+  const updateDesignText = useCallback(({ kind, oldText, occurrence, text }: { kind: 'title' | 'lyrics'; oldText: string; occurrence: number; text: string }) => {
+    if (kind === 'title') { setTitle(text); return; }
+    setLyrics((current) => {
+      if (!oldText) return current;
+      let from = 0;
+      let start = -1;
+      for (let match = 0; match <= occurrence; match += 1) {
+        start = current.indexOf(oldText, from);
+        if (start < 0) return current;
+        from = start + oldText.length;
+      }
+      return `${current.slice(0, start)}${text}${current.slice(start + oldText.length)}`;
+    });
+  }, []);
+  const updateDesignStyle = useCallback((patch: Partial<SongStyle>) => setOwnStyle((current) => cleanSongStyle({ ...(current ?? defaultStyle), ...patch })), [defaultStyle]);
+  const resetDesignStyle = useCallback(() => setOwnStyle(null), []);
+  const makeDesignDefault = useCallback(() => { saveSongSlideSettings(effectiveStyle); setOwnStyle(null); }, [effectiveStyle]);
 
   useEffect(() => {
     if (!open) return;
@@ -62,7 +84,7 @@ export default function SongEditorModal({
     setCopyright(song?.copyright ?? '');
     setLyrics(song?.lyrics ?? '');
     setOwnStyle(song?.style ? cleanSongStyle(song.style) : null);
-    setTab('lyrics');
+    setTab(initialTab);
     setError('');
     setSaving(false);
     // Only reset when a different song is opened.
@@ -71,13 +93,13 @@ export default function SongEditorModal({
 
   useEffect(() => {
     if (!open) return;
+    const unregisterEscape = registerModalEscape(onClose);
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
       if (event.key === 's' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void submit(); }
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  });
+    return () => { unregisterEscape(); window.removeEventListener('keydown', onKey); };
+  }, [open, onClose]);
 
   const parts = useMemo(() => splitLyrics(lyrics, 99), [lyrics]);
 
@@ -129,7 +151,7 @@ export default function SongEditorModal({
 
   return (
     <BodyPortal><div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section role="dialog" aria-modal="true" aria-labelledby="song-editor-title" className={`flex w-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101d2a] shadow-2xl ${tab === 'design' ? 'h-[min(900px,94vh)] max-w-[1280px]' : 'max-h-[min(880px,94vh)] max-w-[880px]'}`}>
+      <section role="dialog" aria-modal="true" aria-labelledby="song-editor-title" className={`flex w-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101d2a] shadow-2xl ${tab === 'design' ? 'h-[min(900px,94vh)] max-w-[1440px]' : 'max-h-[min(880px,94vh)] max-w-[880px]'}`}>
         <header className="flex items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
           <div className="flex min-w-0 items-center gap-3">
             <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand/15 text-brand"><BookOpen size={20} /></span>
@@ -148,30 +170,14 @@ export default function SongEditorModal({
         {isStandard && <div className="border-b border-white/10 bg-white/[0.03] px-5 py-2 text-xs text-warm-white/60">This song is in a standard songbook. Your corrections are saved on this computer only, and you can restore the original at any time.</div>}
 
         {tab === 'design' ? (
-          <SongDesignPanel
-            song={{ title, author, copyright, lyrics }}
+          <SongScriptureDesignPanel
+            song={designSong}
             style={effectiveStyle}
             ownDesign={ownStyle !== null}
-            onTextChange={({ kind, oldText, occurrence, text }) => {
-              if (kind === 'title') {
-                setTitle(text);
-                return;
-              }
-              setLyrics((current) => {
-                if (!oldText) return current;
-                let from = 0;
-                let start = -1;
-                for (let match = 0; match <= occurrence; match += 1) {
-                  start = current.indexOf(oldText, from);
-                  if (start < 0) return current;
-                  from = start + oldText.length;
-                }
-                return `${current.slice(0, start)}${text}${current.slice(start + oldText.length)}`;
-              });
-            }}
-            onChange={(patch) => setOwnStyle(cleanSongStyle({ ...effectiveStyle, ...patch }))}
-            onUseDefault={() => setOwnStyle(null)}
-            onMakeDefault={() => { saveSongSlideSettings(effectiveStyle); setOwnStyle(null); }}
+            onTextChange={updateDesignText}
+            onChange={updateDesignStyle}
+            onUseDefault={resetDesignStyle}
+            onMakeDefault={makeDesignDefault}
           />
         ) : (
         <div className="grid min-h-0 flex-1 overflow-hidden md:grid-cols-[minmax(0,1fr)_260px]">

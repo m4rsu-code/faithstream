@@ -8,7 +8,6 @@ import BodyPortal from '../components/BodyPortal';
 const STUDIO_SETTINGS_EVENT = 'faithstream:studio-settings';
 
 const KEYS = {
-  previewMode: 'faithstream.studio-preview-mode',
   confirmEnd: 'faithstream.studio-confirm-end',
   resolution: 'faithstream.studio-resolution',
   frameRate: 'faithstream.studio-frame-rate',
@@ -85,7 +84,6 @@ function SettingsCard({ icon: Icon, title, description, children }: {
 const selectClass = 'mt-1.5 w-full rounded-lg border border-white/10 bg-navy px-3 py-2.5 text-sm text-warm-white outline-none focus:border-brand';
 
 export default function Settings() {
-  const [previewMode, setPreviewMode] = useState(() => localStorage.getItem(KEYS.previewMode) !== 'false');
   const [confirmEnd, setConfirmEnd] = useState(() => localStorage.getItem(KEYS.confirmEnd) !== 'false');
   const [resolution, setResolution] = useState(() => localStorage.getItem(KEYS.resolution) || '720p');
   const [frameRate, setFrameRate] = useState(() => localStorage.getItem(KEYS.frameRate) || '30');
@@ -115,7 +113,6 @@ export default function Settings() {
 
   // Studio stays open in the background, so tell it straight away when one of its settings changes.
   const tellStudio = () => window.dispatchEvent(new Event(STUDIO_SETTINGS_EVENT));
-  useEffect(() => { localStorage.setItem(KEYS.previewMode, String(previewMode)); tellStudio(); }, [previewMode]);
   useEffect(() => { localStorage.setItem(KEYS.confirmEnd, String(confirmEnd)); tellStudio(); }, [confirmEnd]);
   useEffect(() => { localStorage.setItem(KEYS.resolution, resolution); tellStudio(); }, [resolution]);
   useEffect(() => { localStorage.setItem(KEYS.frameRate, frameRate); tellStudio(); }, [frameRate]);
@@ -386,15 +383,9 @@ export default function Settings() {
             </div>
           </SettingsCard>
 
-          <SettingsCard icon={MonitorPlay} title="Presenting slides" description="Choose how slides move from your preview to the screen.">
-            <PreferenceSwitch
-              label="Preview slides before showing them"
-              description="When on, check a slide in Preview first, then choose Take to air. When off, slide changes appear right away."
-              checked={previewMode}
-              onChange={setPreviewMode}
-            />
-            <div className="border-t border-white/10 pt-3 text-xs leading-relaxed text-warm-white/50">
-              Keyboard: <span className="text-warm-white/75">↑ or ←</span> previous slide · <span className="text-warm-white/75">↓ or →</span> next slide.
+          <SettingsCard icon={MonitorPlay} title="Presenting slides" description="Prepare the next slide without interrupting what viewers currently see.">
+            <div className="pt-3 text-xs leading-relaxed text-warm-white/65">
+              Selecting a different scene always prepares it without changing the live screen. In Studio, turn on <span className="font-semibold text-white">Quick show slides</span> if you want slides in the scene that is already live to appear as soon as you select them. Other scenes still wait for <span className="font-semibold text-white">Show to audience</span>. Arrow keys and Page Up/Page Down follow the same rule; Enter shows the prepared slide.
             </div>
           </SettingsCard>
 

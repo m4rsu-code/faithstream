@@ -15,13 +15,23 @@ export const readBackgroundLibrary = async (): Promise<{ items: BackgroundItem[]
     request.onerror = () => reject(request.error);
   });
   const stored = await new Promise<{ id: string; name: string; type: 'image' | 'video'; category?: string; collection?: string; blob: Blob; thumbnailBlob?: Blob; createdAt: number }[]>((resolve, reject) => {
-    const request = db.transaction('assets', 'readonly').objectStore('assets').getAll();
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-    request.transaction?.addEventListener('complete', () => db.close(), { once: true });
+    const transaction = db.transaction('assets', 'readonly');
+    const request = transaction.objectStore('assets').openCursor();
+    const backgrounds: { id: string; name: string; type: 'image' | 'video'; category?: string; collection?: string; blob: Blob; thumbnailBlob?: Blob; createdAt: number }[] = [];
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      const asset = cursor.value as typeof backgrounds[number];
+      // Presentation slide assets can be much larger than backgrounds. Skip them while
+      // walking the store instead of cloning every slide blob with getAll().
+      if (asset.category !== 'slide' && asset.blob instanceof Blob) backgrounds.push(asset);
+      cursor.continue();
+    };
+    transaction.oncomplete = () => { db.close(); resolve(backgrounds); };
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+    transaction.onabort = () => { db.close(); reject(transaction.error); };
   });
   const localItems = stored
-    .filter((asset) => asset.category !== 'slide' && asset.blob instanceof Blob)
     .sort((a, b) => b.createdAt - a.createdAt)
     .map((asset) => {
       const url = URL.createObjectURL(asset.blob);

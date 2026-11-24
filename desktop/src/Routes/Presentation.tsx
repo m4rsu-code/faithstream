@@ -3,6 +3,7 @@ import {
   useEffect,
   useLayoutEffect,
   memo,
+  useMemo,
   useRef,
   useState,
   type PointerEvent as RPointerEvent,
@@ -81,7 +82,8 @@ import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimizatio
 import { getAccountDatabaseName, getAccountStorageKey } from '../utils/accountStorage';
 import GOOGLE_FONT_FAMILIES from '../data/google-font-families.json';
 import { apiFetch } from '../api/client';
-import Songbooks from './Songbooks';
+import SongbooksTab from '../Sub-tabs/SongbooksTab';
+import { SegmentedTabs } from '../Sub-tabs/TabNavigation';
 import { songSlideLayouts, type Song, type SongTextLayout } from '../utils/songbooks';
 import SlideTextEditor from '../components/SlideTextEditor';
 import { backgroundClasses, backgroundStyle, customBackground, parseCustomBackground } from '../utils/slideBackground';
@@ -198,10 +200,19 @@ type PictureT = { id: number; src: string; x: number; y: number; w: number; h: n
 type ShapeT = { id: number; kind: 'rectangle' | 'circle' | 'triangle' | 'line' | 'star' | 'arrow'; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number; animation?: EntranceAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: AnimationEasing };
 type MediaAsset = { id: string; name: string; type: 'image' | 'video'; category?: 'background' | 'slide'; collection?: string; blob: Blob; thumbnailBlob?: Blob; originalBlob?: Blob; optimized?: boolean; createdAt: number; url: string; thumbnailUrl?: string; fromFolder?: boolean; protected?: boolean; byteSize?: number };
 type StoredMediaAsset = Omit<MediaAsset, 'url' | 'thumbnailUrl'>;
+const collectionOf = (asset: MediaAsset) => asset.collection || 'Uploads';
+const mediaSizeOf = (asset: MediaAsset) => formatMediaSizeInKb(asset.byteSize ?? asset.blob.size);
+const backgroundOriginLabel = (asset: MediaAsset) => {
+  const collection = collectionOf(asset);
+  if (asset.protected) return 'Built-in';
+  if (asset.fromFolder) return 'Imported';
+  if (collection === 'Uploads') return 'Imported';
+  return `Imported · ${collection}`;
+};
 type PortableMediaEntry = { id: string; name: string; type: 'image' | 'video'; mimeType: string; thumbnailMimeType?: string; category?: 'background' | 'slide'; collection?: string; optimized?: boolean; createdAt: number; dataFile: string; thumbnailFile?: string };
 type PortablePresentationManifest = { format: 'faithstream-portable-presentation'; version: 1; presentation: { id: string; name: string; slides: SlideT[]; updatedAt: number; deviceOnly?: boolean; colors?: string[] }; assets: PortableMediaEntry[] };
 
-function BackgroundHoverPreview({ asset, className }: { asset: Pick<MediaAsset, 'url' | 'type' | 'thumbnailUrl'>; className: string }) {
+const BackgroundHoverPreview = memo(function BackgroundHoverPreview({ asset, className }: { asset: Pick<MediaAsset, 'url' | 'type' | 'thumbnailUrl'>; className: string }) {
   const [hovered, setHovered] = useState(false);
   return <span className="absolute inset-0" onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}>
     {asset.type === 'image'
@@ -212,7 +223,28 @@ function BackgroundHoverPreview({ asset, className }: { asset: Pick<MediaAsset, 
           ? <img src={asset.thumbnailUrl} alt="" loading="lazy" decoding="async" className={className} />
           : <span className="flex h-full w-full items-center justify-center bg-navy"><Video size={20} className="text-warm-white/45" /></span>}
   </span>;
-}
+});
+
+const BackgroundLibraryCard = memo(function BackgroundLibraryCard({ asset, selected, onApply, onPreview, onDelete }: {
+  asset: MediaAsset;
+  selected: boolean;
+  onApply: (asset: MediaAsset) => void;
+  onPreview: (asset: MediaAsset) => void;
+  onDelete: (asset: MediaAsset) => void;
+}) {
+  return <div className={`group relative overflow-hidden rounded-lg border ${selected ? 'border-brand ring-1 ring-brand/40' : 'border-white/10 hover:border-white/40'}`} style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 132px' }}>
+    <button onClick={() => onApply(asset)} title={`Set ${asset.name} as the slide background`} className="block w-full text-left">
+      <span className="relative block aspect-video overflow-hidden bg-navy">
+        <BackgroundHoverPreview asset={asset} className="h-full w-full object-cover" />
+        {asset.type === 'video' && <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white">VIDEO</span>}
+      </span>
+      <span className="block truncate px-1.5 pt-1 text-[10px] font-medium text-warm-white/75">{backgroundOriginLabel(asset)} background</span>
+      <span className="block truncate px-1.5 pb-1 text-[9px] text-warm-white/45">{asset.optimized && asset.originalBlob ? `${formatMediaSizeInKb(asset.originalBlob.size)} → ` : ''}{mediaSizeOf(asset)}{asset.optimized ? ' · optimized copy' : ''}</span>
+    </button>
+    {asset.type === 'video' && <button type="button" aria-label={`Preview ${asset.name}`} title={`Play preview of ${asset.name}`} onClick={() => onPreview(asset)} className="absolute bottom-2 right-2 z-10 rounded-md bg-black/80 p-1.5 text-white hover:bg-brand"><Play size={13} /></button>}
+    {!asset.fromFolder && <button type="button" aria-label={`Delete ${asset.name}`} title={`Delete ${asset.name}`} onClick={() => onDelete(asset)} className="absolute right-1 top-1 z-10 rounded-md border border-white/15 bg-black/75 p-1.5 text-white/75 opacity-0 shadow transition hover:bg-red-600 hover:text-white focus:opacity-100 group-hover:opacity-100"><Trash2 size={12} /></button>}
+  </div>;
+});
 
 type SlideT = {
   id: number;
@@ -419,6 +451,18 @@ const MEDIA_DB = 'faithstream.media';
 const MEDIA_STORE = 'assets';
 const PROJECT_DATA_DB = 'faithstream.presentation-data';
 const PROJECT_DATA_STORE = 'projects';
+const BACKGROUND_FOLDERS_STORAGE_KEY = 'faithstream.background-folders';
+
+const loadCustomBackgroundFolders = () => {
+  try {
+    const value = JSON.parse(localStorage.getItem(getAccountStorageKey(BACKGROUND_FOLDERS_STORAGE_KEY)) ?? '[]');
+    return Array.isArray(value) ? [...new Set(value.filter((name): name is string => typeof name === 'string').map(cleanCategoryName).filter(Boolean))] : [];
+  } catch { return []; }
+};
+
+const saveCustomBackgroundFolders = (folders: string[]) => {
+  try { localStorage.setItem(getAccountStorageKey(BACKGROUND_FOLDERS_STORAGE_KEY), JSON.stringify(folders)); } catch { /* Keep folders available for this session. */ }
+};
 
 /** `colors`: background colours saved for this presentation only (same format as a slide's `bg`). */
 type PresentationProject = { id: string; name: string; slides: SlideT[]; updatedAt: number; locked?: boolean; deviceOnly?: boolean; hasLocalMedia?: boolean; colors?: string[] };
@@ -491,7 +535,7 @@ const readDeviceProjects = async (): Promise<PresentationProject[]> => {
 
 let projectDataWriteQueue: Promise<void> = Promise.resolve();
 /** Imported files can exceed localStorage's small quota, so keep their slide data in IndexedDB. */
-const saveProjectList = (projects: PresentationProject[]) => {
+const saveProjectList = (projects: PresentationProject[], changedProjectId?: string, persistDeviceProjects = true) => {
   const key = getAccountStorageKey(PROJECTS_STORAGE_KEY);
   const dbName = getAccountDatabaseName(PROJECT_DATA_DB);
   const lightweightList = projects.map((project) => project.deviceOnly ? {
@@ -515,15 +559,33 @@ const saveProjectList = (projects: PresentationProject[]) => {
     } : project);
     try { localStorage.setItem(key, JSON.stringify(metadataOnly)); } catch { /* IndexedDB remains the durable copy for imported decks. */ }
   }
-  const deviceProjects = projects.filter((project) => project.deviceOnly);
+  if (!persistDeviceProjects) {
+    const task = projectDataWriteQueue.catch(() => undefined).then(() => {
+      // The account merge may still contain only localStorage metadata for device imports.
+      // Ask Studio to reload from IndexedDB instead of rebuilding scene snapshots from it.
+      window.dispatchEvent(new Event('faithstream:presentations-updated'));
+    });
+    projectDataWriteQueue = task;
+    return task;
+  }
   const task = projectDataWriteQueue.catch(() => undefined).then(async () => {
     const db = await openProjectDataDb(dbName);
     await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(PROJECT_DATA_STORE, 'readwrite');
       const store = transaction.objectStore(PROJECT_DATA_STORE);
-      store.clear();
-      deviceProjects.forEach((project) => store.put(project));
-      transaction.oncomplete = () => { db.close(); window.dispatchEvent(new CustomEvent('faithstream:presentations-updated')); resolve(); };
+      if (changedProjectId) {
+        const changedProject = projects.find((project) => project.id === changedProjectId);
+        if (changedProject?.deviceOnly) store.put(changedProject);
+        else store.delete(changedProjectId);
+      } else {
+        store.clear();
+        projects.filter((project) => project.deviceOnly).forEach((project) => store.put(project));
+      }
+      transaction.oncomplete = () => {
+        db.close();
+        window.dispatchEvent(new CustomEvent('faithstream:presentations-updated', { detail: { projects, changedProjectId } }));
+        resolve();
+      };
       transaction.onerror = () => { db.close(); reject(transaction.error); };
       transaction.onabort = () => { db.close(); reject(transaction.error); };
     });
@@ -725,10 +787,10 @@ const loadSlides = (): SlideT[] => {
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 const mediaRatioOnSlide = (pixelRatio: number) => pixelRatio * 9 / 16;
-const getImageAspectRatio = (src: string) => new Promise<number>((resolve) => {
+const getImageAspectRatio = (src: string, fallback = 32 / 44) => new Promise<number>((resolve) => {
   const image = new Image();
-  image.onload = () => resolve(image.naturalWidth > 0 && image.naturalHeight > 0 ? image.naturalWidth / image.naturalHeight : 32 / 44);
-  image.onerror = () => resolve(32 / 44);
+  image.onload = () => resolve(image.naturalWidth > 0 && image.naturalHeight > 0 ? image.naturalWidth / image.naturalHeight : fallback);
+  image.onerror = () => resolve(fallback);
   image.src = src;
 });
 const normalizeImportedPicture = (picture: PictureT, asset?: MediaAsset, canvasAspect = 16 / 9) => {
@@ -1236,6 +1298,7 @@ export default function Presentation() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [projectName, setProjectName] = useState('');
   const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>(() => (mediaLibraryCache?.db === getAccountDatabaseName(MEDIA_DB) ? mediaLibraryCache.assets : []));
+  const deleteMediaAssetRef = useRef<(asset: MediaAsset) => Promise<void>>(async () => undefined);
   // True once the media library has been read (or came from the cache), so the cache is never
   // replaced by the empty list the page starts with.
   const mediaReadyRef = useRef(mediaLibraryCache?.db === getAccountDatabaseName(MEDIA_DB));
@@ -1282,6 +1345,9 @@ export default function Presentation() {
   const [libraryDragOver, setLibraryDragOver] = useState(false);
   // Background collections.
   const [backgroundCollection, setBackgroundCollection] = useState('All');
+  const [customBackgroundFolders, setCustomBackgroundFolders] = useState<string[]>(loadCustomBackgroundFolders);
+  const [creatingBackgroundFolder, setCreatingBackgroundFolder] = useState(false);
+  const [backgroundFolderNameDraft, setBackgroundFolderNameDraft] = useState('');
   const [renamingCollection, setRenamingCollection] = useState<string | null>(null);
   const [collectionNameDraft, setCollectionNameDraft] = useState('');
   const [backgroundImportProgress, setBackgroundImportProgress] = useState<{ message: string; current: number; total: number } | null>(null);
@@ -1403,7 +1469,7 @@ export default function Presentation() {
           if (!remote || project.updatedAt >= remote.updatedAt) merged.set(project.id, project);
         }
         const next = [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt);
-        void saveProjectList(next).catch(() => undefined);
+        void saveProjectList(next, undefined, false).catch(() => undefined);
         accountSyncReadyRef.current = true;
         setProjects(next);
         setAccountSyncStatus('Connected — syncing presentations');
@@ -1584,8 +1650,7 @@ export default function Presentation() {
         const next = current.map((project) => project.id === pending.id
           ? { ...project, name: pending.name, slides: pending.slides, updatedAt: Date.now() }
           : project);
-        void saveProjectList(next).catch(() => undefined);
-        window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
+        void saveProjectList(next, pending.id).catch(() => undefined);
         return next;
       });
     };
@@ -1652,6 +1717,10 @@ export default function Presentation() {
   const contentInput = useRef<HTMLInputElement>(null);
 
   const cur = slides[index];
+  const activeSlideIndexRef = useRef(index);
+  activeSlideIndexRef.current = index;
+  const currentSlideRef = useRef(cur);
+  currentSlideRef.current = cur;
   const box = selectedBoxId === null
     ? cur.box
     : cur.extraBoxes?.find((item) => item.id === selectedBoxId)?.box ?? null;
@@ -1711,22 +1780,36 @@ export default function Presentation() {
 
   const selectedShape = (cur.shapes ?? []).find((shape) => shape.id === selectedShapeId);
   const selectedPicture = (cur.pictures ?? []).find((picture) => picture.id === selectedPictureId);
-  const activeProject = projects.find((project) => project.id === activeProjectId);
+  const activeProject = useMemo(() => projects.find((project) => project.id === activeProjectId), [projects, activeProjectId]);
   const projectLocked = !!activeProject?.locked;
-  const legacyImportedSlideAssetIds = new Set(projects.flatMap((project) => {
+  const legacyImportedSlideAssetIds = useMemo(() => new Set(projects.flatMap((project) => {
     const imageOnlyDeck = project.slides.length > 1 && project.slides.every((slide) => !!slide.bgAssetId && !slide.box && !slide.extraBoxes?.length);
     return imageOnlyDeck ? project.slides.map((slide) => slide.bgAssetId).filter((id): id is string => !!id) : [];
-  }));
-  const backgroundAssets = mediaAssets.filter((asset) => asset.category !== 'slide'
+  })), [projects]);
+  const backgroundAssets = useMemo(() => mediaAssets.filter((asset) => asset.category !== 'slide'
     && !legacyImportedSlideAssetIds.has(asset.id)
-    && !/^slide\s+\d+\.png$/i.test(asset.name));
-  const contentAssets = backgroundAssets.filter((asset) => !asset.fromFolder);
+    && !/^slide\s+\d+\.png$/i.test(asset.name)), [mediaAssets, legacyImportedSlideAssetIds]);
+  const contentAssets = useMemo(() => backgroundAssets.filter((asset) => !asset.fromFolder), [backgroundAssets]);
+  const backgroundCollections = useMemo(() => [...new Set(backgroundAssets.map(collectionOf))].sort((a, b) => (a === 'Built-in' ? -1 : b === 'Built-in' ? 1 : a === 'Uploads' ? 1 : b === 'Uploads' ? -1 : naturalCompare(a, b))), [backgroundAssets]);
+  const activeBackgroundCollection = backgroundCollection === 'All' || backgroundCollections.includes(backgroundCollection) ? backgroundCollection : 'All';
+  const visibleBackgroundAssets = useMemo(() => backgroundAssets.filter((asset) => activeBackgroundCollection === 'All' || collectionOf(asset) === activeBackgroundCollection), [backgroundAssets, activeBackgroundCollection]);
+  const backgroundCollectionCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const asset of backgroundAssets) {
+      const collection = collectionOf(asset);
+      counts.set(collection, (counts.get(collection) ?? 0) + 1);
+    }
+    return counts;
+  }, [backgroundAssets]);
+  const videoBackgroundCount = useMemo(() => backgroundAssets.filter((asset) => asset.type === 'video').length, [backgroundAssets]);
   const allBoxes: { id: number | null; box: TextBox }[] = [
     ...(cur.box ? [{ id: null, box: cur.box }] : []),
     ...(cur.extraBoxes ?? []),
   ];
-  const fontOptions = [...new Set([box?.font ?? '', ...(box?.importedRuns ?? []).map((run) => run.font), ...GOOGLE_FONTS, ...Object.keys(FONTS)].filter(Boolean))]
-    .filter((family) => family.toLocaleLowerCase().includes(fontSearch.trim().toLocaleLowerCase()));
+  const fontOptions = useMemo(() => fontPickerOpen
+    ? [...new Set([box?.font ?? '', ...(box?.importedRuns ?? []).map((run) => run.font), ...GOOGLE_FONTS, ...Object.keys(FONTS)].filter(Boolean))]
+      .filter((family) => family.toLocaleLowerCase().includes(fontSearch.trim().toLocaleLowerCase()))
+    : [], [fontPickerOpen, box?.font, box?.importedRuns, fontSearch]);
 
   useEffect(() => {
     // Keep the text properties ready when a slide opens, including imported/template
@@ -1747,8 +1830,11 @@ export default function Presentation() {
 
   /* ----- editing helpers ----- */
 
-  const updateSlide = (patch: Partial<SlideT>) =>
-    !cur.locked && setSlides((l) => l.map((s, i) => (i === index ? { ...s, ...patch } : s)));
+  const updateSlide = useCallback((patch: Partial<SlideT>) => setSlides((current) => {
+    const targetIndex = activeSlideIndexRef.current;
+    if (current[targetIndex]?.locked) return current;
+    return current.map((slide, slideIndex) => slideIndex === targetIndex ? { ...slide, ...patch } : slide);
+  }), []);
 
   const updateSlideTitle = (id: number, title: string) =>
     setSlides((l) => l.map((s) => s.id === id && !s.locked ? { ...s, title } : s));
@@ -2340,11 +2426,14 @@ export default function Presentation() {
       title: 'Delete slide?',
       message: `Delete “${slide.title || `Slide ${i + 1}`}”? This cannot be undone.`,
       onConfirm: () => {
+        const nextSlides = slides.length === 1
+          ? [makeSlide({ bg: BGS[4], text: 'New slide', size: 96 })]
+          : slides.filter((_, k) => k !== i);
+        setSlides(nextSlides);
+        persistActivePresentationSlides(nextSlides);
         if (slides.length === 1) {
-          setSlides([makeSlide({ bg: BGS[4], text: 'New slide', size: 96 })]);
           setIndex(0);
         } else {
-          setSlides((current) => current.filter((_, k) => k !== i));
           setIndex((value) => clamp(value > i ? value - 1 : value === i ? Math.max(0, i - 1) : value, 0, slides.length - 2));
         }
         setDeleteConfirmation(null);
@@ -2450,17 +2539,18 @@ export default function Presentation() {
     setTab('Format');
   };
 
-  const applyMediaAsset = (asset: MediaAsset) => {
+  const applyMediaAsset = useCallback((asset: MediaAsset) => {
+    const currentSlide = currentSlideRef.current;
     updateSlide({
       bgAssetId: asset.id,
       bgImage: asset.type === 'image' ? asset.url : undefined,
       bgVideo: asset.type === 'video' ? asset.url : undefined,
-      bgVideoMuted: asset.type === 'video' ? (cur.bgVideoMuted ?? true) : undefined,
+      bgVideoMuted: asset.type === 'video' ? (currentSlide.bgVideoMuted ?? true) : undefined,
       bgPosition: { x: 50, y: 50 },
       bgPictureRestore: undefined,
     });
     setBackgroundEditing(false);
-  };
+  }, [updateSlide]);
 
   /* ----- drag to move / resize the text box on the canvas ----- */
 
@@ -2713,6 +2803,17 @@ export default function Presentation() {
 
   // Media files are stored in IndexedDB; a slide only keeps the library asset ID.
   const serializable = (deck: SlideT[] = slides) => deck.map((s) => ({ ...s, bgImage: s.bgAssetId ? undefined : s.bgImage, bgVideo: undefined, bgPictureRestore: s.bgPictureRestore?.assetId ? { ...s.bgPictureRestore, src: '' } : s.bgPictureRestore, pictures: s.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) }));
+  function persistActivePresentationSlides(deck: SlideT[]) {
+    if (!activeProjectId) return;
+    cancelPendingProjectSave();
+    const project = projectsRef.current.find((item) => item.id === activeProjectId);
+    if (!project) return;
+    const updated = { ...project, name: projectName.trim() || 'Untitled presentation', slides: serializable(deck), updatedAt: Date.now() };
+    const next = [updated, ...projectsRef.current.filter((item) => item.id !== activeProjectId)];
+    projectsRef.current = next;
+    setProjects(next);
+    void saveProjectList(next, activeProjectId).catch(() => flash('Could not save the deleted slide. Check available storage and try again.'));
+  };
   const presentationSnapshot = (name: string, deck: SlideT[]) => JSON.stringify({
     name: name.trim() || 'Untitled presentation',
     slides: serializable(deck),
@@ -3000,11 +3101,10 @@ export default function Presentation() {
       if (importedElementIds.length) nextId = Math.max(nextId, ...importedElementIds) + 1;
       stagedMediaAssets = (await readMediaAssets()).map(attachStoredMediaAsset);
       const next = [restored, ...projectsRef.current.filter((project) => project.id !== restored.id)];
-      await saveProjectList(next);
+      await saveProjectList(next, restored.id);
       mediaLibraryCache = { db: getAccountDatabaseName(MEDIA_DB), assets: stagedMediaAssets };
       setMediaAssets((current) => { current.forEach(revokeMediaAssetUrls); return stagedMediaAssets; });
       setProjects(next);
-      window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
       flash(`“${restored.name}” and its ${importedManifest.assets.length} media file${importedManifest.assets.length === 1 ? '' : 's'} are ready on this device.`);
     } catch (error) {
       await Promise.all(importedIds.map((id) => deleteMediaAssetFromDb(id).catch(() => undefined)));
@@ -3066,19 +3166,20 @@ export default function Presentation() {
   const buildSlidesFromGroup = async (group: SlideImportGroup, report: (message: string) => void, step: () => void, expandProgress: (additionalSteps: number) => void) => {
     const slidesOut: SlideT[] = [];
     const assetsOut: MediaAsset[] = [];
-    const asSlide = (asset: MediaAsset, title: string, imageFit: 'cover' | 'contain' = 'cover'): SlideT => ({
-      id: nextId++, title, bg: BGS[4], dim: 0, bgImage: asset.url, bgImageFit: imageFit, bgAssetId: asset.id, box: null, extraBoxes: [], pictures: [], shapes: [],
+    const asSlide = (asset: MediaAsset, title: string, canvasAspect: number): SlideT => ({
+      id: nextId++, title, bg: BGS[4], dim: 0, canvasAspect, bgImage: asset.url, bgImageFit: 'contain', bgAssetId: asset.id, box: null, extraBoxes: [], pictures: [], shapes: [],
     });
     if (group.images.length) {
       report(`Saving ${group.images.length} slide ${group.images.length === 1 ? 'image' : 'images'}`);
       const storedAssets = await saveMediaAssetsBatch(group.images.map((file) => ({ file, category: 'slide' as const })));
       const importedAssets = storedAssets.map(attachStoredMediaAsset);
       assetsOut.push(...importedAssets);
-      importedAssets.forEach((asset, index) => {
+      for (const [index, asset] of importedAssets.entries()) {
         const file = group.images[index];
-        slidesOut.push(asSlide(asset, file.name.replace(/\.[^.]+$/, '').trim() || `Slide ${slidesOut.length + 1}`));
+        const canvasAspect = await getImageAspectRatio(asset.url, 16 / 9);
+        slidesOut.push(asSlide(asset, file.name.replace(/\.[^.]+$/, '').trim() || `Slide ${slidesOut.length + 1}`, canvasAspect));
         step();
-      });
+      }
     }
     if (group.powerpoint) {
       report(`Reading ${group.powerpoint.name} in PowerPoint`);
@@ -3338,16 +3439,6 @@ export default function Presentation() {
 
   /* ----- background collections ----- */
 
-  const collectionOf = (asset: MediaAsset) => asset.collection || 'Uploads';
-  const mediaSizeOf = (asset: MediaAsset) => formatMediaSizeInKb(asset.byteSize ?? asset.blob.size);
-const backgroundOriginLabel = (asset: MediaAsset) => {
-  const collection = collectionOf(asset);
-  if (asset.protected) return 'Built-in';
-  if (asset.fromFolder) return 'Imported';
-  if (collection === 'Uploads') return 'Imported';
-  return `Imported · ${collection}`;
-};
-
   const refreshFolderBackgrounds = async () => {
     try {
       const items = await window.faithstreamWindow?.listPresentationBackgrounds() ?? [];
@@ -3388,6 +3479,36 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
     flash(`${added.length} ${added.length === 1 ? 'background' : 'backgrounds'} added${collections.length ? ` to ${collections.length === 1 ? `“${collections[0]}”` : `${collections.length} collections`}` : ''}${failed ? ` · ${failed} could not be read` : ''}`);
   };
 
+  const createCustomBackgroundFolder = () => {
+    const name = cleanCategoryName(backgroundFolderNameDraft);
+    if (!name) { flash('Enter a folder name first.'); return; }
+    if (['All', 'Built-in', 'Imported', 'Uploads'].includes(name)) { flash('Choose a different folder name.'); return; }
+    if (customBackgroundFolders.some((folder) => folder.toLocaleLowerCase() === name.toLocaleLowerCase())
+      || backgroundAssets.some((asset) => collectionOf(asset).toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      flash('A folder with that name already exists.');
+      return;
+    }
+    const next = [...customBackgroundFolders, name].sort(naturalCompare);
+    saveCustomBackgroundFolders(next);
+    setCustomBackgroundFolders(next);
+    setBackgroundFolderNameDraft('');
+    setCreatingBackgroundFolder(false);
+    setRenamingCollection(null);
+    flash(`Folder “${name}” created. Add images or videos to it now.`);
+  };
+
+  const moveBackgroundAsset = async (asset: MediaAsset, target: string) => {
+    const nextAsset = { ...asset, collection: target === 'Uploads' ? undefined : target };
+    const { url: _url, thumbnailUrl: _thumbnailUrl, ...stored } = nextAsset;
+    try {
+      await updateMediaAssetsInDb([stored]);
+      setMediaAssets((current) => current.map((item) => item.id === asset.id ? nextAsset : item));
+      flash(target === 'Uploads' ? `“${asset.name}” moved to Imported` : `“${asset.name}” moved to “${target}”`);
+    } catch {
+      flash(`Could not move “${asset.name}”.`);
+    }
+  };
+
   const renameBackgroundCollection = async (from: string, to: string) => {
     if (from === 'Built-in') return;
     const name = cleanCategoryName(to);
@@ -3397,6 +3518,12 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
     try {
       await updateMediaAssetsInDb(changed.map(({ url: _url, ...stored }) => stored));
       setMediaAssets((current) => current.map((asset) => changed.find((item) => item.id === asset.id) ?? asset));
+      if (customBackgroundFolders.includes(from)) {
+        const renamedFolders = customBackgroundFolders.map((folder) => folder === from ? name : folder);
+        const nextFolders = [...new Set(renamedFolders)].sort(naturalCompare);
+        saveCustomBackgroundFolders(nextFolders);
+        setCustomBackgroundFolders(nextFolders);
+      }
       setBackgroundCollection(name);
       flash(`Collection renamed to “${name}”`);
     } catch {
@@ -3425,6 +3552,11 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
             pictures: slide.pictures?.filter((picture) => !picture.assetId || !ids.has(picture.assetId)),
           });
           setMediaAssets((current) => current.filter((item) => !ids.has(item.id)));
+          const nextFolders = customBackgroundFolders.filter((folder) => folder !== name);
+          if (nextFolders.length !== customBackgroundFolders.length) {
+            saveCustomBackgroundFolders(nextFolders);
+            setCustomBackgroundFolders(nextFolders);
+          }
           setSlides((current) => current.map(clearSlide));
           setProjects((current) => {
             const next = current.map((project) => ({ ...project, slides: project.slides.map(clearSlide) }));
@@ -3467,7 +3599,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
         const next = projects.filter((item) => item.id !== id);
         updateCategories((current) => { const rest = { ...current }; delete rest[id]; return rest; });
         setProjects(next);
-        void saveProjectList(next).catch(() => undefined);
+        void saveProjectList(next, project.id).catch(() => undefined);
         if (!project.deviceOnly && accountTokenRef.current) {
           void apiFetch(`presentations/${encodeURIComponent(project.id)}`, {
             method: 'DELETE',
@@ -3478,7 +3610,6 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
             setAccountSyncStatus('Could not remove this presentation from account sync; try again while online');
           });
         }
-        window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
         setProjectMenuFor(null);
         setDeleteConfirmation(null);
       },
@@ -3568,6 +3699,14 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
       flash('Could not delete this background');
     }
   };
+  deleteMediaAssetRef.current = deleteMediaAsset;
+  const requestBackgroundDelete = useCallback((asset: MediaAsset) => {
+    setDeleteConfirmation({
+      title: 'Delete uploaded background?',
+      message: `Delete “${asset.name}” from saved uploads? Slides using this file will switch back to their color background.`,
+      onConfirm: () => { void deleteMediaAssetRef.current(asset); },
+    });
+  }, []);
 
   const save = async () => {
     if (saving) return false;
@@ -3589,9 +3728,8 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
         colors: existingProject?.colors,
       };
       const next = [project, ...projects.filter((item) => item.id !== id)];
-      await saveProjectList(next);
+      await saveProjectList(next, id);
       setProjects(next);
-      window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
       originalProjectRef.current = null;
       newDraftProjectIdRef.current = null;
       setLeaveConfirmationOpen(false);
@@ -3627,9 +3765,8 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
         ? projects.filter((project) => project.id !== draftId)
         : projects.map((project) => project.id === original!.id ? original! : project);
       try {
-        void saveProjectList(next).catch(() => undefined);
+        void saveProjectList(next, draftId ?? original!.id).catch(() => undefined);
         setProjects(next);
-        window.dispatchEvent(new CustomEvent('faithstream:presentations-updated'));
       } catch {
         flash('Could not discard changes on this device.');
         return;
@@ -3656,15 +3793,18 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
   if (!activeProjectId) {
     const requestedView = new URLSearchParams(location.search).get('view');
     const libraryView = requestedView === 'songbooks' || requestedView === 'backgrounds' ? requestedView : 'presentations';
-    const libraryTabs = (
-      <div role="tablist" aria-label="Library" className="inline-flex gap-1 rounded-xl border border-white/10 bg-panel p-1">
-        {([['presentations', 'Presentations', FolderOpen], ['backgrounds', 'Backgrounds', ImageIcon], ['songbooks', 'Songbooks', BookMarked]] as const).map(([key, label, Icon]) => (
-          <button key={key} role="tab" aria-selected={libraryView === key} onClick={() => navigate(key === 'songbooks' || key === 'backgrounds' ? `/presentations?view=${key}` : '/presentations', { replace: true })} className={`flex items-center gap-2 rounded-lg px-3.5 py-1.5 text-sm font-semibold transition ${libraryView === key ? 'bg-brand text-navy' : 'text-warm-white/65 hover:bg-white/5 hover:text-white'}`}>
-            <Icon size={15} /> {label}
-          </button>
-        ))}
-      </div>
-    );
+    const libraryTabs = <SegmentedTabs
+      label="Library"
+      value={libraryView}
+      options={[
+        { value: 'presentations', label: 'Presentations', icon: <FolderOpen size={15} /> },
+        { value: 'backgrounds', label: 'Backgrounds', icon: <ImageIcon size={15} /> },
+        { value: 'songbooks', label: 'Songbooks', icon: <BookMarked size={15} /> },
+      ]}
+      onChange={(key) => navigate(key === 'presentations' ? '/presentations' : `/presentations?view=${key}`, { replace: true })}
+      className="inline-flex gap-1 rounded-xl border border-white/10 bg-panel p-1"
+      buttonClassName="flex items-center gap-2 rounded-lg px-3.5 py-1.5 text-sm"
+    />;
     if (libraryView === 'songbooks') {
       return (
         <div className="flex h-full min-h-0 flex-col bg-navy p-6 md:p-8">
@@ -3677,21 +3817,28 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
               </div>
             </div>
             <div className="mb-4 shrink-0">{libraryTabs}</div>
-            <div className="min-h-0 flex-1"><Songbooks embedded onMakePresentation={createPresentationFromSong} /></div>
+            <div className="min-h-0 flex-1"><SongbooksTab embedded onMakePresentation={createPresentationFromSong} /></div>
           </div>
         </div>
       );
     }
     if (libraryView === 'backgrounds') {
+      const importedAssets = backgroundAssets.filter((asset) => !asset.protected);
+      const customFolderNames = [...new Set([
+        ...customBackgroundFolders,
+        ...importedAssets.map(collectionOf).filter((name) => !['Uploads', 'Imported', 'Built-in'].includes(name)),
+      ])].sort(naturalCompare);
       const folderDefinitions = [
         { id: 'Built-in', title: 'Built-in backgrounds', description: 'The backgrounds included with FaithStream.', assets: backgroundAssets.filter((asset) => asset.protected) },
-        { id: 'Imported', title: 'Imported backgrounds', description: 'Images and videos you added, kept separate from built-in backgrounds.', assets: backgroundAssets.filter((asset) => !asset.protected) },
+        { id: 'Imported', title: 'Imported backgrounds', description: 'Your pictures and videos, organized into folders on this device.', assets: importedAssets },
       ];
-      const active = folderDefinitions.some((folder) => folder.id === backgroundCollection) ? backgroundCollection : 'All';
+      const active = backgroundCollection === 'All' || folderDefinitions.some((folder) => folder.id === backgroundCollection) || customFolderNames.includes(backgroundCollection) ? backgroundCollection : 'All';
       const activeFolder = folderDefinitions.find((folder) => folder.id === active);
+      const unfiledImportedBackgrounds = importedAssets.filter((asset) => ['Uploads', 'Imported'].includes(collectionOf(asset)));
       const visibleBackgrounds = active === 'Imported'
-        ? folderDefinitions[1].assets
-        : activeFolder?.assets ?? [];
+        ? unfiledImportedBackgrounds
+        : activeFolder?.assets ?? importedAssets.filter((asset) => collectionOf(asset) === active);
+      const selectedFolderTitle = activeFolder?.title ?? active;
       return (
         <div className="h-full min-h-0 overflow-y-auto bg-navy px-6 pb-6 md:px-8 md:pb-8">
           <div className="mx-auto flex w-full max-w-6xl flex-col">
@@ -3700,20 +3847,26 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                 <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-brand/15 text-brand"><ImageIcon size={22} /></span>
                 <div>
                   <h1 className="text-2xl font-bold text-warm-white">Backgrounds</h1>
-                  <p className="mt-1 text-sm text-warm-white/55">Built-in backgrounds are ready to use. Add your own images and videos to keep them in a separate Imported library.</p>
+                  <p className="mt-1 text-sm text-warm-white/55">Organize imported images and videos into folders, then use them in presentations, songs, and Scripture designs.</p>
                 </div>
               </div>
               <div>{libraryTabs}</div>
               <div className="flex flex-wrap justify-end gap-2">
                 <button type="button" onClick={() => { void refreshFolderBackgrounds(); }} title="Refresh background library" className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-2.5 text-sm font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5"><ImageIcon size={16} /> Refresh</button>
-                <button type="button" disabled={backgroundImportProgress !== null} title="Add every picture and video in a folder (its subfolders become collections)" onClick={() => backgroundFolderInput.current?.click()} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-2.5 text-sm font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><FolderPlus size={16} /> Add a folder</button>
-                <button type="button" disabled={backgroundImportProgress !== null} title="Pick one picture or video, or select several (Ctrl+click)" onClick={() => backgroundFilesInput.current?.click()} className="flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-bold text-navy hover:brightness-110 disabled:opacity-50"><Upload size={16} /> Add pictures or videos</button>
+                {active === 'Imported' && <button type="button" onClick={() => { setCreatingBackgroundFolder(true); setBackgroundFolderNameDraft(''); }} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-2.5 text-sm font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5"><FolderPlus size={16} /> New folder</button>}
+                <button type="button" disabled={backgroundImportProgress !== null} title="Add every picture and video in a folder on your computer" onClick={() => backgroundFolderInput.current?.click()} className="flex items-center gap-2 rounded-xl border border-white/15 bg-panel px-4 py-2.5 text-sm font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><FolderPlus size={16} /> Import folder</button>
+                <button type="button" disabled={backgroundImportProgress !== null} title={active !== 'All' && active !== 'Built-in' ? `Add images or videos to ${selectedFolderTitle}` : 'Pick one picture or video, or select several'} onClick={() => backgroundFilesInput.current?.click()} className="flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-bold text-navy hover:brightness-110 disabled:opacity-50"><Upload size={16} /> {customFolderNames.includes(active) ? 'Add to this folder' : 'Add pictures or videos'}</button>
               </div>
             </div>
             <input ref={(element) => { backgroundFolderInput.current = element; markFolderInput(element); }} type="file" multiple hidden onChange={(event) => { const picked = pathedFilesFromInput(event.target.files); event.target.value = ''; void importBackgrounds(picked, true); }} />
             <input ref={backgroundFilesInput} type="file" accept="image/*,video/*" multiple hidden onChange={(event) => { const picked = pathedFilesFromInput(event.target.files); event.target.value = ''; void importBackgrounds(picked, false); }} />
+            {creatingBackgroundFolder && active === 'Imported' && <form onSubmit={(event) => { event.preventDefault(); createCustomBackgroundFolder(); }} className="mb-4 flex max-w-xl items-center gap-2 rounded-xl border border-brand/25 bg-brand/5 p-3">
+              <label className="min-w-0 flex-1 text-xs font-medium text-warm-white/70">Folder name<input autoFocus value={backgroundFolderNameDraft} onChange={(event) => setBackgroundFolderNameDraft(event.target.value)} maxLength={40} placeholder="For example: Easter service" className="mt-1 w-full rounded-lg border border-white/10 bg-navy px-3 py-2 text-sm text-white outline-none focus:border-brand" /></label>
+              <button type="submit" className="mt-5 rounded-lg bg-brand px-3 py-2 text-xs font-semibold text-navy">Create folder</button>
+              <button type="button" onClick={() => setCreatingBackgroundFolder(false)} className="mt-5 rounded-lg border border-white/10 px-3 py-2 text-xs text-warm-white/65">Cancel</button>
+            </form>}
             {backgroundImportProgress && <div role="status" aria-live="polite" className="my-4 rounded-xl border border-brand/25 bg-brand/5 p-3 text-sm text-warm-white/75"><div className="flex items-center gap-2"><Loader2 size={16} className="animate-spin text-brand" /><span className="min-w-0 flex-1 truncate">{backgroundImportProgress.message}</span><span className="tabular-nums text-warm-white/50">{backgroundImportProgress.current}/{backgroundImportProgress.total}</span></div><div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full bg-brand transition-[width]" style={{ width: `${backgroundImportProgress.total ? backgroundImportProgress.current / backgroundImportProgress.total * 100 : 0}%` }} /></div></div>}
-            {active === 'All' ? <div className="my-6 grid grid-cols-1 gap-4 md:grid-cols-3" aria-label="Background library folders">
+            {active === 'All' ? <div className="my-6 grid grid-cols-1 gap-4 md:grid-cols-2" aria-label="Background library folders">
               {folderDefinitions.map((folder) => {
                 const videoCount = folder.assets.filter((asset) => asset.type === 'video').length;
                 return <button key={folder.id} type="button" onClick={() => { setBackgroundCollection(folder.id); setRenamingCollection(null); }} className="group flex min-h-36 items-start gap-4 rounded-2xl border border-white/10 bg-panel p-5 text-left transition hover:border-brand/50 hover:bg-white/[0.04]">
@@ -3722,9 +3875,20 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                 </button>;
               })}
             </div> : <div className="my-5 flex items-center justify-between gap-3 border-b border-white/10 pb-4">
-              <div><button type="button" onClick={() => setBackgroundCollection('All')} className="mb-2 flex items-center gap-1.5 text-xs font-medium text-brand hover:text-warm-white"><ChevronLeft size={14} /> All background folders</button><h2 className="text-lg font-semibold text-warm-white">{activeFolder?.title}</h2><p className="mt-1 text-xs text-warm-white/45">{visibleBackgrounds.length} items · {visibleBackgrounds.filter((asset) => asset.type === 'video').length} videos</p></div>
+              <div><button type="button" onClick={() => setBackgroundCollection(active === 'Built-in' || active === 'Imported' ? 'All' : 'Imported')} className="mb-2 flex items-center gap-1.5 text-xs font-medium text-brand hover:text-warm-white"><ChevronLeft size={14} /> {active === 'Built-in' || active === 'Imported' ? 'All background folders' : 'Imported folders'}</button><h2 className="text-lg font-semibold text-warm-white">{selectedFolderTitle}</h2><p className="mt-1 text-xs text-warm-white/45">{active === 'Imported' ? importedAssets.length : visibleBackgrounds.length} items · {(active === 'Imported' ? importedAssets : visibleBackgrounds).filter((asset) => asset.type === 'video').length} videos</p></div>
             </div>}
-            {active !== 'All' && active !== 'Uploads' && active !== 'Built-in' && active !== 'Imported' && <div className="mb-4 flex items-center justify-end gap-1 text-xs">
+            {active === 'Imported' && <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3" aria-label="Imported background folders">
+              {customFolderNames.map((name) => {
+                const assets = importedAssets.filter((asset) => collectionOf(asset) === name);
+                return <button key={name} type="button" onClick={() => { setBackgroundCollection(name); setRenamingCollection(null); }} className="group flex min-h-28 items-start gap-3 rounded-xl border border-white/10 bg-panel p-4 text-left hover:border-brand/50">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand/10 text-brand"><FolderOpen size={20} /></span>
+                  <span className="min-w-0"><span className="block truncate text-sm font-semibold text-warm-white">{name}</span><span className="mt-1 block text-xs text-warm-white/45">{assets.length} items · {assets.filter((asset) => asset.type === 'video').length} videos</span></span>
+                  <ChevronRight size={16} className="ml-auto mt-1 shrink-0 text-warm-white/40 group-hover:text-brand" />
+                </button>;
+              })}
+              {creatingBackgroundFolder && <div className="flex min-h-28 items-center justify-center rounded-xl border border-dashed border-brand/40 bg-brand/5 text-xs text-brand">Create a folder above</div>}
+            </div>}
+            {customFolderNames.includes(active) && <div className="mb-4 flex items-center justify-end gap-1 text-xs">
               {renamingCollection === active ? <form onSubmit={(event) => { event.preventDefault(); void renameBackgroundCollection(active, collectionNameDraft); }} className="flex gap-1.5"><input autoFocus value={collectionNameDraft} onChange={(event) => setCollectionNameDraft(event.target.value)} aria-label="Collection name" maxLength={40} className="rounded-md border border-white/10 bg-panel px-2 py-1 text-white outline-none focus:border-brand" /><button type="submit" className="rounded-md bg-brand/20 p-1.5 text-brand"><Check size={14} /></button><button type="button" onClick={() => setRenamingCollection(null)} className="rounded-md p-1.5 text-warm-white/50"><X size={14} /></button></form> : <><button type="button" onClick={() => { setRenamingCollection(active); setCollectionNameDraft(active); }} className="flex items-center gap-1 rounded-md px-2 py-1 text-warm-white/60 hover:bg-white/10"><Pencil size={12} /> Rename collection</button><button type="button" onClick={() => deleteBackgroundCollection(active)} className="flex items-center gap-1 rounded-md px-2 py-1 text-red-300/80 hover:bg-red-500/10"><Trash2 size={12} /> Delete collection</button></>}
             </div>}
             {active !== 'All' && (visibleBackgrounds.length ? <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
@@ -3733,11 +3897,14 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                   <span className="relative flex aspect-video items-center justify-center overflow-hidden bg-navy"><BackgroundHoverPreview asset={asset} className="absolute inset-0 h-full w-full object-cover" /><span className="absolute bottom-2 right-2 z-10 rounded bg-black/70 px-1.5 py-0.5 text-[9px] text-white">{asset.type === 'video' ? 'VIDEO' : 'IMAGE'}</span></span>
                   <span className="block truncate px-2 pt-2 text-xs font-semibold text-warm-white">{backgroundOriginLabel(asset)} background</span><span className="block truncate px-2 pb-2 text-[10px] text-warm-white/45">{asset.type === 'video' ? 'Video' : 'Image'} · {mediaSizeOf(asset)}</span>
                 </button>
+                {!asset.protected && <label className="flex items-center gap-2 border-t border-white/10 px-2 py-2 text-[10px] text-warm-white/55">Folder<select aria-label={`Move ${asset.name} to a folder`} value={['Uploads', 'Imported'].includes(collectionOf(asset)) ? 'Uploads' : collectionOf(asset)} onChange={(event) => { void moveBackgroundAsset(asset, event.target.value); }} className="min-w-0 flex-1 rounded-md border border-white/10 bg-navy px-2 py-1 text-[10px] text-white outline-none focus:border-brand"><option value="Uploads">Imported</option>{customFolderNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>}
                 {asset.type === 'video' && <button type="button" aria-label={`Play ${asset.name}`} onClick={() => setVideoPreviewAsset(asset)} className="absolute left-2 top-2 rounded-md bg-black/75 p-1.5 text-white opacity-0 transition group-hover:opacity-100 focus:opacity-100"><Play size={13} /></button>}
                 {!asset.fromFolder && <button type="button" aria-label={`Delete ${asset.name}`} title="Remove from background library" onClick={() => setDeleteConfirmation({ title: 'Delete uploaded background?', message: `Delete “${asset.name}” from saved uploads? Slides using it will switch back to their color background.`, onConfirm: () => { void deleteMediaAsset(asset); } })} className="absolute right-2 top-2 rounded-md border border-white/15 bg-black/75 p-1.5 text-white/80 opacity-0 transition hover:bg-red-600 group-hover:opacity-100 focus:opacity-100"><Trash2 size={13} /></button>}
               </article>)}
-            </div> : <div className="mt-2 rounded-2xl border border-dashed border-white/15 px-6 py-14 text-center"><FolderPlus size={30} className="mx-auto text-warm-white/35" /><p className="mt-3 font-semibold text-warm-white">This folder is empty</p><p className="mt-1 text-sm text-warm-white/50">Add backgrounds here, or choose a different folder.</p><p className="mt-3 text-xs text-warm-white/40">Choose a background on a slide from its Background panel, or in a songbook from Design → Background.</p></div>)}
-            <p className="mt-5 text-xs leading-relaxed text-warm-white/40">Built-in backgrounds ship with FaithStream. Add your own pictures or videos with <b className="font-medium text-warm-white/60">Add a folder</b> or <b className="font-medium text-warm-white/60">Add pictures or videos</b>; they appear under Imported.</p>
+            </div> : active === 'Imported' && customFolderNames.length > 0
+              ? <div className="mt-2 rounded-xl border border-dashed border-white/15 p-5 text-center text-xs text-warm-white/45">Your imported backgrounds are organized in the folders above. Open a folder to view or add items.</div>
+              : <div className="mt-2 rounded-2xl border border-dashed border-white/15 px-6 py-14 text-center"><FolderPlus size={30} className="mx-auto text-warm-white/35" /><p className="mt-3 font-semibold text-warm-white">This folder is empty</p><p className="mt-1 text-sm text-warm-white/50">Add backgrounds here, or choose a different folder.</p><p className="mt-3 text-xs text-warm-white/40">Choose a background on a slide from its Background panel, or in a songbook from Design → Background.</p></div>)}
+            <p className="mt-5 text-xs leading-relaxed text-warm-white/40">Imported images and videos stay on this computer. Create folders under Imported, open a folder, and add pictures or videos directly to it. The same folders are available in presentation and song/Scripture design background pickers.</p>
           </div>
           {videoPreviewAsset && <BodyPortal><div className="fixed inset-0 z-130 flex items-center justify-center bg-black/85 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setVideoPreviewAsset(null); }}>
             <section role="dialog" aria-modal="true" aria-label={`Preview ${videoPreviewAsset.name}`} className="w-full max-w-4xl rounded-2xl border border-white/10 bg-[#101d2a] p-4 shadow-2xl">
@@ -4018,6 +4185,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                 onDrop={(e) => { e.preventDefault(); const from = Number(e.dataTransfer.getData('text/plain')); reorderSlides(from, i); setDraggingSlide(null); }}
                 onDragEnd={() => setDraggingSlide(null)}
                 className={`relative ${draggingSlide === i ? 'opacity-40' : ''}`}
+                style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 220px' }}
               >
                 <button
                   draggable={!projectLocked}
@@ -4838,7 +5006,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                 >
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <p className="text-xs font-semibold text-warm-white/80">Background library</p>
-                    <span className="text-[10px] text-warm-white/45">{backgroundAssets.length} available · {backgroundAssets.filter((asset) => asset.type === 'video').length} videos</span>
+                    <span className="text-[10px] text-warm-white/45">{backgroundAssets.length} available · {videoBackgroundCount} videos</span>
                   </div>
                   <div className="mb-2 grid grid-cols-2 gap-1.5">
                     <button type="button" disabled={backgroundImportProgress !== null} title="Add every picture and video in a folder (its subfolders become collections)" onClick={() => backgroundFolderInput.current?.click()} className="flex items-center justify-center gap-1.5 rounded-lg border border-white/15 px-2 py-2 text-[11px] font-semibold text-warm-white hover:border-brand/50 hover:bg-white/5 disabled:opacity-50"><FolderPlus size={14} /> Import folder</button>
@@ -4852,15 +5020,13 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                     <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-brand transition-[width]" style={{ width: `${backgroundImportProgress.total ? backgroundImportProgress.current / backgroundImportProgress.total * 100 : 0}%` }} /></div>
                   </div>}
                   {backgroundAssets.length > 0 && (() => {
-                    const names = [...new Set(backgroundAssets.map(collectionOf))].sort((a, b) => (a === 'Built-in' ? -1 : b === 'Built-in' ? 1 : a === 'Uploads' ? 1 : b === 'Uploads' ? -1 : naturalCompare(a, b)));
-                    const chips = ['All', ...names];
-                    const active = chips.includes(backgroundCollection) ? backgroundCollection : 'All';
+                    const active = activeBackgroundCollection;
                     return (
                       <>
                         <div role="tablist" aria-label="Background folders" className="mb-2 grid max-h-18 grid-cols-2 gap-1 overflow-y-auto">
-                          {chips.map((name) => (
+                          {['All', ...backgroundCollections].map((name) => (
                             <button key={name} type="button" role="tab" aria-selected={active === name} onClick={() => { setBackgroundCollection(name); setRenamingCollection(null); }} className={`flex min-w-0 items-center gap-1.5 rounded-md border px-2 py-1.5 text-left text-[10px] font-semibold transition ${active === name ? 'border-brand bg-brand/15 text-white' : 'border-white/10 text-warm-white/55 hover:border-white/25 hover:text-warm-white'}`}>
-                              <FolderOpen size={12} className="shrink-0 text-brand/80" /><span className="min-w-0 flex-1 truncate">{name === 'All' ? 'All backgrounds' : name}</span><span className={active === name ? 'shrink-0 text-brand' : 'shrink-0 text-warm-white/35'}>{name === 'All' ? backgroundAssets.length : backgroundAssets.filter((asset) => collectionOf(asset) === name).length}</span>
+                              <FolderOpen size={12} className="shrink-0 text-brand/80" /><span className="min-w-0 flex-1 truncate">{name === 'All' ? 'All backgrounds' : name}</span><span className={active === name ? 'shrink-0 text-brand' : 'shrink-0 text-warm-white/35'}>{name === 'All' ? backgroundAssets.length : backgroundCollectionCounts.get(name) ?? 0}</span>
                             </button>
                           ))}
                         </div>
@@ -4877,26 +5043,7 @@ const backgroundOriginLabel = (asset: MediaAsset) => {
                           </div>
                         ))}
                         <div className="grid max-h-64 grid-cols-2 gap-2 overflow-y-auto pr-1">
-                          {backgroundAssets.filter((asset) => active === 'All' || collectionOf(asset) === active).map((asset) => (
-                          <div key={asset.id} className={`group relative overflow-hidden rounded-lg border transition ${cur.bgAssetId === asset.id ? 'border-brand ring-1 ring-brand/40' : 'border-white/10 hover:border-white/40'}`}>
-                            <button onClick={() => applyMediaAsset(asset)} title={`Set ${asset.name} as the slide background`} className="block w-full text-left">
-                              <span className="relative block aspect-video overflow-hidden bg-navy">
-                                <BackgroundHoverPreview asset={asset} className="h-full w-full object-cover" />
-                                {asset.type === 'video' && <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white">VIDEO</span>}
-                              </span>
-                              <span className="block truncate px-1.5 pt-1 text-[10px] font-medium text-warm-white/75">{backgroundOriginLabel(asset)} background</span>
-                              <span className="block truncate px-1.5 pb-1 text-[9px] text-warm-white/45">{asset.optimized && asset.originalBlob ? `${formatMediaSizeInKb(asset.originalBlob.size)} → ` : ''}{mediaSizeOf(asset)}{asset.optimized ? ' · optimized copy' : ''}</span>
-                            </button>
-                            {asset.type === 'video' && <button type="button" aria-label={`Preview ${asset.name}`} title={`Play preview of ${asset.name}`} onClick={() => setVideoPreviewAsset(asset)} className="absolute bottom-2 right-2 z-10 rounded-md bg-black/80 p-1.5 text-white hover:bg-brand"><Play size={13} /></button>}
-                            {!asset.fromFolder && <button type="button" aria-label={`Delete ${asset.name}`} title={`Delete ${asset.name}`} onClick={() => setDeleteConfirmation({
-                              title: 'Delete uploaded background?',
-                              message: `Delete “${asset.name}” from saved uploads? Slides using this file will switch back to their color background.`,
-                              onConfirm: () => { void deleteMediaAsset(asset); },
-                            })} className="absolute right-1 top-1 z-10 rounded-md border border-white/15 bg-black/75 p-1.5 text-white/75 opacity-0 shadow transition hover:bg-red-600 hover:text-white focus:opacity-100 group-hover:opacity-100">
-                              <Trash2 size={12} />
-                            </button>}
-                          </div>
-                          ))}
+                          {visibleBackgroundAssets.map((asset) => <BackgroundLibraryCard key={asset.id} asset={asset} selected={cur.bgAssetId === asset.id} onApply={applyMediaAsset} onPreview={setVideoPreviewAsset} onDelete={requestBackgroundDelete} />)}
                         </div>
                       </>
                     );

@@ -38,6 +38,12 @@ const contentSecurityPolicy = (apiUrl: string): Plugin => {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_');
   return {
+    // Electron must load the same IPv4 loopback interface Vite binds to.
+    // Using "localhost" can resolve to IPv6 (::1) on Windows while Vite only
+    // listens on IPv4, producing ERR_CONNECTION_REFUSED even when Vite started.
+    server: {
+      host: '127.0.0.1',
+    },
     plugins: [
       react(),
       tailwindcss(),

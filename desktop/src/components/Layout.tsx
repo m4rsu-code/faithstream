@@ -1,13 +1,16 @@
-import { memo, useEffect, useRef, useState } from 'react';
-import { Outlet, useLocation } from 'react-router-dom';
+import { lazy, memo, Suspense, useEffect, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import Header from './Header';
 import SidebarNav from './SidebarNav';
 import StatusFooter from './StatusFooter';
 import AuthGate from './AuthGate';
-import Studio from '../Routes/Studio';
+import Studio, { StudioVisibilityContext } from '../Routes/Studio';
 
-// Studio is the largest screen and stays loaded in the background. It takes no props, so
-// memo stops it from redrawing every time you change page.
+const PresentationPage = memo(lazy(() => import('../Routes/Presentation')));
+const SettingsPage = memo(lazy(() => import('../Routes/Settings')));
+
+// Studio stays mounted in the background so an active stream keeps running. Its meters pause
+// while hidden, and memo keeps the scene previews stable during ordinary Studio state updates.
 const BackgroundStudio = memo(Studio);
 
 type StudioSession = { live: boolean; streamStatus: string };
@@ -23,11 +26,28 @@ const readStreamFooterMessage = () => {
 
 export default function Layout() {
   const { pathname } = useLocation();
+  const navigate = useNavigate();
   const studioActive = pathname === '/';
+  const presentationActive = pathname === '/presentations' || pathname === '/songbooks';
+  const settingsActive = pathname === '/settings';
   const studioLayerRef = useRef<HTMLDivElement>(null);
   const pageLayerRef = useRef<HTMLDivElement>(null);
   const [studioModalOpen, setStudioModalOpen] = useState(false);
   const [footerMessage, setFooterMessage] = useState(readStreamFooterMessage);
+  const [visitedPages, setVisitedPages] = useState(() => new Set(pathname === '/settings' ? ['settings'] : presentationActive ? ['presentations'] : []));
+
+  useEffect(() => {
+    if (pathname === '/songbooks') {
+      navigate('/presentations?view=songbooks', { replace: true });
+      setVisitedPages((current) => new Set(current).add('presentations'));
+    } else if (pathname === '/presentations') {
+      setVisitedPages((current) => current.has('presentations') ? current : new Set(current).add('presentations'));
+    } else if (pathname === '/settings') {
+      setVisitedPages((current) => current.has('settings') ? current : new Set(current).add('settings'));
+    } else if (pathname !== '/') {
+      navigate('/', { replace: true });
+    }
+  }, [navigate, pathname]);
 
   useEffect(() => {
     const updateMessage = (event?: Event) => {
@@ -62,10 +82,13 @@ export default function Layout() {
             {/* While another page is open, Studio is made invisible (not just see-through), so the
                 computer stops drawing its previews; streaming, recording and output windows keep running. */}
             <div ref={studioLayerRef} aria-hidden={!studioActive} style={{ zIndex: studioActive ? studioModalOpen ? 1000 : 30 : 0 }} className={`absolute inset-0 p-4 ${studioActive ? '' : 'pointer-events-none invisible'}`}>
-              <BackgroundStudio />
+              <StudioVisibilityContext.Provider value={studioActive}>
+                <BackgroundStudio />
+              </StudioVisibilityContext.Provider>
             </div>
             <div ref={pageLayerRef} style={{ zIndex: studioActive ? 0 : studioModalOpen ? 1000 : 10 }} className={`absolute inset-0 p-4 ${studioActive ? 'hidden' : ''}`}>
-              <Outlet />
+              {visitedPages.has('presentations') && <div aria-hidden={!presentationActive} className={presentationActive ? 'h-full w-full' : 'hidden'}><Suspense fallback={<PageLoading />}><PresentationPage /></Suspense></div>}
+              {visitedPages.has('settings') && <div aria-hidden={!settingsActive} className={settingsActive ? 'h-full w-full' : 'hidden'}><Suspense fallback={<PageLoading />}><SettingsPage /></Suspense></div>}
             </div>
           </main>
         </div>
@@ -73,4 +96,8 @@ export default function Layout() {
       </div>
     </AuthGate>
   );
+}
+
+function PageLoading() {
+  return <div className="flex h-full items-center justify-center text-sm text-warm-white/55">Opening page…</div>;
 }

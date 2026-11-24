@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowRight, Eye, EyeOff, LockKeyhole, Mail, Minus, Square, X } from 'lucide-react';
 import FaithStreamLogo from '../assets/img/Logo.png';
 import LoadingAnimation from '../assets/img/loading.gif';
-import { apiFetch, apiUrl } from '../api/client';
+import { apiFetch, apiUrl, clearApiAccountReadCache } from '../api/client';
 import LicenseLockedScreen from './LicenseLockedScreen';
 import { LICENSE_REQUIRED_EVENT, LICENSE_REQUIRED_MESSAGE, isLicenseRequiredPayload } from '../utils/license';
 
@@ -37,6 +37,8 @@ const readJson = async (response: Response): Promise<any> => {
     return { message: response.ok ? undefined : `The FaithStream Studio server returned an error (${response.status}). Try again in a moment.` };
   }
 };
+
+const backendUnavailableMessage = `Cannot reach the FaithStream Studio server at ${apiUrl('connection-check')}. Confirm Laravel is listening at that address.`;
 
 type AuthMode = 'login' | 'register' | 'forgot';
 
@@ -77,12 +79,14 @@ const getStoredAuthToken = async () => {
 };
 
 const saveStoredAuthToken = async (token: string) => {
+  clearApiAccountReadCache();
   const stored = await window.faithstreamWindow?.saveAuthToken(token);
   if (!stored) throw new Error('Secure sign-in storage is unavailable. Restart FaithStream Studio and try again.');
   localStorage.removeItem(LEGACY_TOKEN_KEY);
 };
 
 const clearStoredAuthToken = async () => {
+  clearApiAccountReadCache();
   localStorage.removeItem(LEGACY_TOKEN_KEY);
   await window.faithstreamWindow?.clearAuthToken();
 };
@@ -356,9 +360,11 @@ export default function AuthGate({ children }: { children: ReactNode }) {
 
     let cancelled = false;
     let checkingServerSession = false;
+    let lastServerSessionCheck = 0;
     const checkServerSession = async () => {
-      if (checkingServerSession || cancelled) return;
+      if (checkingServerSession || cancelled || Date.now() - lastServerSessionCheck < 5000) return;
       checkingServerSession = true;
+      lastServerSessionCheck = Date.now();
 
       try {
         const token = await getStoredAuthToken();
@@ -382,10 +388,15 @@ export default function AuthGate({ children }: { children: ReactNode }) {
       }
     };
 
-    const timer = window.setInterval(() => void checkServerSession(), 10000);
+    const checkWhenReturning = () => {
+      if (document.visibilityState === 'visible') void checkServerSession();
+    };
+    const timer = window.setInterval(() => void checkServerSession(), 60000);
+    document.addEventListener('visibilitychange', checkWhenReturning);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', checkWhenReturning);
     };
   }, [checkingSession, signedIn, startingUp]);
 
@@ -450,7 +461,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     } catch (cause) {
       setError(cause instanceof Error && cause.message !== 'Failed to fetch'
         ? cause.message
-        : 'Cannot reach the FaithStream Studio server. Start the Laravel backend and try again.');
+        : backendUnavailableMessage);
     } finally {
       setBusy(false);
     }
@@ -529,7 +540,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     } catch (cause) {
       setError(cause instanceof Error && cause.message !== 'Failed to fetch'
         ? cause.message
-        : 'Cannot reach the FaithStream Studio server. Start the Laravel backend and try again.');
+        : backendUnavailableMessage);
     } finally {
       setBusy(false);
     }

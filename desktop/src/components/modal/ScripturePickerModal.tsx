@@ -139,6 +139,16 @@ export default function ScripturePickerModal({
   const [bookName, setBookName] = useState('Genesis');
   const [chapterNumber, setChapterNumber] = useState(1);
 
+  // Keep the operator's last language/book/chapter for fast follow-up passages, while clearing
+  // the previous verse range every time the picker opens to prevent accidental reuse.
+  useEffect(() => {
+    if (!open) return;
+    setQuery('');
+    setSelected([]);
+    setSelectionAnchor(null);
+    setHoveredVerseReference(null);
+  }, [open]);
+
   const catalog = bible?.catalog ?? NO_BOOKS;
   const testamentBooks = useMemo(() => catalog.filter((book) => book.testament === testament), [catalog, testament]);
   const activeBook = testamentBooks.find((book) => book.name === bookName) ?? testamentBooks[0];
@@ -298,28 +308,35 @@ export default function ScripturePickerModal({
 
   return (
     <BodyPortal><div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section role="dialog" aria-modal="true" aria-labelledby="scripture-picker-title" className="flex max-h-[min(760px,90vh)] w-full max-w-[780px] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101d2a] shadow-2xl">
+      <section role="dialog" aria-modal="true" aria-labelledby="scripture-picker-title" className="flex max-h-[min(800px,92vh)] w-full max-w-[900px] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101d2a] shadow-2xl">
         <header className="flex items-center justify-between border-b border-white/10 px-5 py-4">
           <div className="flex items-center gap-3">
             <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand/15 text-brand"><BookOpen size={20} /></span>
-            <div><h2 id="scripture-picker-title" className="text-base font-bold text-warm-white">Add Scripture</h2><p className="mt-0.5 text-xs text-warm-white/50">Choose a book, chapter, and verse · {language === 'en' ? 'King James Version' : 'Cebuano'}</p></div>
+            <div><h2 id="scripture-picker-title" className="text-base font-bold text-warm-white">Add Scripture</h2><p className="mt-0.5 text-xs text-warm-white/50">Find a passage and choose exactly which verses to add.</p></div>
           </div>
           <button onClick={onClose} aria-label="Close scripture picker" className="rounded-lg p-2 text-warm-white/60 hover:bg-white/10 hover:text-white"><X size={18} /></button>
         </header>
 
         <div className="border-b border-white/10 p-4">
-          <label className="mb-3 flex items-center justify-between gap-3 text-xs text-white/60">
-            Scripture language
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-[11px] font-semibold text-warm-white/65" aria-label="Scripture selection steps">
+              <span className="rounded-md bg-brand/15 px-2 py-1 text-brand">1 · Book</span><span className="text-white/25">→</span>
+              <span className="rounded-md bg-white/5 px-2 py-1">2 · Chapter</span><span className="text-white/25">→</span>
+              <span className="rounded-md bg-white/5 px-2 py-1">3 · Verse range</span>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-white/60">
+            Bible translation
             <select value={language} onChange={(event) => changeLanguage(event.target.value as BibleLanguage)} className="rounded-lg border border-white/10 bg-[#091521] px-3 py-2 text-sm text-white outline-none focus:border-brand">
               <option value="en">English · King James Version</option>
               <option value="ceb">Bisaya · Cebuano</option>
             </select>
           </label>
+          </div>
           <label className="relative block">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/40" />
             <input autoFocus value={query} onChange={(event) => { setQuery(event.target.value); setSelected([]); setSelectionAnchor(null); setHoveredVerseReference(null); }} placeholder="Search words or a reference, e.g. John 3:16" className="w-full rounded-xl border border-white/10 bg-[#091521] py-3 pl-10 pr-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-brand" />
           </label>
-          <p className="mt-2 text-[11px] text-white/45">Click a starting verse, then hover the ending verse. To adjust a selected range, click its endpoint again and hover the new endpoint.</p>
+          <p className="mt-2 text-[11px] text-white/45">To select a range, click its first verse and hover over the last one. Click the endpoint again to adjust the range.</p>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -337,25 +354,25 @@ export default function ScripturePickerModal({
                 </div>
                 <div className="grid min-h-0 flex-1 grid-cols-[minmax(88px,1fr)_minmax(72px,0.75fr)_minmax(92px,1fr)] divide-x divide-white/10 sm:grid-cols-[minmax(110px,1.1fr)_minmax(105px,0.8fr)_minmax(130px,1fr)]">
                   <section className="flex min-h-0 flex-col">
-                    <h3 className="border-b border-white/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-white/45">Book</h3>
+                    <h3 className="border-b border-white/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-white/45">1 · Choose a book</h3>
                     <div role="listbox" aria-label={`${testament === 'old' ? 'Old' : 'New'} Testament books`} className="min-h-0 flex-1 overflow-y-auto p-1.5">
                       {testamentBooks.map((book) => <button key={book.name} type="button" role="option" aria-selected={activeBook?.name === book.name} onClick={() => chooseBook(book)} className={`block w-full truncate rounded px-2 py-1.5 text-left text-xs ${activeBook?.name === book.name ? 'bg-brand text-navy font-semibold' : 'text-white/70 hover:bg-white/5 hover:text-white'}`}>{book.name}</button>)}
                     </div>
                   </section>
                   <section className="flex min-h-0 flex-col">
-                    <h3 className="border-b border-white/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-white/45">Chapter</h3>
+                    <h3 className="border-b border-white/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-white/45">2 · Choose a chapter</h3>
                     <div role="listbox" aria-label="Chapters" className="min-h-0 flex-1 content-start overflow-y-auto p-2 grid grid-cols-3 gap-1 sm:grid-cols-5">
                       {activeBook?.chapters.map((chapter) => <button key={chapter.number} type="button" role="option" aria-selected={activeChapter?.number === chapter.number} onClick={() => chooseChapter(chapter.number)} className={`h-7 rounded text-[11px] tabular-nums ${activeChapter?.number === chapter.number ? 'bg-brand text-navy font-bold' : 'text-white/70 hover:bg-white/10 hover:text-white'}`}>{chapter.number}</button>)}
                     </div>
                   </section>
                   <section className="flex min-h-0 flex-col">
-                    <h3 className="border-b border-white/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-white/45">Verse <span className="normal-case tracking-normal">· {activeBook?.name} {activeChapter?.number}</span></h3>
+                    <h3 className="border-b border-white/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-white/45">3 · Choose verses <span className="normal-case tracking-normal">· {activeBook?.name} {activeChapter?.number}</span></h3>
                     <div role="listbox" aria-label="Verses" className="min-h-0 flex-1 content-start overflow-y-auto p-2 grid grid-cols-4 gap-1 sm:grid-cols-6">
                       {activeChapter?.verses.map((verse, index) => <button key={verse.reference} type="button" role="option" aria-selected={selectedForAdd.some((item) => item.reference === verse.reference)} onMouseEnter={() => { if (selectionAnchor) setHoveredVerseReference(verse.reference); }} onClick={() => selectVerse(verse)} title={verse.text} className={`h-7 rounded text-[11px] tabular-nums ${selectedForAdd.some((item) => item.reference === verse.reference) ? 'bg-brand text-navy font-bold' : 'text-white/70 hover:bg-white/10 hover:text-white'}`}>{index + 1}</button>)}
                     </div>
                   </section>
                 </div>
-                {!!selectedForAdd.length && <div className="flex shrink-0 items-center justify-between gap-3 border-t border-white/10 px-3 py-2 text-xs"><span className="truncate font-semibold text-brand">{selectionReference(selectedForAdd)}</span><span className="shrink-0 text-white/45">{selectedForAdd.length} {selectedForAdd.length === 1 ? 'verse' : 'verses'} selected</span></div>}
+                {!!selectedForAdd.length && <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-white/10 bg-brand/[0.04] px-3 py-2 text-xs"><div className="min-w-0"><span className="mr-2 text-[10px] font-bold uppercase tracking-wide text-white/40">Selected passage</span><span className="font-semibold text-brand">{selectionReference(selectedForAdd)}</span><span className="ml-2 text-white/45">{selectedForAdd.length} {selectedForAdd.length === 1 ? 'verse' : 'verses'}</span></div><button type="button" onClick={() => { setSelected([]); setSelectionAnchor(null); setHoveredVerseReference(null); }} className="shrink-0 rounded px-2 py-1 text-[11px] font-semibold text-warm-white/55 hover:bg-white/5 hover:text-white">Clear selection</button></div>}
               </div>}
         </div>
 

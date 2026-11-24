@@ -63,7 +63,7 @@ export default function SongSlideSettingsButton({ compact = false }: { compact?:
       title="Default look for all songs: ALL CAPS, lines per slide, text size, title slide"
       onClick={() => setOpen((value) => !value)}
       className={compact
-        ? `flex h-7 shrink-0 items-center gap-1 rounded-md border px-1.5 text-[11px] font-bold ${open ? 'border-brand text-white' : 'border-white/15 text-warm-white/70 hover:border-brand/50 hover:text-white'}`
+        ? `flex h-9 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-xs font-bold ${open ? 'border-brand text-white' : 'border-white/15 text-warm-white/70 hover:border-brand/50 hover:text-white'}`
         : `flex items-center gap-2 rounded-xl border bg-panel px-3.5 py-2.5 text-sm font-semibold ${open ? 'border-brand text-white' : 'border-white/15 text-warm-white hover:bg-white/5'}`}
     >
       {compact ? <span className="tracking-tight">{settings.caps ? 'AA' : 'Aa'}</span> : <><Type size={16} /> Default look</>}

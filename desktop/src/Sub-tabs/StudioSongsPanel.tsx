@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, BookOpen, Check, ChevronDown, ChevronRight, Music, Pencil, Plus, Radio, Search, X } from 'lucide-react';
-import SongEditorModal from './modal/SongEditorModal';
-import SongSlideSettingsButton, { useSongSlideSettings } from './SongSlideSettingsButton';
+import SongEditorModal from '../components/modal/SongEditorModal';
+import SongSlideSettingsButton, { useSongSlideSettings } from '../components/SongSlideSettingsButton';
 import {
   SONGBOOKS_PATH,
   SONGS_CHANGED_EVENT,
@@ -57,10 +57,10 @@ function BookPicker({ books, selected, onChange }: { books: Songbook[]; selected
     const list = books.filter((book) => book.kind === kind);
     if (!list.length) return null;
     return <>
-      <p className="px-3 pb-1 pt-2 text-[10px] font-bold uppercase tracking-wider text-warm-white/40">{title}</p>
+      <p className="px-3 pb-1 pt-2 text-[11px] font-bold uppercase tracking-wider text-warm-white/50">{title}</p>
       {list.map((book) => {
         const checked = selected.includes(book.id);
-        return <button key={book.id} type="button" role="option" aria-selected={checked} onClick={() => toggle(book.id)} className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-xs ${checked ? 'text-white' : 'text-warm-white/65 hover:bg-white/5'}`}>
+        return <button key={book.id} type="button" role="option" aria-selected={checked} onClick={() => toggle(book.id)} className={`flex min-h-9 w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] ${checked ? 'text-white' : 'text-warm-white/65 hover:bg-white/5'}`}>
           <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${checked ? 'border-brand bg-brand text-white' : 'border-white/25'}`}>{checked && <Check size={11} strokeWidth={3} />}</span>
           <span className="truncate">{book.name}</span>
         </button>;
@@ -68,8 +68,8 @@ function BookPicker({ books, selected, onChange }: { books: Songbook[]; selected
     </>;
   };
   return <>
-    <button ref={trigger} type="button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((value) => !value)} title="Choose which songbooks to search" className={`flex h-7 min-w-0 items-center gap-1 rounded-md border bg-slate-950 px-2 text-[11px] text-warm-white/85 hover:border-white/30 ${open ? 'border-brand' : 'border-white/15'}`}>
-      <span className="truncate">{label}</span><ChevronDown size={12} className="shrink-0 text-warm-white/50" />
+    <button ref={trigger} type="button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((value) => !value)} title="Choose which songbooks to search" className={`flex h-9 min-w-0 items-center gap-1.5 rounded-md border bg-slate-950 px-2.5 text-xs text-warm-white/85 hover:border-white/30 ${open ? 'border-brand' : 'border-white/15'}`}>
+      <span className="truncate">{label}</span><ChevronDown size={14} className="shrink-0 text-warm-white/50" />
     </button>
     {open && position && createPortal(
       <div ref={popover} role="listbox" aria-multiselectable="true" aria-label="Songbooks to search" style={{ position: 'fixed', top: position.top, left: position.left, width: position.width }} className="z-[200] max-h-80 overflow-y-auto rounded-xl border border-white/10 bg-panel p-1.5 shadow-2xl shadow-black/50">
@@ -158,33 +158,33 @@ export default function StudioSongsPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {!openSong ? <>
-        <div className="mb-1.5 flex shrink-0 items-center gap-1">
+        <div className="mb-2 flex shrink-0 items-center gap-1.5">
           <label className="relative min-w-0 flex-1">
-            <Search size={13} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-brand/80" />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setQuery(''); }} placeholder="Keywords or number to search" aria-label="Search songs" className="h-7 w-full rounded-md border border-white/15 bg-slate-950 pl-7 pr-6 text-[11px] text-warm-white outline-none placeholder:text-warm-white/35 focus:border-brand" />
-            {query && <button type="button" aria-label="Clear search" onClick={() => setQuery('')} className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-0.5 text-warm-white/50 hover:bg-white/10 hover:text-white"><X size={12} /></button>}
+            <Search size={15} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-brand/80" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setQuery(''); }} placeholder="Search songs" aria-label="Search songs" className="h-9 w-full rounded-md border border-white/15 bg-slate-950 pl-8 pr-7 text-xs text-warm-white outline-none placeholder:text-warm-white/40 focus:border-brand" />
+            {query && <button type="button" aria-label="Clear search" onClick={() => setQuery('')} className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-warm-white/50 hover:bg-white/10 hover:text-white"><X size={14} /></button>}
           </label>
           <SongSlideSettingsButton compact />
-          <button type="button" aria-label="New song" title="Type in a new song" onClick={() => setEditing({ song: null })} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-white/15 text-warm-white/70 hover:border-brand/50 hover:text-brand"><Plus size={14} /></button>
+          <button type="button" aria-label="New song" title="Type in a new song" onClick={() => setEditing({ song: null })} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-white/15 text-warm-white/70 hover:border-brand/50 hover:text-brand"><Plus size={17} /></button>
         </div>
-        <div className="mb-1.5 flex shrink-0 items-center justify-between gap-1.5">
+        <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
           <BookPicker books={books} selected={activeBooks} onChange={setActiveBooks} />
           {searching
-            ? <span className="shrink-0 text-[10px] text-warm-white/45">{matchCount} {matchCount === 1 ? 'match' : 'matches'}</span>
-            : <button type="button" onClick={() => navigate(SONGBOOKS_PATH)} className="shrink-0 text-[10px] font-semibold text-warm-white/50 hover:text-brand">Manage</button>}
+            ? <span className="shrink-0 text-xs text-warm-white/50">{matchCount} {matchCount === 1 ? 'match' : 'matches'}</span>
+            : <button type="button" onClick={() => navigate(SONGBOOKS_PATH)} className="min-h-9 shrink-0 px-2 text-xs font-semibold text-warm-white/60 hover:text-brand">Manage</button>}
         </div>
-        {error && <p className="text-[11px] text-amber-200">{error}</p>}
+        {error && <p className="text-xs text-amber-200">{error}</p>}
         <ul role="tree" aria-label="Songbooks" className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-white/10 bg-black/20 py-1" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,.35) transparent' }}>
-          {!tree.length && <li className="p-3 text-center text-[11px] leading-relaxed text-warm-white/45">{!activeBooks.length ? 'Choose at least one songbook to search.' : searching ? 'No songs match.' : 'No songbooks yet.'}</li>}
+          {!tree.length && <li className="p-3 text-center text-xs leading-relaxed text-warm-white/50">{!activeBooks.length ? 'Choose at least one songbook to search.' : searching ? 'No songs match.' : 'No songbooks yet.'}</li>}
           {tree.map(({ book, total, songs: bookSongs }) => {
             const open = searching || expanded.includes(book.id);
             return (
               <li key={book.id} role="treeitem" aria-expanded={open}>
-                <button type="button" onClick={() => { if (!searching) toggleBook(book.id); }} title={book.kind === 'standard' ? 'Standard songbook (read-only)' : 'Your songbook'} className="flex w-full items-center gap-1 px-1.5 py-1 text-left hover:bg-white/5">
+                <button type="button" onClick={() => { if (!searching) toggleBook(book.id); }} title={book.kind === 'standard' ? 'Standard songbook (read-only)' : 'Your songbook'} className="flex min-h-9 w-full items-center gap-1.5 px-2 text-left hover:bg-white/5">
                   {open ? <ChevronDown size={12} className="shrink-0 text-warm-white/50" /> : <ChevronRight size={12} className="shrink-0 text-warm-white/50" />}
                   <BookOpen size={13} className={`shrink-0 ${book.kind === 'standard' ? 'text-amber-300/90' : 'text-sky-300/90'}`} />
-                  <span className="min-w-0 truncate text-[11px] font-semibold text-warm-white/90">{book.name}{book.deviceOnly && <span className="ml-1 font-normal text-warm-white/40">· This device</span>}</span>
-                  <span className="shrink-0 text-[10px] text-warm-white/40">({searching ? `${bookSongs.length} of ${total}` : `${total} ${total === 1 ? 'song' : 'songs'}`})</span>
+                  <span className="min-w-0 truncate text-xs font-semibold text-warm-white/90">{book.name}{book.deviceOnly && <span className="ml-1 font-normal text-warm-white/50">· This device</span>}</span>
+                  <span className="shrink-0 text-[11px] text-warm-white/50">({searching ? `${bookSongs.length} of ${total}` : `${total} ${total === 1 ? 'song' : 'songs'}`})</span>
                 </button>
                 {open && <ul role="group">
                   {!bookSongs.length && <li className="py-1 pl-9 text-[10px] text-warm-white/35">Empty</li>}
@@ -192,11 +192,11 @@ export default function StudioSongsPanel({
                     const live = liveSongId === song.id;
                     return (
                       <li key={song.id} role="treeitem">
-                        <button type="button" onClick={() => setOpenSongId(song.id)} title={`${song.title}${firstLine(song) ? ` — ${firstLine(song)}` : ''}`} className={`flex w-full items-center gap-1.5 py-[3px] pl-6 pr-1.5 text-left ${live ? 'bg-red-500/15' : 'hover:bg-white/5'}`}>
-                          <Music size={11} className={`shrink-0 ${live ? 'text-red-300' : 'text-sky-300/80'}`} />
-                          {song.number && <span className="shrink-0 text-[10px] tabular-nums text-warm-white/55">{song.number}</span>}
-                          <span className={`min-w-0 truncate text-[11px] ${live ? 'font-semibold text-white' : 'text-warm-white/85'}`}>{song.title}</span>
-                          {live ? <Radio size={10} className="ml-auto shrink-0 text-red-300" /> : sceneSongIds.includes(song.id) && <Check size={10} aria-label="In scenes" className="ml-auto shrink-0 text-emerald-300/80" />}
+                        <button type="button" onClick={() => setOpenSongId(song.id)} title={`${song.title}${firstLine(song) ? ` — ${firstLine(song)}` : ''}`} className={`flex min-h-9 w-full items-center gap-2 py-1 pl-8 pr-2 text-left ${live ? 'bg-red-500/15' : 'hover:bg-white/5'}`}>
+                          <Music size={14} className={`shrink-0 ${live ? 'text-red-300' : 'text-sky-300/80'}`} />
+                          {song.number && <span className="shrink-0 text-[11px] tabular-nums text-warm-white/60">{song.number}</span>}
+                          <span className={`min-w-0 truncate text-xs ${live ? 'font-semibold text-white' : 'text-warm-white/85'}`}>{song.title}</span>
+                          {live ? <Radio size={13} className="ml-auto shrink-0 text-red-300" /> : sceneSongIds.includes(song.id) && <Check size={13} aria-label="In scenes" className="ml-auto shrink-0 text-emerald-300/80" />}
                         </button>
                       </li>
                     );
@@ -208,15 +208,15 @@ export default function StudioSongsPanel({
         </ul>
       </> : <>
         <div className="mb-1.5 flex shrink-0 items-center gap-1">
-          <button type="button" aria-label="Back to songs" onClick={() => setOpenSongId(null)} className="rounded-md p-1 text-warm-white/60 hover:bg-white/10 hover:text-white"><ArrowLeft size={14} /></button>
+          <button type="button" aria-label="Back to songs" onClick={() => setOpenSongId(null)} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-warm-white/70 hover:bg-white/10 hover:text-white"><ArrowLeft size={17} /></button>
           <div className="min-w-0 flex-1">
-            <p className="truncate text-xs font-semibold text-white" title={openSong.title}>{openSong.number ? `${openSong.number}. ` : ''}{openSong.title}</p>
-            <p className="truncate text-[10px] text-warm-white/40">{bookName(openSong.bookId)}</p>
+            <p className="truncate text-sm font-semibold text-white" title={openSong.title}>{openSong.number ? `${openSong.number}. ` : ''}{openSong.title}</p>
+            <p className="truncate text-[11px] text-warm-white/50">{bookName(openSong.bookId)}</p>
           </div>
           {sceneSongIds.includes(openSong.id)
-            ? <span title="This song is in the Scenes list" className="flex shrink-0 items-center gap-1 rounded-md bg-emerald-500/10 px-1.5 py-1 text-[10px] font-semibold text-emerald-200"><Check size={11} /> In scenes</span>
-            : <button type="button" onClick={() => onAddToScenes(openSong)} title="Add this song to the Scenes list" className="flex shrink-0 items-center gap-1 rounded-md bg-brand px-1.5 py-1 text-[10px] font-bold text-navy hover:brightness-110"><Plus size={11} /> Add to scenes</button>}
-          <button type="button" onClick={() => setEditing({ song: openSong })} title={liveSongId === openSong.id ? 'Correct the words; the screen updates when you save' : 'Edit the words'} className="flex shrink-0 items-center gap-1 rounded-md border border-white/15 px-1.5 py-1 text-[10px] font-semibold text-warm-white/75 hover:border-brand/50 hover:text-white"><Pencil size={11} /> Edit</button>
+            ? <span title="This song is in the Scenes list" className="flex min-h-9 shrink-0 items-center gap-1.5 rounded-md bg-emerald-500/10 px-2 text-xs font-semibold text-emerald-200"><Check size={14} /> In scenes</span>
+            : <button type="button" onClick={() => onAddToScenes(openSong)} title="Add this song to the Scenes list" className="flex min-h-9 shrink-0 items-center gap-1.5 rounded-md bg-brand px-2 text-xs font-bold text-navy hover:brightness-110"><Plus size={14} /> Add</button>}
+          <button type="button" onClick={() => setEditing({ song: openSong })} title={liveSongId === openSong.id ? 'Correct the words; the screen updates when you save' : 'Edit the words'} className="flex min-h-9 shrink-0 items-center gap-1.5 rounded-md border border-white/15 px-2 text-xs font-semibold text-warm-white/75 hover:border-brand/50 hover:text-white"><Pencil size={14} /> Edit</button>
         </div>
         <ol className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-0.5" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,.35) transparent' }}>
           {screens.map((screen, index) => {
@@ -224,12 +224,12 @@ export default function StudioSongsPanel({
             // A read-only preview of the parts: songs are shown from the slide row like any scene.
             return (
               <li key={index}>
-                <div className={`w-full rounded-lg border px-2 py-1.5 text-left ${live ? 'border-red-400/70 bg-red-500/10' : 'border-white/10'}`}>
+                <div className={`w-full rounded-lg border px-3 py-2.5 text-left ${live ? 'border-red-400/70 bg-red-500/10' : 'border-white/10'}`}>
                   <span className="flex items-center justify-between gap-1">
-                    <span className={`text-[10px] font-bold ${live ? 'text-red-200' : 'text-brand'}`}>{screen.label ?? `Part ${index + 1}`}</span>
-                    {live && <span className="flex items-center gap-1 text-[9px] font-bold uppercase text-red-200"><Radio size={9} /> On air</span>}
+                    <span className={`text-xs font-bold ${live ? 'text-red-200' : 'text-brand'}`}>{screen.label ?? `Part ${index + 1}`}</span>
+                    {live && <span className="flex items-center gap-1 text-[10px] font-bold uppercase text-red-200"><Radio size={11} /> On air</span>}
                   </span>
-                  <span className={`mt-0.5 line-clamp-4 block whitespace-pre-line text-[10px] leading-snug ${screen.kind === 'title' ? 'font-semibold text-white/85' : 'text-warm-white/70'} ${openStyle.caps ? 'uppercase' : ''}`}>{screen.text}{screen.kind === 'title' && screen.subtitle ? <span className="block font-normal normal-case text-warm-white/45">{screen.subtitle}</span> : null}</span>
+                  <span className={`mt-1 line-clamp-4 block whitespace-pre-line text-xs leading-relaxed ${screen.kind === 'title' ? 'font-semibold text-white/85' : 'text-warm-white/75'} ${openStyle.caps ? 'uppercase' : ''}`}>{screen.text}{screen.kind === 'title' && screen.subtitle ? <span className="block font-normal normal-case text-warm-white/50">{screen.subtitle}</span> : null}</span>
                 </div>
               </li>
             );

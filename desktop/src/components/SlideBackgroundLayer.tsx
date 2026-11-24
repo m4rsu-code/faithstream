@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import SeamlessLoopVideo from './SeamlessLoopVideo';
 
 export type SlideBackgroundMedia = {
@@ -7,7 +8,7 @@ export type SlideBackgroundMedia = {
 };
 
 /** Shared background renderer for presentation, scripture, songbook, Studio and monitor slides. */
-export default function SlideBackgroundLayer({
+const SlideBackgroundLayer = memo(function SlideBackgroundLayer({
   media,
   imageUrl,
   videoUrl,
@@ -34,7 +35,7 @@ export default function SlideBackgroundLayer({
   still?: boolean;
   eager?: boolean;
 }) {
-  const image = media?.type === 'image' ? media.url : media?.type === 'video' ? media.thumbnailUrl : imageUrl ?? posterUrl;
+  const image = media?.type === 'image' ? (still ? media.thumbnailUrl ?? media.url : media.url) : media?.type === 'video' ? media.thumbnailUrl : imageUrl ?? posterUrl;
   const video = media?.type === 'video' ? media.url : videoUrl;
   const poster = media?.thumbnailUrl ?? posterUrl ?? image;
   const objectPosition = position ?? '50% 50%';
@@ -52,4 +53,6 @@ export default function SlideBackgroundLayer({
     </div>}
     {dim > 0 && <div className="absolute inset-0 bg-black" style={{ opacity: dim / 100 }} />}
   </>;
-}
+});
+
+export default SlideBackgroundLayer;

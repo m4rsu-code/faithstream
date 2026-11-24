@@ -6,17 +6,16 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
 const isPrivateLanAddress = (hostname: string) => {
   const octets = hostname.split('.').map(Number);
   if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false;
-  return octets[0] === 10
-    || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
-    || (octets[0] === 192 && octets[1] === 168)
-    || (octets[0] === 169 && octets[1] === 254);
+  const [first, second] = octets;
+  return first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
 };
 
-const resolveApiUrl = (configured: string, allowInsecureLanHttp: boolean) => {
+const resolveApiUrl = (configured: string, allowLanHttp: boolean) => {
   try {
     const url = new URL(configured.trim() || DEFAULT_API_URL);
-    const allowedLanHttp = allowInsecureLanHttp && isPrivateLanAddress(url.hostname);
-    if (url.protocol === 'http:' && !LOOPBACK_HOSTS.has(url.hostname) && !allowedLanHttp) url.protocol = 'https:';
+    if (url.username || url.password || url.search || url.hash) return DEFAULT_API_URL;
+    const isAllowedLanHttp = allowLanHttp && url.protocol === 'http:' && isPrivateLanAddress(url.hostname);
+    if (url.protocol === 'http:' && !LOOPBACK_HOSTS.has(url.hostname) && !isAllowedLanHttp) url.protocol = 'https:';
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return DEFAULT_API_URL;
     return url.toString().replace(/\/+$/, '');
   } catch {
@@ -33,7 +32,7 @@ export default defineConfig(({ mode }) => {
       __FAITHSTREAM_UPDATE_FEED_URL__: JSON.stringify(env.FAITHSTREAM_UPDATE_FEED_URL ?? ''),
       __FAITHSTREAM_API_URL__: JSON.stringify(resolveApiUrl(
         env.VITE_FAITHSTREAM_API_URL ?? DEFAULT_API_URL,
-        env.VITE_FAITHSTREAM_ALLOW_INSECURE_LAN_HTTP === 'true',
+        env.VITE_FAITHSTREAM_ALLOW_LAN_HTTP?.trim().toLowerCase() === 'true',
       )),
     },
     build: {

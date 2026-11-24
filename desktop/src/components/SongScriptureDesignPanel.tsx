@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { AlignCenter, AlignJustify, AlignLeft, AlignRight, AlignVerticalJustifyCenter, AlignVerticalJustifyEnd, AlignVerticalJustifyStart, Bold, ChevronLeft, ChevronRight, Film, Image as ImageIcon, Italic, Search, Underline, X } from 'lucide-react';
 import { readBackgroundLibrary, type BackgroundItem } from '../utils/mediaLibrary';
+import { registerModalEscape } from './modal/modalEscape';
 import SlideBackgroundLayer from './SlideBackgroundLayer';
 import { PRESERVED_BLANK_LINE } from '../utils/slideLibrary';
 import { backgroundClasses, backgroundStyle, customBackground, parseCustomBackground } from '../utils/slideBackground';
@@ -9,24 +10,10 @@ import GOOGLE_FONT_FAMILIES from '../data/google-font-families.json';
 import { loadSongSlideSettings, rememberSongBackground, saveSongSlideSettings, SONG_BACKGROUNDS, SONG_FONTS, songLineKey, songSlideLayouts, songTextArea, withSlideLineAligns, type Song, type SongTextAlign, type SongSlideLayout, type SongStyle, type SongTextLayout } from '../utils/songbooks';
 
 /** One text area of a song slide, sized like Studio's text boxes (and shrunk if it would overflow). */
-function PreviewText({ layout }: { layout: SongTextLayout }) {
-  const wrap = useRef<HTMLDivElement>(null);
-  const inner = useRef<HTMLDivElement>(null);
-  const [fit, setFit] = useState(1);
-  useEffect(() => {
-    const measure = () => {
-      if (!wrap.current || !inner.current || !inner.current.offsetHeight) return setFit(1);
-      setFit(Math.min(1, wrap.current.clientHeight / inner.current.offsetHeight));
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    if (wrap.current) observer.observe(wrap.current);
-    if (inner.current) observer.observe(inner.current);
-    return () => observer.disconnect();
-  }, [layout]);
+const PreviewText = memo(function PreviewText({ layout }: { layout: SongTextLayout }) {
   return (
-    <div ref={wrap} className={`absolute flex ${layout.valign === 'top' ? 'items-start' : layout.valign === 'bottom' ? 'items-end' : 'items-center'} overflow-hidden`} style={{ left: `${layout.x}%`, top: `${layout.y}%`, width: `${layout.w}%`, height: `${layout.h}%`, background: layout.boxBgOn ? layout.boxBg : undefined, borderRadius: '1cqw' }}>
-      <div ref={inner} className="w-full whitespace-pre-wrap break-words" style={{ transform: `scale(${fit})`, transformOrigin: layout.valign === 'top' ? 'top center' : layout.valign === 'bottom' ? 'bottom center' : 'center', textAlign: layout.align, textAlignLast: layout.align === 'justify' ? 'left' : undefined, lineHeight: layout.lineHeight, letterSpacing: `${((layout.letterSpacing ?? 0) / 1280) * 100}cqw` }}>
+    <div className={`absolute flex ${layout.valign === 'top' ? 'items-start' : layout.valign === 'bottom' ? 'items-end' : 'items-center'} overflow-hidden`} style={{ left: `${layout.x}%`, top: `${layout.y}%`, width: `${layout.w}%`, height: `${layout.h}%`, background: layout.boxBgOn ? layout.boxBg : undefined, borderRadius: '1cqw' }}>
+      <div className="w-full whitespace-pre-wrap break-words" style={{ textAlign: layout.align, textAlignLast: layout.align === 'justify' ? 'left' : undefined, lineHeight: layout.lineHeight, letterSpacing: `${((layout.letterSpacing ?? 0) / 1280) * 100}cqw` }}>
         <div style={{ fontFamily: `"${layout.font}", sans-serif`, fontSize: `${(layout.size / 1280) * 100}cqw`, fontWeight: layout.bold ? 800 : 500, fontStyle: layout.italic ? 'italic' : 'normal', textDecoration: layout.underline ? 'underline' : 'none', textTransform: layout.uppercase ? 'uppercase' : undefined, color: layout.color, textShadow: layout.shadow ? '0 0.3cqw 1.2cqw rgba(0,0,0,0.65)' : undefined }}>{hasLineAligns(layout.lineAligns)
           ? layout.text.split('\n').map((line, lineIndex) => {
             const lineAlign = lineAlignAt(layout.align, layout.lineAligns, lineIndex);
@@ -36,7 +23,7 @@ function PreviewText({ layout }: { layout: SongTextLayout }) {
       </div>
     </div>
   );
-}
+});
 
 function BackgroundChoiceCard({ item, selected, onSelect }: { item: BackgroundItem; selected: boolean; onSelect: () => void }) {
   const [previewing, setPreviewing] = useState(false);
@@ -57,7 +44,7 @@ function BackgroundChoiceCard({ item, selected, onSelect }: { item: BackgroundIt
 }
 
 /** A song slide drawn like Studio draws it. Thumbnails pass still, so video backgrounds show a still frame. */
-export function SongSlidePreview({ layout, background, still = false }: { layout: SongSlideLayout; background?: BackgroundItem; still?: boolean }) {
+export const SongSlidePreview = memo(function SongSlidePreview({ layout, background, still = false }: { layout: SongSlideLayout; background?: BackgroundItem; still?: boolean }) {
   return (
     <div className={`relative isolate aspect-video w-full overflow-hidden bg-gradient-to-br ${backgroundClasses(layout.background)}`} style={{ containerType: 'inline-size', ...backgroundStyle(layout.background) }}>
       <SlideBackgroundLayer media={background} opacity={layout.backgroundOpacity} dim={layout.dim} still={still} eager={!still} />
@@ -65,7 +52,27 @@ export function SongSlidePreview({ layout, background, still = false }: { layout
       {layout.subtitleBox && <PreviewText layout={layout.subtitleBox} />}
     </div>
   );
-}
+});
+
+/** Defer off-screen thumbnails so opening a long song or Scripture passage stays light. */
+const LazySongSlidePreview = memo(function LazySongSlidePreview({ layout, background }: { layout: SongSlideLayout; background?: BackgroundItem }) {
+  const host = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const element = host.current;
+    if (!element || visible) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting) return;
+      setVisible(true);
+      observer.disconnect();
+    }, { rootMargin: '180px' });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [visible]);
+  return <div ref={host} className="relative aspect-video w-full overflow-hidden rounded bg-gradient-to-br from-slate-800 to-slate-950">
+    {visible && <SongSlidePreview layout={layout} background={background} still />}
+  </div>;
+});
 
 type Area = { x: number; y: number; w: number; h: number };
 type Handle = 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w';
@@ -85,6 +92,25 @@ const encodeSlideText = (text: string) => text.replace(/\n[ \t]*\n/g, `\n${PRESE
 const decodeSlideText = (text: string) => text.replaceAll(PRESERVED_BLANK_LINE, '');
 const SONG_FONT_CATALOG = [...new Set([...SONG_FONTS, ...(GOOGLE_FONT_FAMILIES as string[])])].sort((a, b) => a.localeCompare(b));
 const resolveSongFont = (font: string) => SONG_FONT_CATALOG.find((candidate) => candidate.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '') === font.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '')) ?? font;
+const DESIGN_THUMBNAIL_ROW_HEIGHT = 92;
+
+/** Keep the large font catalogue mounted across slide changes. */
+const SongFontPicker = memo(function SongFontPicker({ font, onChange, className }: { font: string; onChange: (font: string) => void; className: string }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [visibleCount, setVisibleCount] = useState(60);
+  const fonts = useMemo(() => {
+    const matches = SONG_FONT_CATALOG.filter((family) => family.toLowerCase().includes(query.trim().toLowerCase()));
+    return matches.includes(font) || !font.toLowerCase().includes(query.trim().toLowerCase()) ? matches : [font, ...matches];
+  }, [font, query]);
+  return <div className="relative">
+    <input aria-label="Search fonts" role="combobox" aria-expanded={open} aria-controls="song-font-options" aria-autocomplete="list" value={open ? query : font} onFocus={() => { setQuery(''); setVisibleCount(60); setOpen(true); }} onChange={(event) => { setQuery(event.target.value); setVisibleCount(60); setOpen(true); }} onBlur={() => setOpen(false)} placeholder="Search 1,900+ fonts" className={className} style={{ fontFamily: `"${resolveSongFont(font)}", sans-serif` }} />
+    {open && <div id="song-font-options" role="listbox" aria-label="Font choices" className="absolute inset-x-0 top-full z-30 mt-1 max-h-56 overflow-y-auto rounded-lg border border-white/10 bg-[#101d2a] p-1 shadow-2xl">
+      {fonts.length ? fonts.slice(0, visibleCount).map((family) => <button key={family} type="button" role="option" aria-selected={family === font} onMouseDown={(event) => event.preventDefault()} onClick={() => { onChange(family); setQuery(''); setOpen(false); }} className={`block w-full truncate rounded px-2 py-1.5 text-left text-xs hover:bg-white/10 ${family === font ? 'bg-brand/15 text-brand' : 'text-warm-white/80'}`} style={{ fontFamily: `"${resolveSongFont(family)}", sans-serif` }}>{family}</button>) : <p className="px-2 py-2 text-xs text-warm-white/45">No fonts found.</p>}
+      {fonts.length > visibleCount && <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => setVisibleCount((current) => current + 60)} className="block w-full rounded px-2 py-2 text-left text-xs text-brand hover:bg-white/10">Show more ({fonts.length - visibleCount} remaining)</button>}
+    </div>}
+  </div>;
+});
 
 /**
  * The lyrics area drawn over the preview, resized like a Canva text box:
@@ -94,7 +120,7 @@ const resolveSongFont = (font: string) => SONG_FONT_CATALOG.find((candidate) => 
  * - in both cases the height follows the text, sized for the longest slide, so nothing is
  *   squeezed and there is no empty space. The top / bottom side sets a height by hand.
  */
-function AreaEditor({ area, style, texts, textSize, onChange }: { area: Area; style: SongStyle; texts: string[]; /** The size the lyrics are shown at now (after any shrink-to-fit). */ textSize: number; onChange: (patch: Partial<SongStyle>) => void }) {
+const AreaEditor = memo(function AreaEditor({ area, style, texts, textSize, onChange }: { area: Area; style: SongStyle; texts: string[]; /** The size the lyrics are shown at now (after any shrink-to-fit). */ textSize: number; onChange: (patch: Partial<SongStyle>) => void }) {
   const frame = useRef<HTMLDivElement>(null);
   const [guides, setGuides] = useState<{ x: boolean; y: boolean }>({ x: false, y: false });
   const start = (handle: Handle) => (event: ReactPointerEvent) => {
@@ -188,7 +214,7 @@ function AreaEditor({ area, style, texts, textSize, onChange }: { area: Area; st
       ))}
     </div>
   </>;
-}
+});
 
 /** Keeps a 16:9 slide as large as the space allows, without cropping or scrolling. */
 function FitStage({ children }: { children: ReactNode }) {
@@ -227,7 +253,7 @@ function Choice<T extends string | number>({ value, options, onChange, label }: 
  * underline / ALL CAPS, alignment, colour, position, lines per slide, title slide and
  * background, with a live preview of every slide.
  */
-export default function SongDesignPanel({
+const SongScriptureDesignPanel = memo(function SongScriptureDesignPanel({
   song,
   style,
   ownDesign,
@@ -265,6 +291,10 @@ export default function SongDesignPanel({
   const [collection, setCollection] = useState('All');
   const [backgroundBrowserOpen, setBackgroundBrowserOpen] = useState(false);
   useEffect(() => {
+    if (!backgroundBrowserOpen) return;
+    return registerModalEscape(() => setBackgroundBrowserOpen(false));
+  }, [backgroundBrowserOpen]);
+  useEffect(() => {
     const family = resolveSongFont(style.font);
     if (!(GOOGLE_FONT_FAMILIES as string[]).includes(family)) return;
     const link = document.createElement('link');
@@ -273,19 +303,28 @@ export default function SongDesignPanel({
     document.head.appendChild(link);
     return () => { link.remove(); };
   }, [style.font]);
-  const thumbs = useRef<(HTMLButtonElement | null)[]>([]);
-  // Keep the selected slide's thumbnail in view when moving between slides.
-  useEffect(() => { thumbs.current[index]?.scrollIntoView({ block: 'nearest' }); }, [index]);
-
   useEffect(() => {
     let release: (() => void) | undefined;
     let alive = true;
-    void readBackgroundLibrary().then((result) => {
-      if (!alive) { result.release(); return; }
-      release = result.release;
-      setLibrary(result.items);
-    }).catch(() => undefined);
-    return () => { alive = false; release?.(); };
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const load = () => {
+      void readBackgroundLibrary().then((result) => {
+        if (!alive) { result.release(); return; }
+        release = result.release;
+        setLibrary(result.items);
+      }).catch(() => undefined);
+    };
+    const idleHandle = idleWindow.requestIdleCallback?.(load, { timeout: 2500 });
+    const timeoutHandle = idleHandle === undefined ? window.setTimeout(load, 900) : undefined;
+    return () => {
+      alive = false;
+      if (idleHandle !== undefined) idleWindow.cancelIdleCallback?.(idleHandle);
+      if (timeoutHandle !== undefined) window.clearTimeout(timeoutHandle);
+      release?.();
+    };
   }, []);
 
   const layouts = useMemo(() => {
@@ -297,11 +336,46 @@ export default function SongDesignPanel({
       return { ...template, label: verse.reference, text, box: { ...template.box, text, lineAligns: style.lineAligns?.[songLineKey(text)] } };
     });
   }, [song, style, fixedVerseSlides, fixedVerseTexts]);
+  const lyricTexts = useMemo(() => layouts.filter((layout) => layout.kind === 'lyrics').map((layout) => layout.box.text), [layouts]);
+  const thumbnailRail = useRef<HTMLElement>(null);
+  const [thumbnailWindow, setThumbnailWindow] = useState({ start: 0, end: 10 });
+  const syncThumbnailWindow = useCallback(() => {
+    const rail = thumbnailRail.current;
+    if (!rail || !layouts.length) return;
+    const start = Math.max(0, Math.floor(rail.scrollTop / DESIGN_THUMBNAIL_ROW_HEIGHT) - 2);
+    const end = Math.min(layouts.length, Math.ceil((rail.scrollTop + rail.clientHeight) / DESIGN_THUMBNAIL_ROW_HEIGHT) + 2);
+    setThumbnailWindow((current) => current.start === start && current.end === end ? current : { start, end });
+  }, [layouts.length]);
+  useEffect(() => {
+    const rail = thumbnailRail.current;
+    if (!rail) return;
+    syncThumbnailWindow();
+    const observer = new ResizeObserver(syncThumbnailWindow);
+    observer.observe(rail);
+    return () => observer.disconnect();
+  }, [syncThumbnailWindow]);
+  // Keep the selected slide in view without mounting a button for every slide.
+  useEffect(() => {
+    const rail = thumbnailRail.current;
+    if (!rail) return;
+    if (index < thumbnailWindow.start || index >= thumbnailWindow.end) {
+      rail.scrollTop = index * DESIGN_THUMBNAIL_ROW_HEIGHT;
+      syncThumbnailWindow();
+    }
+  }, [index, thumbnailWindow, syncThumbnailWindow]);
   const current = layouts[Math.min(index, Math.max(0, layouts.length - 1))];
   const [textDraft, setTextDraft] = useState(decodeSlideText(current?.text ?? ''));
   // Do not reset the editor draft on content updates while typing; reload it only when changing slides.
   // Highlighted lines in "Text on this slide": the align buttons then change only those lines on this slide.
   const [textRange, setTextRange] = useState<{ start: number; end: number } | null>(null);
+  const goToSlide = useCallback((nextIndex: number) => {
+    const next = Math.max(0, Math.min(layouts.length - 1, nextIndex));
+    // Update the active slide and its editor text in one event, avoiding a stale-frame
+    // render followed by an effect-driven second render on every navigation click.
+    setIndex(next);
+    setTextDraft(decodeSlideText(layouts[next]?.text ?? ''));
+    setTextRange(null);
+  }, [layouts]);
   useEffect(() => { setTextDraft(decodeSlideText(current?.text ?? '')); setTextRange(null); }, [index]);
   const lineEditable = current?.kind === 'lyrics';
   const slideLineAligns = current?.kind === 'lyrics' ? current.box.lineAligns : undefined;
@@ -317,7 +391,7 @@ export default function SongDesignPanel({
   const backgroundItem = style.backgroundAssetId ? library.find((item) => item.id === style.backgroundAssetId) : undefined;
   const collections = ['All', ...[...new Set(library.map((item) => item.collection || 'Uploads'))].sort()];
   const visibleLibrary = collection === 'All' ? library : library.filter((item) => (item.collection || 'Uploads') === collection);
-  const changeStyle = (patch: Partial<SongStyle>) => {
+  const changeStyle = useCallback((patch: Partial<SongStyle>) => {
     onChange(patch);
     if (rememberStyle || !ownDesign) {
       saveSongSlideSettings({ ...loadSongSlideSettings(), ...style, ...patch });
@@ -329,7 +403,8 @@ export default function SongDesignPanel({
       dim: patch.dim ?? style.dim,
       backgroundOpacity: patch.backgroundOpacity ?? style.backgroundOpacity,
     });
-  };
+  }, [onChange, rememberStyle, ownDesign, style]);
+  const changeFont = useCallback((font: string) => changeStyle({ font }), [changeStyle]);
   const slideCaption = (layout: SongSlideLayout) => designLabel === 'scripture passage'
     ? layout.text.split(/\r?\n|\s{2,}/, 1)[0] || 'Verse'
     : layout.label ?? 'Lyrics';
@@ -337,29 +412,67 @@ export default function SongDesignPanel({
 
   const slider = 'w-full accent-brand';
   const select = 'w-full rounded-md border border-white/10 bg-[#091521] px-2 py-1.5 text-xs text-white outline-none focus:border-brand';
+  const backgroundControls = <Section title="Background">
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-[11px] text-warm-white/65">Choose a colour or saved image/video</span>
+      <label className="flex shrink-0 items-center gap-1.5 text-[10px] text-warm-white/60">Custom
+        <input type="color" aria-label="Custom background colour" value={parseCustomBackground(style.background)?.from ?? '#1E293B'} onChange={(event) => changeStyle({ background: customBackground(event.target.value, parseCustomBackground(style.background)?.to), backgroundAssetId: undefined })} className="h-6 w-8 cursor-pointer rounded border border-white/15 bg-transparent" />
+      </label>
+    </div>
+    <div className="grid grid-cols-4 gap-1.5" aria-label="Colour backgrounds">
+      {SONG_BACKGROUNDS.map((background) => {
+        const selected = !style.backgroundAssetId && style.background === background;
+        return <button key={background} type="button" aria-label="Use this colour background" aria-pressed={selected} onClick={() => changeStyle({ background, backgroundAssetId: undefined })} className={`aspect-video rounded-md border-2 bg-gradient-to-br ${background} ${selected ? 'border-brand' : 'border-white/10 hover:border-white/30'}`} />;
+      })}
+    </div>
+    {library.length > 0 ? <>
+      <div className="grid grid-cols-4 gap-1.5" aria-label="Quick background choices">
+        {library.slice(0, 8).map((item) => <button key={item.id} type="button" aria-label={`Use background ${item.name}`} aria-pressed={style.backgroundAssetId === item.id} title={item.name} onClick={() => changeStyle({ backgroundAssetId: item.id, dim: style.dim || 30 })} className={`relative aspect-video overflow-hidden rounded-md border-2 bg-[#0b1520] ${style.backgroundAssetId === item.id ? 'border-brand ring-1 ring-brand/40' : 'border-white/10 hover:border-white/35'}`}>
+          {item.type === 'image' ? <img src={item.url} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover" /> : item.thumbnailUrl ? <img src={item.thumbnailUrl} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover" /> : <span className="flex h-full items-center justify-center text-white/50"><Film size={13} /></span>}
+          {item.type === 'video' && <span className="absolute bottom-0.5 right-0.5 rounded bg-black/75 px-1 text-[8px] text-white">Video</span>}
+        </button>)}
+      </div>
+      <button type="button" onClick={() => setBackgroundBrowserOpen(true)} className="w-full rounded-md border border-white/10 px-2.5 py-1.5 text-[10px] font-semibold text-warm-white/75 hover:border-brand/50 hover:text-white">Browse all {library.length} backgrounds</button>
+    </> : <p className="rounded-md border border-dashed border-white/10 p-2 text-[10px] leading-snug text-warm-white/45">Add image or video backgrounds in Presentations → Backgrounds.</p>}
+    <details className="rounded-md border border-white/10 px-2.5 py-2">
+      <summary className="cursor-pointer text-[10px] font-semibold text-warm-white/60">More background adjustments</summary>
+      <div className="mt-2 space-y-2">
+        <label className="block text-[10px] text-warm-white/65"><span className="flex justify-between">Opacity <span className="tabular-nums text-warm-white/85">{style.backgroundOpacity}%</span></span>
+          <input type="range" min={0} max={100} step={5} value={style.backgroundOpacity} onChange={(event) => changeStyle({ backgroundOpacity: Number(event.target.value) })} className={slider} />
+        </label>
+        <label className="block text-[10px] text-warm-white/65"><span className="flex justify-between">Darken <span className="tabular-nums text-warm-white/85">{style.dim}%</span></span>
+          <input type="range" min={0} max={80} step={5} value={style.dim} onChange={(event) => changeStyle({ dim: Number(event.target.value) })} className={slider} />
+        </label>
+      </div>
+    </details>
+  </Section>;
 
   return (
-    <div className="grid min-h-0 flex-1 overflow-hidden md:grid-cols-[150px_minmax(0,1fr)_300px]">
+    <div className="grid min-h-0 flex-1 overflow-hidden md:grid-cols-[132px_minmax(0,1fr)_272px]">
       {/* Slides: numbered thumbnails, like the Presentations editor */}
-      <nav aria-label="Song slides" className="hidden min-h-0 flex-col gap-2 overflow-y-auto border-r border-white/10 bg-black/15 p-2.5 md:flex">
-        {layouts.map((layout, slideIndex) => (
+      <nav ref={thumbnailRail} onScroll={syncThumbnailWindow} aria-label="Song slides" className="hidden min-h-0 flex-col overflow-y-auto border-r border-white/10 bg-black/15 p-2.5 md:flex">
+        {thumbnailWindow.start > 0 && <div aria-hidden="true" style={{ height: thumbnailWindow.start * DESIGN_THUMBNAIL_ROW_HEIGHT, flex: 'none' }} />}
+        {layouts.slice(thumbnailWindow.start, thumbnailWindow.end).map((layout, offset) => {
+          const slideIndex = thumbnailWindow.start + offset;
+          return (
           <button
             key={slideIndex}
-            ref={(element) => { thumbs.current[slideIndex] = element; }}
             type="button"
             aria-current={slideIndex === index}
-            onClick={() => setIndex(slideIndex)}
-            className={`group shrink-0 rounded-lg p-1 text-left transition ${slideIndex === index ? 'bg-brand/15 ring-2 ring-brand' : 'hover:bg-white/5'}`}
+            onClick={() => goToSlide(slideIndex)}
+            className={`group h-[92px] shrink-0 rounded-lg p-1 text-left ${slideIndex === index ? 'bg-brand/15 ring-2 ring-brand' : 'hover:bg-white/5'}`}
           >
             <div className="flex items-start gap-1.5">
               <span className={`w-4 shrink-0 pt-0.5 text-right text-[10px] font-semibold tabular-nums ${slideIndex === index ? 'text-brand' : 'text-warm-white/40'}`}>{slideIndex + 1}</span>
               <div className="min-w-0 flex-1">
-                <div className="pointer-events-none overflow-hidden rounded border border-white/10"><SongSlidePreview layout={layout} background={backgroundItem} still /></div>
+                <div className="pointer-events-none overflow-hidden rounded border border-white/10"><LazySongSlidePreview layout={layout} background={backgroundItem} /></div>
                 <p className={`mt-1 truncate text-[10px] ${slideIndex === index ? 'font-semibold text-white' : 'text-warm-white/55'}`}>{slideCaption(layout)}</p>
               </div>
             </div>
           </button>
-        ))}
+          );
+        })}
+        {thumbnailWindow.end < layouts.length && <div aria-hidden="true" style={{ height: (layouts.length - thumbnailWindow.end) * DESIGN_THUMBNAIL_ROW_HEIGHT, flex: 'none' }} />}
       </nav>
 
       {/* Selected slide, as large as the space allows */}
@@ -368,25 +481,25 @@ export default function SongDesignPanel({
         onKeyDown={(event) => {
           const target = event.target as HTMLElement;
           if (/^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return;
-          if (event.key === 'ArrowRight' || event.key === 'ArrowDown' || event.key === 'PageDown') { event.preventDefault(); setIndex((value) => Math.min(layouts.length - 1, value + 1)); }
-          if (event.key === 'ArrowLeft' || event.key === 'ArrowUp' || event.key === 'PageUp') { event.preventDefault(); setIndex((value) => Math.max(0, value - 1)); }
+          if (event.key === 'ArrowRight' || event.key === 'ArrowDown' || event.key === 'PageDown') { event.preventDefault(); goToSlide(index + 1); }
+          if (event.key === 'ArrowLeft' || event.key === 'ArrowUp' || event.key === 'PageUp') { event.preventDefault(); goToSlide(index - 1); }
         }}
-        className="flex min-h-0 flex-col gap-3 bg-[#0b1520] p-4 outline-none"
+        className="flex min-h-0 flex-col gap-2.5 bg-[#0b1520] p-3 outline-none"
       >
         {current ? <>
           <FitStage>
             <div className="relative select-none overflow-hidden rounded-lg border border-white/10 shadow-2xl shadow-black/40">
           <SongSlidePreview layout={current} background={backgroundItem} />
-              {current.kind === 'lyrics' && <AreaEditor area={songTextArea(style)} style={style} texts={layouts.filter((layout) => layout.kind === 'lyrics').map((layout) => layout.box.text)} textSize={current.box.size} onChange={changeStyle} />}
+              {current.kind === 'lyrics' && <AreaEditor area={songTextArea(style)} style={style} texts={lyricTexts} textSize={current.box.size} onChange={changeStyle} />}
             </div>
           </FitStage>
           <div className="flex shrink-0 items-center justify-between gap-3">
-            <button type="button" aria-label="Previous slide" disabled={index === 0} onClick={() => setIndex((value) => Math.max(0, value - 1))} className="flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-warm-white/75 hover:bg-white/5 disabled:opacity-30"><ChevronLeft size={14} /> Previous</button>
+            <button type="button" aria-label="Previous slide" disabled={index === 0} onClick={() => goToSlide(index - 1)} className="flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-warm-white/75 hover:bg-white/5 disabled:opacity-30"><ChevronLeft size={14} /> Previous</button>
             <div className="min-w-0 text-center">
               <p className="truncate text-sm font-semibold text-white">{slideCaption(current)}</p>
               <p className="text-[11px] text-warm-white/45">Slide {Math.min(index, layouts.length - 1) + 1} of {layouts.length}</p>
             </div>
-            <button type="button" aria-label="Next slide" disabled={index >= layouts.length - 1} onClick={() => setIndex((value) => Math.min(layouts.length - 1, value + 1))} className="flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-warm-white/75 hover:bg-white/5 disabled:opacity-30">Next <ChevronRight size={14} /></button>
+            <button type="button" aria-label="Next slide" disabled={index >= layouts.length - 1} onClick={() => goToSlide(index + 1)} className="flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-warm-white/75 hover:bg-white/5 disabled:opacity-30">Next <ChevronRight size={14} /></button>
           </div>
           <p className="shrink-0 text-center text-[11px] text-warm-white/45">{fixedVerseSlides
             ? 'Each verse is its own slide. Change the text layout, background, and styling here before adding the passage to Studio.'
@@ -395,13 +508,16 @@ export default function SongDesignPanel({
             : 'The title slide keeps a centred layout. Choose a lyric slide to move or resize the lyrics.'}</p>
           {/* Small screens: thumbnails underneath instead of the side rail */}
           <div className="flex shrink-0 gap-1.5 overflow-x-auto pb-1 md:hidden">
-            {layouts.map((layout, slideIndex) => <button key={slideIndex} type="button" onClick={() => setIndex(slideIndex)} className={`w-24 shrink-0 overflow-hidden rounded border-2 ${slideIndex === index ? 'border-brand' : 'border-white/10'}`}><SongSlidePreview layout={layout} background={backgroundItem} still /></button>)}
+            {layouts.slice(Math.max(0, index - 1), Math.min(layouts.length, index + 2)).map((layout, offset) => {
+              const slideIndex = Math.max(0, index - 1) + offset;
+              return <button key={slideIndex} type="button" onClick={() => goToSlide(slideIndex)} aria-current={slideIndex === index} className={`w-24 shrink-0 overflow-hidden rounded border-2 ${slideIndex === index ? 'border-brand' : 'border-white/10'}`}><LazySongSlidePreview layout={layout} background={backgroundItem} /></button>;
+            })}
           </div>
         </> : <p className="m-auto text-sm text-warm-white/45">Type some lyrics on the Lyrics tab to see the slides.</p>}
       </div>
 
       {/* Controls */}
-      <aside className="flex min-h-0 flex-col gap-3 overflow-y-auto border-t border-white/10 bg-black/15 p-4 md:border-l md:border-t-0">
+      <aside className="flex min-h-0 flex-col gap-2.5 overflow-y-auto border-t border-white/10 bg-black/15 p-3 md:border-l md:border-t-0">
         <div className={`rounded-lg px-3 py-2 text-[11px] leading-snug ${ownDesign ? 'bg-brand/10 text-warm-white/80' : 'bg-white/5 text-warm-white/60'}`}>
           {ownDesign ? `This ${designLabel} has its own design.` : `This ${designLabel} uses the default style. Change anything to customize it.`}
           {showDefaultActions && <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
@@ -409,6 +525,8 @@ export default function SongDesignPanel({
             <button type="button" onClick={onMakeDefault} className="font-semibold text-brand hover:underline">Make this the default for Scripture and songs</button>
           </div>}
         </div>
+
+        {backgroundControls}
 
         {current && (onTextChange || lineEditable) && <Section title="Text">
           <label className="flex flex-col gap-1 text-[11px] text-warm-white/65">{onTextChange ? 'Text on this slide' : 'Lines on this slide'}
@@ -446,9 +564,7 @@ export default function SongDesignPanel({
             <ToggleIcon label="Text in middle of the box" active={(style.valign ?? 'middle') === 'middle'} onClick={() => changeStyle({ valign: 'middle' })}><AlignVerticalJustifyCenter size={15} /></ToggleIcon>
             <ToggleIcon label="Text at bottom of the box" active={style.valign === 'bottom'} onClick={() => changeStyle({ valign: 'bottom' })}><AlignVerticalJustifyEnd size={15} /></ToggleIcon>
           </div>
-          <select aria-label="Font" value={style.font} onChange={(event) => changeStyle({ font: event.target.value })} className={select} style={{ fontFamily: `"${resolveSongFont(style.font)}", sans-serif` }}>
-            {[...new Set([style.font, ...SONG_FONT_CATALOG])].map((font) => <option key={font} value={font} style={{ fontFamily: `"${resolveSongFont(font)}", sans-serif` }}>{font}</option>)}
-          </select>
+          <SongFontPicker font={style.font} onChange={changeFont} className={select} />
           <label className="flex items-center justify-between gap-2 text-[11px] text-warm-white/65">Text size
             <input type="number" min={1} max={1000} step={1} value={style.fontSize} onChange={(event) => { const value = Number(event.target.value); if (Number.isFinite(value) && value > 0) changeStyle({ fontSize: value }); }} className="w-24 rounded-md border border-white/10 bg-[#091521] px-2 py-1.5 text-right text-xs text-white outline-none focus:border-brand" />
           </label>
@@ -492,46 +608,6 @@ export default function SongDesignPanel({
           </>}
         </Section>
 
-        <Section title="Background">
-          {(() => {
-            const custom = parseCustomBackground(style.background);
-            const from = custom?.from ?? '#1E293B';
-            const applyColor = (background: string) => changeStyle({ background, backgroundAssetId: undefined });
-            return <div className="flex flex-wrap items-center gap-2 text-[11px] text-warm-white/70">
-              <label className="flex items-center gap-1.5">Your own color
-                <input type="color" aria-label="Background color" value={from} onChange={(event) => applyColor(customBackground(event.target.value, custom?.to))} className={`h-7 w-10 cursor-pointer rounded border bg-transparent ${custom && !style.backgroundAssetId ? 'border-brand' : 'border-white/15'}`} />
-              </label>
-              <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={!!custom?.to} onChange={(event) => applyColor(customBackground(from, event.target.checked ? custom?.to ?? '#000000' : undefined))} className="h-3.5 w-3.5 accent-brand" /> Blend to</label>
-              {custom?.to && <input type="color" aria-label="Second background color" value={custom.to} onChange={(event) => applyColor(customBackground(from, event.target.value))} className="h-7 w-10 cursor-pointer rounded border border-white/15 bg-transparent" />}
-            </div>;
-          })()}
-          <div className="grid grid-cols-4 gap-1.5">
-            {SONG_BACKGROUNDS.map((background) => {
-              const selected = !style.backgroundAssetId && style.background === background;
-              return <button key={background} type="button" aria-label="Use this colour background" aria-pressed={selected} onClick={() => changeStyle({ background, backgroundAssetId: undefined })} className={`aspect-video rounded-md border-2 bg-gradient-to-br ${background} ${selected ? 'border-brand' : 'border-white/10 hover:border-white/30'}`} />;
-            })}
-          </div>
-          <div className="flex items-center gap-3 rounded-lg border border-white/10 bg-[#0b1520] p-2.5">
-            <div className="relative aspect-video w-28 shrink-0 overflow-hidden rounded-md bg-gradient-to-br from-slate-700 to-slate-950">
-              {backgroundItem?.type === 'image' && <img src={backgroundItem.url} alt="Selected background" className="h-full w-full object-cover" />}
-              {backgroundItem?.type === 'video' && backgroundItem.thumbnailUrl && <img src={backgroundItem.thumbnailUrl} alt="Selected video background" className="h-full w-full object-cover" />}
-              {!backgroundItem && <div className={`h-full w-full bg-gradient-to-br ${backgroundClasses(style.background)}`} />}
-              {backgroundItem?.type === 'video' && <span className="absolute bottom-1 right-1 rounded bg-black/75 p-1 text-white"><Film size={12} /></span>}
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-[11px] font-semibold text-white">{backgroundItem ? 'Image or video background' : 'Colour background'}</p>
-              <p className="mt-0.5 truncate text-[10px] text-warm-white/45">{backgroundItem?.collection || (backgroundItem ? 'Imported background' : 'Choose a saved background')}</p>
-              <button type="button" onClick={() => setBackgroundBrowserOpen(true)} disabled={!library.length} className="mt-1.5 rounded-md border border-white/10 px-2 py-1 text-[10px] font-medium text-warm-white/80 hover:border-brand hover:text-white disabled:cursor-not-allowed disabled:opacity-40">Browse backgrounds ({library.length})</button>
-            </div>
-          </div>
-          {!library.length && <p className="text-[10px] leading-snug text-warm-white/40">Add pictures or videos in Presentations → Backgrounds (Import folder or Add files) to use them here.</p>}
-          <label className="text-[11px] text-warm-white/65"><span className="flex justify-between">Background opacity <span className="tabular-nums text-warm-white/85">{style.backgroundOpacity}%</span></span>
-            <input type="range" min={0} max={100} step={5} value={style.backgroundOpacity} onChange={(event) => changeStyle({ backgroundOpacity: Number(event.target.value) })} className={slider} />
-          </label>
-          <label className="text-[11px] text-warm-white/65"><span className="flex justify-between">Darken background <span className="tabular-nums text-warm-white/85">{style.dim}%</span></span>
-            <input type="range" min={0} max={80} step={5} value={style.dim} onChange={(event) => changeStyle({ dim: Number(event.target.value) })} className={slider} />
-          </label>
-        </Section>
       </aside>
       {backgroundBrowserOpen && <div className="fixed inset-0 flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" style={{ zIndex: 1200 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setBackgroundBrowserOpen(false); }}>
         <section role="dialog" aria-modal="true" aria-labelledby="song-backgrounds-title" className="flex max-h-[94vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101d2a] shadow-2xl">
@@ -553,4 +629,6 @@ export default function SongDesignPanel({
       </div>}
     </div>
   );
-}
+});
+
+export default SongScriptureDesignPanel;

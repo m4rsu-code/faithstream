@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import QRCode from 'qrcode';
 import {
@@ -13,6 +13,7 @@ import {
   GripVertical,
   Image,
   Loader2,
+  Maximize2,
   Mic,
   Monitor,
   Music2,
@@ -34,22 +35,26 @@ import type { LucideIcon } from 'lucide-react';
 import type { StreamStatus } from '../shared/streamContracts';
 import ConfirmationModal from '../components/modal/ConfirmationModal';
 import AudioMixerSettingsModal from '../components/modal/AudioMixerSettingsModal';
+import ExpandedSlidesModal from '../components/modal/ExpandedSlidesModal';
 import ScripturePickerModal, { preloadBible, type SelectedScriptureVerse } from '../components/modal/ScripturePickerModal';
+import SongEditorModal from '../components/modal/SongEditorModal';
+import { registerModalEscape } from '../components/modal/modalEscape';
 import CountdownDisplay, { paintCountdown, type CountdownSettings } from '../components/CountdownDisplay';
-import StudioSongsPanel from '../components/StudioSongsPanel';
-import SongDesignPanel from '../components/SongDesignPanel';
+import StudioSongsPanel from '../Sub-tabs/StudioSongsPanel';
+import { SegmentedTabs, UnderlineTabs } from '../Sub-tabs/TabNavigation';
+import SongScriptureDesignPanel from '../components/SongScriptureDesignPanel';
 import SlideBackgroundLayer from '../components/SlideBackgroundLayer';
 import { readBackgroundLibrary } from '../utils/mediaLibrary';
 import { hasLineAligns, lineAlignAt } from '../utils/lineAlign';
 import { backgroundClasses, backgroundStyle, customBackgroundStops } from '../utils/slideBackground';
-import { SHOW_SONG_EVENT, SONG_SAVED_EVENT, SONG_SLIDE_SETTINGS_EVENT, compareSongs, firstLine, loadLibrary, loadSongSlideSettings, searchSongs, songLineKey, songSlideLayouts, songStyleFor, type Song, type SongStyle, type SongTextLayout } from '../utils/songbooks';
+import { SHOW_SONG_EVENT, SONG_SAVED_EVENT, SONG_SLIDE_SETTINGS_EVENT, compareSongs, firstLine, loadLibrary, loadSongSlideSettings, saveSong, searchSongs, songLineKey, songSlideLayouts, songStyleFor, type Song, type Songbook, type SongStyle, type SongTextLayout } from '../utils/songbooks';
 import { formatMediaSizeInKb, prepareMediaFile } from '../utils/mediaOptimization';
 import { getAccountDatabaseName, getAccountStorageKey } from '../utils/accountStorage';
 import GOOGLE_FONT_FAMILIES from '../data/google-font-families.json';
 
 /* ---------- Data ---------- */
 
-type Slide = { text: string; ref?: string; bg?: string; canvasAspect?: number; bgImage?: string; bgImageFit?: 'cover' | 'contain'; bgPosition?: { x: number; y: number }; bgVideo?: string; bgVideoMuted?: boolean; bgAssetId?: string; dim?: number; backgroundOpacity?: number; textColor?: string; title?: string; countdown?: CountdownSettings };
+type Slide = { text: string; ref?: string; bg?: string; canvasAspect?: number; canvasWidthPoints?: number; canvasHeightPoints?: number; bgImage?: string; bgImageFit?: 'cover' | 'contain'; bgPosition?: { x: number; y: number }; bgVideo?: string; bgVideoMuted?: boolean; bgAssetId?: string; dim?: number; backgroundOpacity?: number; textColor?: string; title?: string; countdown?: CountdownSettings };
 
 type PresentationTextBox = {
   text: string; font: string; size: number; color: string; bold: boolean; italic: boolean;
@@ -90,7 +95,7 @@ const studioAnimationStyle = (item: { animation?: StudioAnimation; animationDura
   animationTimingFunction: item.animationEasing === 'linear' ? 'linear' : item.animationEasing === 'snappy' ? 'cubic-bezier(.16,1,.3,1)' : 'cubic-bezier(.2,.75,.25,1)',
   animationFillMode: 'both' as const,
 });
-type PresentationPicture = { id: number; src: string; x: number; y: number; w: number; h: number; mediaType?: 'image' | 'video'; assetId?: string; poster?: string; muted?: boolean; fitToBox?: boolean; layerOrder?: number | 'back' | 'front'; animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' };
+type PresentationPicture = { id: number; src: string; x: number; y: number; w: number; h: number; aspectRatio?: number; mediaType?: 'image' | 'video'; assetId?: string; poster?: string; muted?: boolean; fitToBox?: boolean; layerOrder?: number | 'back' | 'front'; animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' };
 type PresentationShape = { id: number; kind: string; x: number; y: number; w: number; h: number; fill: string; layerOrder?: number; animation?: StudioAnimation; animationDuration?: number; animationDelay?: number; animationEasing?: 'smooth' | 'linear' | 'snappy' };
 type PresentationDesign = {
   box?: PresentationTextBox | null;
@@ -112,6 +117,54 @@ type Scene = {
   presentationSourceInitialized?: boolean;
   /** Set when this scene shows a song from the songbooks; editing the song updates the scene. */
   songId?: string;
+  scriptureReference?: string;
+  scriptureVerses?: SelectedScriptureVerse[];
+  scriptureStyle?: SongStyle;
+};
+
+const scriptureDesignForScene = (scene: Scene): { reference: string; verses: SelectedScriptureVerse[]; style: SongStyle } | null => {
+  if (scene.scriptureVerses?.length) return {
+    reference: scene.scriptureReference ?? scene.name,
+    verses: scene.scriptureVerses,
+    style: scene.scriptureStyle ?? { ...loadSongSlideSettings(), titleSlide: false },
+  };
+  if (!scene.desc.startsWith('Scripture')) return null;
+  const verses = scene.slides.map((slide) => {
+    const text = slide.design?.box?.text ?? slide.text;
+    const lines = text.split('\n');
+    const reference = slide.ref ?? slide.title ?? lines[0]?.trim() ?? scene.name;
+    return { reference, text: lines[0]?.trim() === reference ? lines.slice(1).join('\n') : text };
+  });
+  const first = scene.slides[0];
+  const box = first?.design?.box;
+  const base = loadSongSlideSettings();
+  const style: SongStyle = {
+    ...base,
+    titleSlide: false,
+    background: first?.bg ?? base.background,
+    ...(first?.bgAssetId ? { backgroundAssetId: first.bgAssetId } : {}),
+    dim: first?.dim ?? base.dim,
+    backgroundOpacity: first?.backgroundOpacity ?? base.backgroundOpacity,
+    ...(box ? {
+      font: box.font,
+      fontSize: box.size,
+      autoFit: box.autoSize,
+      lineHeight: box.lineHeight,
+      bold: box.bold,
+      italic: box.italic,
+      underline: box.underline,
+      caps: false,
+      align: box.align,
+      valign: box.valign ?? 'middle',
+      letterSpacing: box.letterSpacing,
+      boxBg: box.boxBg,
+      boxBgOn: box.boxBgOn,
+      color: box.color,
+      shadow: box.shadow,
+      area: { x: box.x, y: box.y, w: box.w, h: box.h },
+    } : {}),
+  };
+  return { reference: scene.name, verses, style };
 };
 
 const SONG_SCENE_BG = 'from-purple-700 via-indigo-900 to-slate-950';
@@ -190,6 +243,8 @@ type SavedPresentationSlide = {
   title?: string;
   bg?: string;
   canvasAspect?: number;
+  canvasWidthPoints?: number;
+  canvasHeightPoints?: number;
   dim?: number;
   backgroundOpacity?: number;
   bgImage?: string;
@@ -204,7 +259,7 @@ type SavedPresentationSlide = {
   shapes?: PresentationShape[];
   countdown?: CountdownSettings;
 };
-type SavedPresentation = { id: string; name: string; slides: SavedPresentationSlide[]; locked?: boolean };
+type SavedPresentation = { id: string; name: string; slides: SavedPresentationSlide[]; updatedAt?: number; locked?: boolean; deviceOnly?: boolean };
 let deviceSavedPresentations: SavedPresentation[] = [];
 const readDeviceSavedPresentations = async (): Promise<SavedPresentation[]> => {
   const request = indexedDB.open(getAccountDatabaseName('faithstream.presentation-data'), 1);
@@ -224,17 +279,22 @@ const readDeviceSavedPresentations = async (): Promise<SavedPresentation[]> => {
     transaction.onerror = () => { db.close(); reject(transaction.error); };
   });
 };
-type StudioMedia = { id: string; type: 'image' | 'video'; blob: Blob; thumbnailBlob?: Blob; originalBlob?: Blob; optimized?: boolean };
-type StudioMediaUrlMap = Record<string, { type: 'image' | 'video'; url: string; thumbnailUrl?: string; sizeBytes?: number; originalBytes?: number; optimized?: boolean }>;
+type StudioMedia = { id: string; name?: string; type: 'image' | 'video'; blob: Blob; thumbnailBlob?: Blob; originalBlob?: Blob; optimized?: boolean };
+type StudioMediaUrlMap = Record<string, { type: 'image' | 'video'; url: string; thumbnailUrl?: string; name?: string; sizeBytes?: number; originalBytes?: number; optimized?: boolean }>;
+export const StudioVisibilityContext = createContext(true);
 type StudioMusicAsset = { id: string; name: string; path: string; createdAt: number };
 type StudioMusicAssetWithUrl = StudioMusicAsset & { url: string; available?: boolean };
 const STUDIO_SCENES_KEY = 'faithstream.studio-scenes';
 const STUDIO_SLIDESHOW_SCENES_KEY = 'faithstream.studio-slideshow-scenes';
 const STUDIO_OUTPUT_REF_KEY = 'faithstream.studio-output-ref';
 const STUDIO_STREAM_OUTPUT_REF_KEY = 'faithstream.studio-stream-output-ref';
+const STUDIO_QUICK_SHOW_SLIDES_KEY = 'faithstream.studio-quick-show-live-slides';
 const STUDIO_DISPLAY_MODE_KEY = 'faithstream.studio-display-mode';
 const STUDIO_STREAM_DISPLAYS_KEY = 'faithstream.studio-stream-displays';
-const STUDIO_PREVIEW_MODE_KEY = 'faithstream.studio-preview-mode';
+// Versioned so first launch after the old default-on behavior opens in direct mode.
+const STUDIO_OUTPUT_TAB_KEY = 'faithstream.studio-output-tab';
+const STUDIO_SIDEBAR_PANEL_KEY = 'faithstream.studio-sidebar-panel';
+const STUDIO_MUSIC_VIEW_KEY = 'faithstream.studio-music-view';
 const STUDIO_RESOLUTION_KEY = 'faithstream.studio-resolution';
 const STUDIO_FRAME_RATE_KEY = 'faithstream.studio-frame-rate';
 const STUDIO_BITRATE_KEY = 'faithstream.studio-bitrate';
@@ -248,69 +308,219 @@ const markStartupResourceReady = (resource: 'studio-media' | 'studio-music') => 
 const channelGain = (db: number) => db <= -60 ? 0 : 10 ** (db / 20);
 
 const syncPresentationSlides = (scene: Scene, presentation: SavedPresentation): Scene => {
-  const hasSourceIds = scene.slides.some((slide) => slide.presentationSlideId !== undefined);
-  const existingById = new Map(scene.slides.filter((slide) => slide.presentationSlideId !== undefined).map((slide) => [slide.presentationSlideId!, slide]));
   const slides = presentation.slides.map((savedSlide, index): StudioSlide => {
-    const existing = existingById.get(savedSlide.id) ?? (!hasSourceIds ? scene.slides[index] : undefined);
     const text = [savedSlide.box?.text, ...(savedSlide.extraBoxes ?? []).map((item) => item.box.text)].filter((value): value is string => !!value?.trim()).join('\n');
     return {
-      ...existing,
       presentationSlideId: savedSlide.id,
-      title: savedSlide.title || existing?.title || `Slide ${index + 1}`,
-      text: text || savedSlide.title || existing?.text || '',
-      bg: savedSlide.bg ?? existing?.bg ?? 'from-slate-600 to-slate-950',
-      canvasAspect: savedSlide.canvasAspect ?? existing?.canvasAspect,
-      bgImage: savedSlide.bgImage ?? existing?.bgImage,
-      bgImageFit: savedSlide.bgImageFit ?? existing?.bgImageFit,
+      title: savedSlide.title || `Slide ${index + 1}`,
+      text: text || savedSlide.title || '',
+      bg: savedSlide.bg ?? 'from-slate-600 to-slate-950',
+      canvasAspect: savedSlide.canvasAspect,
+      bgImage: savedSlide.bgImage,
+      bgImageFit: savedSlide.bgImageFit,
       bgPosition: savedSlide.bgPosition,
-      bgVideo: savedSlide.bgVideo ?? existing?.bgVideo,
-      bgVideoMuted: savedSlide.bgVideoMuted ?? existing?.bgVideoMuted,
+      bgVideo: savedSlide.bgVideo,
+      bgVideoMuted: savedSlide.bgVideoMuted,
       bgAssetId: savedSlide.bgAssetId,
       dim: savedSlide.dim,
       backgroundOpacity: savedSlide.backgroundOpacity,
-      textColor: savedSlide.box?.color ?? existing?.textColor,
+      textColor: savedSlide.box?.color,
       countdown: savedSlide.countdown,
       design: { box: savedSlide.box, extraBoxes: savedSlide.extraBoxes, pictures: savedSlide.pictures, shapes: savedSlide.shapes, countdown: savedSlide.countdown },
     };
   });
-  return { ...scene, name: presentation.name || scene.name, slides };
+  return {
+    ...scene,
+    presentationId: presentation.id,
+    name: presentation.name || scene.name,
+    desc: `${slides.length} presentation ${slides.length === 1 ? 'slide' : 'slides'}`,
+    slides,
+  };
+};
+
+const serializeScenesForStorage = (scenes: Scene[]) => scenes.map((scene) => ({
+  ...scene,
+  slides: scene.slides.map((slide) => ({
+    ...(slide.bgAssetId ? { ...slide, bgImage: undefined, bgVideo: undefined } : slide),
+    design: slide.design ? { ...slide.design, pictures: slide.design.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) } : undefined,
+  })),
+}));
+
+type StoredStudioSceneSnapshot = { key: string; scenes: Scene[]; savedAt: number };
+const STUDIO_SCENE_SNAPSHOT_DB = 'faithstream.studio-scene-snapshots';
+const STUDIO_SCENE_SNAPSHOT_CHANNEL = 'faithstream-studio-scene-snapshots';
+const studioSceneSnapshotTimestampKey = (key: string) => getAccountStorageKey(`${key}:saved-at`);
+
+const openStudioSceneSnapshotDb = async (databaseName = STUDIO_SCENE_SNAPSHOT_DB) => {
+  const request = indexedDB.open(databaseName, 1);
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains('snapshots')) {
+        request.result.createObjectStore('snapshots', { keyPath: 'key' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  return db;
+};
+
+const readStudioSceneSnapshotFrom = async (databaseName: string, key: string): Promise<StoredStudioSceneSnapshot | undefined> => {
+  const db = await openStudioSceneSnapshotDb(databaseName);
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction('snapshots', 'readonly');
+    const request = transaction.objectStore('snapshots').get(key);
+    request.onsuccess = () => resolve(request.result as StoredStudioSceneSnapshot | undefined);
+    request.onerror = () => reject(request.error);
+    transaction.oncomplete = () => db.close();
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+  });
+};
+
+const readStudioSceneSnapshot = async (key: string): Promise<StoredStudioSceneSnapshot | undefined> => {
+  const accountRecordKey = getAccountStorageKey(key);
+  // Keep account scenes separate inside one fixed local database. Read the earlier
+  // account-named database once as a migration path for existing installations.
+  const localSnapshot = await readStudioSceneSnapshotFrom(STUDIO_SCENE_SNAPSHOT_DB, accountRecordKey);
+  if (localSnapshot) return localSnapshot;
+  const legacyDatabaseName = getAccountDatabaseName(STUDIO_SCENE_SNAPSHOT_DB);
+  return legacyDatabaseName === STUDIO_SCENE_SNAPSHOT_DB
+    ? undefined
+    : readStudioSceneSnapshotFrom(legacyDatabaseName, key);
+};
+
+const writeStudioSceneSnapshot = async (key: string, scenes: Scene[], savedAt: number) => {
+  const db = await openStudioSceneSnapshotDb();
+  return new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction('snapshots', 'readwrite');
+    transaction.objectStore('snapshots').put({ key: getAccountStorageKey(key), scenes, savedAt } satisfies StoredStudioSceneSnapshot);
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+    transaction.onabort = () => { db.close(); reject(transaction.error); };
+  });
+};
+
+const readPreferredStudioScenes = async (key: string, fallback: Scene[]) => {
+  const snapshot = await readStudioSceneSnapshot(key);
+  const localSavedAt = Number(localStorage.getItem(studioSceneSnapshotTimestampKey(key))) || 0;
+  if (!snapshot || !Array.isArray(snapshot.scenes) || snapshot.savedAt < localSavedAt) return fallback;
+  return upgradeScriptureScenes(snapshot.scenes.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides)));
+};
+
+const persistScenesImmediately = (scenes: Scene[], key: string) => {
+  const serialized = serializeScenesForStorage(scenes);
+  const timestampKey = studioSceneSnapshotTimestampKey(key);
+  const previousTimestamp = Number(localStorage.getItem(timestampKey)) || 0;
+  const savedAt = Math.max(Date.now(), previousTimestamp + 1);
+  try { localStorage.setItem(getAccountStorageKey(key), JSON.stringify(serialized)); } catch { /* IndexedDB below remains the durable copy if local storage is full. */ }
+  try { localStorage.setItem(timestampKey, String(savedAt)); } catch { /* IndexedDB still receives the timestamp. */ }
+  void writeStudioSceneSnapshot(key, serialized, savedAt).then(() => {
+    if (typeof BroadcastChannel === 'undefined') return;
+    const channel = new BroadcastChannel(STUDIO_SCENE_SNAPSHOT_CHANNEL);
+    channel.postMessage({ key: getAccountStorageKey(key), savedAt });
+    channel.close();
+  }).catch(() => {
+    window.dispatchEvent(new CustomEvent('faithstream:studio-scene-save-error', { detail: { key } }));
+  });
+};
+
+const restoreImportedSlideForStudio = (slide: StudioSlide, mediaUrls: StudioMediaUrlMap): StudioSlide => {
+  const pictures = slide.design?.pictures?.map((picture) => {
+    const asset = picture.assetId ? mediaUrls[picture.assetId] : undefined;
+    return asset ? { ...picture, src: asset.url, poster: asset.thumbnailUrl } : picture;
+  });
+  const isImportedVectorDeck = (slide.design?.pictures ?? []).some((picture) => {
+    const asset = picture.assetId ? mediaUrls[picture.assetId] : undefined;
+    return asset?.type === 'image' && /-item-\d+\.svg$/i.test(asset.name ?? '');
+  });
+  let restored: StudioSlide = { ...slide, design: slide.design ? { ...slide.design, pictures } : undefined };
+
+  // Older imported decks stored coordinates before their original slide aspect ratio was
+  // saved. Match Presentation's one-time restore so the artwork stays in the right positions.
+  const backgroundPicture = (restored.design?.pictures ?? []).find((picture) => {
+    const asset = picture.assetId ? mediaUrls[picture.assetId] : undefined;
+    return asset?.type === 'image' && /-item-0\.svg$/i.test(asset.name ?? '');
+  });
+  const aspect = backgroundPicture?.aspectRatio;
+  if (!(restored.canvasAspect && restored.canvasWidthPoints) && aspect && Number.isFinite(aspect) && aspect > 0) {
+    const scaleX = Math.min(1, aspect / (16 / 9));
+    const scaleY = Math.min(1, (16 / 9) / aspect);
+    const offsetX = (1 - scaleX) / 2;
+    const offsetY = (1 - scaleY) / 2;
+    const estimatedWidthPoints = aspect * 540;
+    const fontScale = Math.min(1920, 1080 * aspect) / estimatedWidthPoints;
+    const restorePosition = <T extends { x: number; y: number; w: number; h: number }>(item: T): T => ({
+      ...item,
+      x: ((item.x / 100 - offsetX) / scaleX) * 100,
+      y: ((item.y / 100 - offsetY) / scaleY) * 100,
+      w: item.w / scaleX,
+      h: item.h / scaleY,
+    });
+    const restoreBox = (box: PresentationTextBox): PresentationTextBox => ({
+      ...restorePosition({ ...box, size: box.size * fontScale }),
+      importedRuns: box.importedRuns?.map((run) => ({ ...run, size: run.size * fontScale, letterSpacing: (run.letterSpacing ?? 0) * fontScale })),
+      importedPadding: box.importedPadding ? {
+        top: box.importedPadding.top * fontScale,
+        right: box.importedPadding.right * fontScale,
+        bottom: box.importedPadding.bottom * fontScale,
+        left: box.importedPadding.left * fontScale,
+      } : undefined,
+    });
+    restored = {
+      ...restored,
+      canvasAspect: aspect,
+      canvasWidthPoints: estimatedWidthPoints,
+      canvasHeightPoints: 540,
+      design: restored.design ? {
+        ...restored.design,
+        box: restored.design.box ? restoreBox(restored.design.box) : restored.design.box,
+        extraBoxes: restored.design.extraBoxes?.map((item) => ({ ...item, box: restoreBox(item.box) })),
+        pictures: restored.design.pictures?.map(restorePosition),
+        shapes: restored.design.shapes?.map(restorePosition),
+      } : restored.design,
+    };
+  }
+
+  if (isImportedVectorDeck && restored.design) {
+    const markImported = (box: PresentationTextBox): PresentationTextBox => ({
+      ...box,
+      autoSize: typeof box.powerPointTextFit === 'boolean' ? box.autoSize : false,
+      powerPointImported: true,
+    });
+    restored = {
+      ...restored,
+      design: {
+        ...restored.design,
+        box: restored.design.box ? markImported(restored.design.box) : restored.design.box,
+        extraBoxes: restored.design.extraBoxes?.map((item) => ({ ...item, box: markImported(item.box) })),
+      },
+    };
+  }
+
+  const backgroundAsset = restored.bgAssetId ? mediaUrls[restored.bgAssetId] : undefined;
+  if (backgroundAsset) {
+    restored = {
+      ...restored,
+      // Keep a still frame visible while the video decoder starts on the next slide.
+      bgImage: backgroundAsset.type === 'image' ? backgroundAsset.url : backgroundAsset.thumbnailUrl,
+      bgVideo: backgroundAsset.type === 'video' ? backgroundAsset.url : undefined,
+    };
+  }
+  return restored;
 };
 
 const hydrateSceneMedia = (scene: Scene, mediaUrls: StudioMediaUrlMap): Scene => ({
   ...scene,
-  slides: scene.slides.map((slide) => {
-    const backgroundAsset = slide.bgAssetId ? mediaUrls[slide.bgAssetId] : undefined;
-    const design = slide.design ? {
-      ...slide.design,
-      pictures: slide.design.pictures?.map((picture) => {
-        const pictureAsset = picture.assetId ? mediaUrls[picture.assetId] : undefined;
-        return pictureAsset ? { ...picture, src: pictureAsset.url, poster: pictureAsset.thumbnailUrl } : picture;
-      }),
-    } : undefined;
-    return {
-      ...slide,
-      ...(backgroundAsset ? {
-        // Keep a still frame visible while the video decoder starts on the next slide.
-        bgImage: backgroundAsset.type === 'image' ? backgroundAsset.url : backgroundAsset.thumbnailUrl,
-        bgVideo: backgroundAsset.type === 'video' ? backgroundAsset.url : undefined,
-      } : {}),
-      design,
-    };
-  }),
+  slides: scene.slides.map((slide) => restoreImportedSlideForStudio(slide, mediaUrls)),
 });
 
 const loadStudioScenes = (): Scene[] => {
   try {
     const saved = JSON.parse(localStorage.getItem(getAccountStorageKey(STUDIO_SCENES_KEY)) ?? '[]') as Scene[];
     if (!Array.isArray(saved)) return [];
-    const presentations = readSavedPresentations();
-    return upgradeScriptureScenes(saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides))
-      .filter((scene) => !scene.presentationId || presentations.some((item) => item.id === scene.presentationId))
-      .map((scene) => {
-      const presentation = presentations.find((item) => item.id === scene.presentationId);
-      if (!presentation) return scene;
-      return syncPresentationSlides(scene, presentation);
-    }));
+    // Scene snapshots are the durable copy of what the operator arranged. Do not rebuild them
+    // from localStorage presentation metadata here: imported decks keep their full slides in IDB.
+    return upgradeScriptureScenes(saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides)));
   } catch { return []; }
 };
 
@@ -318,13 +528,7 @@ const loadSlideshowScenes = (): Scene[] => {
   try {
     const saved = JSON.parse(localStorage.getItem(getAccountStorageKey(STUDIO_SLIDESHOW_SCENES_KEY)) ?? 'null') as Scene[] | null;
     if (Array.isArray(saved)) {
-      const presentations = readSavedPresentations();
-      return upgradeScriptureScenes(saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides))
-        .filter((scene) => !scene.presentationId || presentations.some((item) => item.id === scene.presentationId))
-        .map((scene) => {
-          const presentation = presentations.find((item) => item.id === scene.presentationId);
-          return presentation ? syncPresentationSlides(scene, presentation) : scene;
-        }));
+      return upgradeScriptureScenes(saved.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides)));
     }
   } catch { /* Migrate existing Studio scenes below. */ }
   // Preserve existing projects while giving Slideshow its own editable scene copy.
@@ -337,9 +541,16 @@ const readSavedPresentations = (): SavedPresentation[] => {
     const combined = new Map<string, SavedPresentation>();
     if (Array.isArray(saved)) saved.filter((presentation) => presentation?.id && Array.isArray(presentation.slides)).forEach((presentation) => combined.set(presentation.id, presentation));
     deviceSavedPresentations.forEach((presentation) => combined.set(presentation.id, presentation));
-    return [...combined.values()];
+    // When localStorage had to fall back to card metadata, wait for the IndexedDB copy before
+    // exposing imported decks to Studio. Reconstructing a scene from just id/title loses content.
+    return [...combined.values()].filter((presentation) => !presentation.deviceOnly || !presentation.slides.length
+      || presentation.slides.some((slide) => Object.keys(slide).some((key) => key !== 'id' && key !== 'title')));
   } catch { return []; }
 };
+
+const isPresentationCardOnly = (presentation: SavedPresentation) => presentation.deviceOnly
+  && presentation.slides.length > 0
+  && presentation.slides.every((slide) => Object.keys(slide).every((key) => key === 'id' || key === 'title'));
 
 const presentationBackgroundIds = (presentations: SavedPresentation[]) => [...new Set(presentations
   .flatMap((presentation) => presentation.slides.map((slide) => slide.bgAssetId))
@@ -371,7 +582,7 @@ const readStudioMediaUrlMap = async () => {
       urls.push(url);
       const thumbnailUrl = asset.thumbnailBlob ? URL.createObjectURL(asset.thumbnailBlob) : undefined;
       if (thumbnailUrl) urls.push(thumbnailUrl);
-      mediaUrls[asset.id] = { type: asset.type, url, thumbnailUrl, sizeBytes: asset.blob.size, originalBytes: asset.originalBlob?.size, optimized: asset.optimized };
+      mediaUrls[asset.id] = { type: asset.type, url, thumbnailUrl, name: asset.name, sizeBytes: asset.blob.size, originalBytes: asset.originalBlob?.size, optimized: asset.optimized };
     }
   }
   let releaseBackgrounds: () => void = () => {};
@@ -683,6 +894,7 @@ function SlideView({
         })}
         {slide.design.shapes?.map((shape, index) => <div key={`${animationSlideKey}:${shape.id}`} className={`absolute ${animate && shape.animation && shape.animation !== 'none' ? `slide-content-${shape.animation}` : ''}`} style={{ ...(animate && shape.animation && shape.animation !== 'none' ? studioAnimationStyle(shape) : {}), left: `${shape.x}%`, top: `${shape.y}%`, width: `${shape.w}%`, height: `${shape.h}%`, zIndex: shape.layerOrder ?? 2000 + index, backgroundColor: shape.fill, borderRadius: shape.kind === 'circle' ? '50%' : undefined, clipPath: shape.kind === 'triangle' ? 'polygon(50% 0, 0 100%, 100% 100%)' : shape.kind === 'star' ? 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 93%, 50% 72%, 21% 93%, 32% 57%, 2% 35%, 39% 35%)' : shape.kind === 'arrow' ? 'polygon(0 30%, 65% 30%, 65% 0, 100% 50%, 65% 100%, 65% 70%, 0 70%)' : undefined }} />)}
         {boxes.map((box, index) => <ProgramTextBox key={`${animationSlideKey}:${index}`} box={box} defaultLayerOrder={3000 + index} animate={animate} />)}
+        {!boxes.length && !!(slide.text || slide.title) && <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-[6%] text-center text-white" style={{ fontSize: `clamp(${minRem}rem, ${scale ?? 8}cqw, ${maxRem}rem)` }}><p className="whitespace-pre-line font-bold leading-snug drop-shadow">{slide.text || slide.title}</p>{slide.ref && <p className="absolute bottom-[6%] text-[0.6em] opacity-90">{slide.ref}</p>}</div>}
         {slide.countdown && <CountdownDisplay countdown={slide.countdown} />}
        </div>
       </div>
@@ -707,7 +919,7 @@ function SlideView({
 
 /** Lightweight slide card: use poster images for video layers so a long deck does not
  * start a video decoder for every thumbnail in Studio. Actual slide/output views still play video. */
-function StudioSlideThumbnail({ bg, slide, mediaUrls, scale = 8, minRem = 0.5 }: {
+const StudioSlideThumbnail = memo(function StudioSlideThumbnail({ bg, slide, mediaUrls, scale = 8, minRem = 0.5 }: {
   bg: string;
   slide?: StudioSlide;
   mediaUrls: StudioMediaUrlMap;
@@ -715,54 +927,66 @@ function StudioSlideThumbnail({ bg, slide, mediaUrls, scale = 8, minRem = 0.5 }:
   minRem?: number;
 }) {
   if (!slide) return <SlideView bg={bg} slide={slide} scale={scale} minRem={minRem} deferMedia />;
-  const background = slide.bgAssetId ? mediaUrls[slide.bgAssetId] : undefined;
-  const hasVideo = background?.type === 'video' || !!slide.bgVideo
-    || (slide.design?.pictures ?? []).some((picture) => picture.mediaType === 'video');
-  const pictures = slide.design?.pictures?.flatMap((picture) => {
+  const restoredSlide = restoreImportedSlideForStudio(slide, mediaUrls);
+  const background = restoredSlide.bgAssetId ? mediaUrls[restoredSlide.bgAssetId] : undefined;
+  const hasVideo = background?.type === 'video' || !!restoredSlide.bgVideo
+    || (restoredSlide.design?.pictures ?? []).some((picture) => picture.mediaType === 'video');
+  const pictures = restoredSlide.design?.pictures?.flatMap((picture) => {
     if (picture.mediaType !== 'video') return [picture];
     const poster = picture.assetId ? mediaUrls[picture.assetId]?.thumbnailUrl : undefined;
     return poster ? [{ ...picture, src: poster, mediaType: 'image' as const }] : [];
   });
   const thumbnailSlide: StudioSlide = {
-    ...slide,
-    bgImage: background?.type === 'video' ? background.thumbnailUrl : slide.bgImage,
+    ...restoredSlide,
+    bgImage: background?.type === 'video' ? background.thumbnailUrl : background?.type === 'image' ? background.url : restoredSlide.bgImage,
     bgVideo: undefined,
-    design: slide.design ? { ...slide.design, pictures } : slide.design,
+    design: restoredSlide.design ? { ...restoredSlide.design, pictures } : restoredSlide.design,
   };
   return <div className="relative h-full w-full">
     <SlideView bg={bg} slide={thumbnailSlide} scale={scale} minRem={minRem} deferMedia />
     {hasVideo && <span className="absolute bottom-1 right-1 z-20 rounded bg-black/70 p-1 text-white/90" aria-label="Contains video"><Play size={10} /></span>}
   </div>;
-}
+});
 
 function ScriptureDesignModal({
   reference,
   verses,
+  initialStyle,
+  editing = false,
   onClose,
   onAdd,
 }: {
   reference: string;
   verses: SelectedScriptureVerse[];
+  initialStyle?: SongStyle;
+  editing?: boolean;
   onClose: () => void;
   onAdd: (style: SongStyle, verses: SelectedScriptureVerse[]) => void;
 }) {
-  const [style, setStyle] = useState<SongStyle>(() => ({ ...loadSongSlideSettings(), titleSlide: false }));
+  const [style, setStyle] = useState<SongStyle>(() => ({ ...(initialStyle ?? loadSongSlideSettings()), titleSlide: false }));
   const [editedVerses, setEditedVerses] = useState(verses);
-  const song = {
+  const song = useMemo(() => ({
     title: reference,
     author: '',
     copyright: '',
     lyrics: editedVerses.map((verse) => `${verse.reference}\n${verse.text}`).join('\n\n'),
-  };
+  }), [reference, editedVerses]);
+  const updateVerseText = useCallback(({ index, text }: { index: number; text: string }) => setEditedVerses((current) => current.map((verse, verseIndex) => {
+    if (verseIndex !== index) return verse;
+    const [typedReference, ...verseLines] = text.split('\n');
+    return { ...verse, reference: typedReference.trim() || verse.reference, text: verseLines.join('\n').replace(/\s+$/, '') };
+  })), []);
+  const updateScriptureStyle = useCallback((patch: Partial<SongStyle>) => setStyle((current) => ({ ...current, ...patch })), []);
+  useEffect(() => registerModalEscape(onClose), [onClose]);
 
   return createPortal(
      <div className="fixed inset-0 z-1100 flex items-center justify-center bg-black/75 p-3 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section role="dialog" aria-modal="true" aria-labelledby="scripture-design-title" className="flex h-[min(900px,94vh)] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101d2a] shadow-2xl">
+      <section role="dialog" aria-modal="true" aria-labelledby="scripture-design-title" className="flex h-[min(900px,94vh)] w-full max-w-[1440px] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101d2a] shadow-2xl">
         <header className="flex shrink-0 items-center justify-between border-b border-white/10 px-5 py-3.5">
           <div><h2 id="scripture-design-title" className="text-base font-bold text-white">Design Scripture slides</h2><p className="mt-0.5 text-xs text-warm-white/50">{reference} · {verses.length} verses, one slide per verse</p></div>
           <button type="button" onClick={onClose} aria-label="Back to Scripture selection" className="rounded-lg p-2 text-warm-white/55 hover:bg-white/10 hover:text-white"><X size={17} /></button>
         </header>
-        <SongDesignPanel
+        <SongScriptureDesignPanel
           song={song}
           style={style}
           ownDesign
@@ -771,18 +995,14 @@ function ScriptureDesignModal({
           rememberStyle
           fixedVerseSlides
           fixedVerseTexts={editedVerses}
-          onTextChange={({ index, text }) => setEditedVerses((current) => current.map((verse, verseIndex) => {
-            if (verseIndex !== index) return verse;
-            const [typedReference, ...verseLines] = text.split('\n');
-            return { ...verse, reference: typedReference.trim() || verse.reference, text: verseLines.join('\n').replace(/\s+$/, '') };
-          }))}
-          onChange={(patch) => setStyle((current) => ({ ...current, ...patch }))}
+          onTextChange={updateVerseText}
+          onChange={updateScriptureStyle}
           onUseDefault={() => undefined}
           onMakeDefault={() => undefined}
         />
         <footer className="flex shrink-0 justify-end gap-2 border-t border-white/10 px-5 py-3">
-          <button type="button" onClick={onClose} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-warm-white/70 hover:bg-white/5">Back to Scripture</button>
-          <button type="button" onClick={() => onAdd(style, editedVerses)} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy hover:brightness-110">Add {editedVerses.length} slides to scene</button>
+          <button type="button" onClick={onClose} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-warm-white/70 hover:bg-white/5">{editing ? 'Cancel' : 'Back to Scripture'}</button>
+          <button type="button" onClick={() => onAdd(style, editedVerses)} className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-navy hover:brightness-110">{editing ? 'Save design' : `Add ${editedVerses.length} slides to scene`}</button>
         </footer>
       </section>
     </div>,
@@ -869,6 +1089,7 @@ function AudioChannelMeter({
   onLevel: (level: number) => void;
   description?: string;
 }) {
+  const studioVisible = useContext(StudioVisibilityContext);
   const [level, setLevel] = useState(0);
   const [contextState, setContextState] = useState<AudioContextState | 'unavailable'>('closed');
   const contextRef = useRef<AudioContext | null>(null);
@@ -877,6 +1098,12 @@ function AudioChannelMeter({
   onLevelRef.current = onLevel;
 
   useEffect(() => {
+    if (!enabled || !studioVisible) {
+      setLevel(0);
+      setContextState('closed');
+      onLevelRef.current(0);
+      return;
+    }
     const tracks = stream?.getAudioTracks().filter((track) => track.readyState === 'live') ?? [];
     if (!tracks.length) {
       setLevel(0);
@@ -914,6 +1141,7 @@ function AudioChannelMeter({
     const samples = new Float32Array(analyser.fftSize);
     let frame = 0;
     let lastUpdate = 0;
+    let lastReport = 0;
     const readLevel = (time: number) => {
       analyser.getFloatTimeDomainData(samples);
       let total = 0;
@@ -922,8 +1150,11 @@ function AudioChannelMeter({
       if (time - lastUpdate >= 100) {
         const visibleLevel = rms;
         setLevel(visibleLevel);
-        onLevelRef.current(visibleLevel);
         lastUpdate = time;
+      }
+      if (time - lastReport >= 400) {
+        onLevelRef.current(rms);
+        lastReport = time;
       }
       frame = requestAnimationFrame(readLevel);
     };
@@ -939,7 +1170,7 @@ function AudioChannelMeter({
       gainRef.current = null;
       void context.close();
     };
-  }, [stream]);
+  }, [stream, enabled, studioVisible]);
 
   useEffect(() => {
     const gain = gainRef.current;
@@ -1383,6 +1614,23 @@ const paintProgramSlide = async (ctx: CanvasRenderingContext2D, slide: StudioSli
     }
     const countdown = slide.countdown ?? slide.design.countdown;
     if (countdown) paintCountdown(ctx, countdown, w, h);
+    if (!boxes.length && (slide.text || slide.title)) {
+      const text = slide.text || slide.title || '';
+      ctx.fillStyle = slide.textColor ?? '#fff';
+      ctx.font = `800 ${Math.max(24, 36 * fontScale)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowColor = 'rgba(0,0,0,.65)';
+      ctx.shadowBlur = w * .01;
+      const lines = streamTextLines(ctx, text, w * .86);
+      const lineHeight = Math.max(24, 36 * fontScale) * 1.2;
+      lines.forEach((line, index) => ctx.fillText(line, w / 2, h / 2 - (lines.length - 1) * lineHeight / 2 + index * lineHeight, w * .9));
+      ctx.shadowBlur = 0;
+      if (slide.ref) {
+        ctx.font = `500 ${Math.max(14, 20 * fontScale)}px sans-serif`;
+        ctx.fillText(slide.ref, w / 2, h / 2 + lines.length * lineHeight / 2, w * .9);
+      }
+    }
   } else {
     const text = slide.text || slide.title || '';
     ctx.fillStyle = slide.textColor ?? '#fff'; ctx.font = `800 ${Math.max(24, 36 * fontScale)}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.shadowColor = 'rgba(0,0,0,.65)'; ctx.shadowBlur = w * .01;
@@ -1457,17 +1705,69 @@ const renderProgramFrame = async (canvas: HTMLCanvasElement, stage: HTMLElement,
 export default function Studio() {
   const [scenes, setScenes] = useState<Scene[]>(loadStudioScenes);
   const [slideshowScenes, setSlideshowScenes] = useState<Scene[]>(loadSlideshowScenes);
-  const [savedPresentations, setSavedPresentations] = useState<SavedPresentation[]>([]);
+  const [sceneSnapshotsReady, setSceneSnapshotsReady] = useState(false);
+  const [savedPresentations, setSavedPresentations] = useState<SavedPresentation[]>(readSavedPresentations);
+  const savedPresentationsRef = useRef(savedPresentations);
+  const savedPresentationSignaturesRef = useRef(new Map<string, string>());
+  const syncedScenePresentationSignaturesRef = useRef(new Map<number, string>());
+
+  useEffect(() => {
+    let active = true;
+    const restoreSnapshots = async () => {
+      try {
+        const [streamSnapshot, slideshowSnapshot] = await Promise.all([
+          readStudioSceneSnapshot(STUDIO_SCENES_KEY),
+          readStudioSceneSnapshot(STUDIO_SLIDESHOW_SCENES_KEY),
+        ]);
+        if (!active) return;
+        const chooseSnapshot = (key: string, snapshot: StoredStudioSceneSnapshot | undefined, fallback: Scene[]) => {
+          const localSavedAt = Number(localStorage.getItem(studioSceneSnapshotTimestampKey(key))) || 0;
+          // Prefer the database on a timestamp tie: localStorage may have rejected an
+          // oversized scene even though the small timestamp update succeeded.
+          if (!snapshot || !Array.isArray(snapshot.scenes) || snapshot.savedAt < localSavedAt) return fallback;
+          return upgradeScriptureScenes(snapshot.scenes.filter((scene) => Number.isFinite(scene?.id) && scene.name && scene.bg && Array.isArray(scene.slides)));
+        };
+        const streamScenes = chooseSnapshot(STUDIO_SCENES_KEY, streamSnapshot, loadStudioScenes());
+        const offlineScenes = chooseSnapshot(STUDIO_SLIDESHOW_SCENES_KEY, slideshowSnapshot, loadSlideshowScenes());
+        setScenes(streamScenes);
+        setSlideshowScenes(offlineScenes);
+        // Migrate existing local scene snapshots to IndexedDB on first use.
+        if (!streamSnapshot) persistScenesImmediately(streamScenes, STUDIO_SCENES_KEY);
+        if (!slideshowSnapshot) persistScenesImmediately(offlineScenes, STUDIO_SLIDESHOW_SCENES_KEY);
+      } catch {
+        // The existing localStorage snapshot remains available if IndexedDB cannot be opened.
+      } finally {
+        if (active) setSceneSnapshotsReady(true);
+      }
+    };
+    void restoreSnapshots();
+    return () => { active = false; };
+  }, []);
+  const rememberSavedPresentations = (presentations: SavedPresentation[]) => {
+    const previousSize = savedPresentationSignaturesRef.current.size;
+    const nextSignatures = new Map(presentations.map((item) => [item.id, `${item.updatedAt ?? 0}:${item.name}:${item.slides.length}:${item.locked ? 1 : 0}`]));
+    const changedIds = new Set<string>();
+    for (const [id, signature] of nextSignatures) {
+      if (savedPresentationSignaturesRef.current.get(id) !== signature) changedIds.add(id);
+    }
+    savedPresentationsRef.current = presentations;
+    savedPresentationSignaturesRef.current = nextSignatures;
+    if (changedIds.size || nextSignatures.size !== previousSize) setSavedPresentations(presentations);
+    return changedIds;
+  };
   const [mediaUrls, setMediaUrls] = useState<StudioMediaUrlMap>({});
   const mediaUrlsRef = useRef(mediaUrls);
-  const backgroundThumbnailRequestKey = [...new Set([
-    ...presentationBackgroundIds(readSavedPresentations()),
+  const backgroundThumbnailRequestKey = useMemo(() => [...new Set([
+    ...presentationBackgroundIds(savedPresentations),
     ...[...scenes, ...slideshowScenes].flatMap((scene) => scene.slides.map((slide) => slide.bgAssetId)
       .filter((id): id is string => typeof id === 'string' && id.startsWith('folder-default-'))),
-  ])].sort().join('|');
+  ])].sort().join('|'), [savedPresentations, scenes, slideshowScenes]);
   const [addSceneOpen, setAddSceneOpen] = useState(false);
   const [scripturePickerOpen, setScripturePickerOpen] = useState(false);
   const [pendingScriptureDesign, setPendingScriptureDesign] = useState<{ reference: string; verses: SelectedScriptureVerse[] } | null>(null);
+  const [editingScriptureSceneId, setEditingScriptureSceneId] = useState<number | null>(null);
+  const [editingStudioSong, setEditingStudioSong] = useState<Song | null>(null);
+  const [studioSongBooks, setStudioSongBooks] = useState<Songbook[]>([]);
   const [selectedPresentationId, setSelectedPresentationId] = useState('');
   // The Add scene window offers presentations or songs from the songbooks.
   const [addSceneKind, setAddSceneKind] = useState<'presentation' | 'song'>('presentation');
@@ -1479,12 +1779,33 @@ export default function Studio() {
   const [clearScenesTab, setClearScenesTab] = useState<'stream' | 'slideshow' | null>(null);
   const [addSceneTab, setAddSceneTab] = useState<'stream' | 'slideshow'>('stream');
   const [sceneId, setSceneId] = useState(() => scenes[0]?.id ?? 0); // scene whose slides are listed (Scenes panel)
-  const [sidebarPanel, setSidebarPanel] = useState<'scenes' | 'music'>('scenes');
-  const [musicView, setMusicView] = useState<'songs' | 'tracks'>('songs');
+  const [sidebarPanel, setSidebarPanel] = useState<'scenes' | 'music'>(() => localStorage.getItem(getAccountStorageKey(STUDIO_SIDEBAR_PANEL_KEY)) === 'music' ? 'music' : 'scenes');
+  const [musicView, setMusicView] = useState<'songs' | 'tracks'>(() => localStorage.getItem(getAccountStorageKey(STUDIO_MUSIC_VIEW_KEY)) === 'tracks' ? 'tracks' : 'songs');
   const [selected, setSelected] = useState<Ref>(() => ({ sceneId: scenes[0]?.id ?? 0, slideIdx: 0 }));
   const slideCardRefs = useRef(new Map<string, HTMLDivElement>());
   const [preview, setPreview] = useState<Ref>(() => ({ sceneId: scenes[0]?.id ?? 0, slideIdx: 0 }));
   const [onAir, setOnAir] = useState<Ref>(() => ({ sceneId: scenes[0]?.id ?? 0, slideIdx: 0 }));
+  const [quickShowLiveSlides, setQuickShowLiveSlides] = useState(() => localStorage.getItem(STUDIO_QUICK_SHOW_SLIDES_KEY) === 'true');
+
+  // Scene snapshots can arrive from IndexedDB after the first render. Reconcile every
+  // active reference as soon as those scenes arrive so outputs never stay on scene 0.
+  useEffect(() => {
+    if (!scenes.length) {
+      if (sceneId !== 0) setSceneId(0);
+      return;
+    }
+    const fallback = scenes[0];
+    const selectedScene = scenes.find((item) => item.id === sceneId) ?? fallback;
+    if (selectedScene.id !== sceneId) setSceneId(selectedScene.id);
+    const normalize = (reference: Ref): Ref => {
+      const targetScene = scenes.find((item) => item.id === reference.sceneId) ?? fallback;
+      if (targetScene.id !== reference.sceneId) return { sceneId: targetScene.id, slideIdx: 0 };
+      return { sceneId: targetScene.id, slideIdx: Math.min(Math.max(0, reference.slideIdx), Math.max(0, targetScene.slides.length - 1)) };
+    };
+    setSelected((current) => normalize(current));
+    setPreview((current) => normalize(current));
+    setOnAir((current) => normalize(current));
+  }, [scenes, sceneId]);
 
   const [transitionEnabled, setTransitionEnabled] = useState(() => localStorage.getItem('faithstream.studio-transition-enabled') !== 'false');
   const transitionOptions = ['Fade', 'Slide', 'Wipe', 'Zoom', 'Cut'] as const;
@@ -1619,9 +1940,24 @@ export default function Studio() {
   const recordingAudioGains = useRef(new Map<number, GainNode>());
   const recordingAudioPanners = useRef(new Map<number, StereoPannerNode>());
   const recordingAudioCompressors = useRef(new Map<number, DynamicsCompressorNode>());
-  const [previewMode, setPreviewMode] = useState(() => localStorage.getItem(STUDIO_PREVIEW_MODE_KEY) !== 'false');
-  const [studioOutputTab, setStudioOutputTab] = useState<'slideshow' | 'stream'>('stream');
+  const [studioOutputTab, setStudioOutputTab] = useState<'slideshow' | 'stream'>(() => localStorage.getItem(getAccountStorageKey(STUDIO_OUTPUT_TAB_KEY)) === 'slideshow' ? 'slideshow' : 'stream');
+  const [slidesExpanded, setSlidesExpanded] = useState(false);
   const [offlineSlide, setOfflineSlide] = useState<Ref>(() => ({ sceneId: slideshowScenes[0]?.id ?? 0, slideIdx: 0 }));
+  useEffect(() => {
+    if (!slideshowScenes.length) {
+      if (offlineSlide.sceneId !== 0) setOfflineSlide({ sceneId: 0, slideIdx: 0 });
+      return;
+    }
+    const first = slideshowScenes[0];
+    const currentScene = slideshowScenes.find((item) => item.id === offlineSlide.sceneId);
+    const scene = currentScene ?? first;
+    const slideIdx = currentScene
+      ? Math.min(Math.max(0, offlineSlide.slideIdx), Math.max(0, scene.slides.length - 1))
+      : 0;
+    if (scene.id !== offlineSlide.sceneId || slideIdx !== offlineSlide.slideIdx) {
+      setOfflineSlide({ sceneId: scene.id, slideIdx });
+    }
+  }, [slideshowScenes, offlineSlide]);
   const [studioDisplays, setStudioDisplays] = useState<{ id: number; name: string; primary: boolean }[]>([]);
   // Program output can go to several monitors at once (e.g. a projector and a confidence TV).
   const [streamDisplayIds, setStreamDisplayIds] = useState<number[] | null>(() => {
@@ -1730,15 +2066,21 @@ export default function Studio() {
   }, [live, streamResolution, streamFrameRate]);
 
   useEffect(() => {
-    try { localStorage.setItem(STUDIO_PREVIEW_MODE_KEY, String(previewMode)); } catch { /* Keep the current Studio mode if storage is unavailable. */ }
-  }, [previewMode]);
+    try {
+      localStorage.setItem(getAccountStorageKey(STUDIO_OUTPUT_TAB_KEY), studioOutputTab);
+      localStorage.setItem(getAccountStorageKey(STUDIO_SIDEBAR_PANEL_KEY), sidebarPanel);
+      localStorage.setItem(getAccountStorageKey(STUDIO_MUSIC_VIEW_KEY), musicView);
+    } catch { /* Keep the current panel selection for this session if storage is unavailable. */ }
+  }, [studioOutputTab, sidebarPanel, musicView]);
+  useEffect(() => {
+    try { localStorage.setItem(STUDIO_QUICK_SHOW_SLIDES_KEY, String(quickShowLiveSlides)); } catch { /* Keep the current setting for this session. */ }
+  }, [quickShowLiveSlides]);
   // Studio stays loaded in the background, so pick up changes made on the Settings page right away.
   // Stream quality is fixed while live (the encoder was started with it); a change made during a
   // stream is picked up when the stream ends, for the next one.
   const liveRef = useRef(live);
   const syncFromSettings = useCallback(() => {
     try {
-      setPreviewMode(localStorage.getItem(STUDIO_PREVIEW_MODE_KEY) !== 'false');
       setConfirmEndStream(localStorage.getItem('faithstream.studio-confirm-end') !== 'false');
       if (liveRef.current) return;
       setStreamResolution(localStorage.getItem(STUDIO_RESOLUTION_KEY) || '720p');
@@ -1773,34 +2115,91 @@ export default function Studio() {
 
 
   useEffect(() => {
-    const storedScenes = scenes.map((scene) => ({
-      ...scene,
-      slides: scene.slides.map((slide) => ({ ...(slide.bgAssetId ? { ...slide, bgImage: undefined, bgVideo: undefined } : slide), design: slide.design ? { ...slide.design, pictures: slide.design.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) } : undefined })),
-    }));
-    try { localStorage.setItem(getAccountStorageKey(STUDIO_SCENES_KEY), JSON.stringify(storedScenes)); } catch { /* Keep the active Studio session usable if storage is unavailable. */ }
-  }, [scenes]);
+    if (!sceneSnapshotsReady) return;
+    persistScenesImmediately(scenes, STUDIO_SCENES_KEY);
+  }, [scenes, sceneSnapshotsReady]);
 
   useEffect(() => {
-    const storedScenes = slideshowScenes.map((scene) => ({
-      ...scene,
-      slides: scene.slides.map((slide) => ({ ...(slide.bgAssetId ? { ...slide, bgImage: undefined, bgVideo: undefined } : slide), design: slide.design ? { ...slide.design, pictures: slide.design.pictures?.map((picture) => picture.assetId ? { ...picture, src: '' } : picture) } : undefined })),
-    }));
-    try { localStorage.setItem(getAccountStorageKey(STUDIO_SLIDESHOW_SCENES_KEY), JSON.stringify(storedScenes)); } catch { /* Keep the slideshow session usable if storage is unavailable. */ }
-  }, [slideshowScenes]);
+    if (!sceneSnapshotsReady) return;
+    persistScenesImmediately(slideshowScenes, STUDIO_SLIDESHOW_SCENES_KEY);
+  }, [slideshowScenes, sceneSnapshotsReady]);
 
   useEffect(() => {
-    const refreshLinkedPresentationTitles = async () => {
-      try { deviceSavedPresentations = await readDeviceSavedPresentations(); } catch { /* Keep using the cached library if storage is briefly unavailable. */ }
-      const presentations = readSavedPresentations();
+    const refreshLinkedPresentationTitles = async (event?: Event) => {
+      const eventProjects = event instanceof CustomEvent && Array.isArray(event.detail?.projects)
+        ? event.detail.projects as SavedPresentation[]
+        : null;
+      const changedProjectId = event instanceof CustomEvent && typeof event.detail?.changedProjectId === 'string'
+        ? event.detail.changedProjectId as string
+        : null;
+      let presentations: SavedPresentation[];
+      let presentationLibraryReady = false;
+      if (eventProjects) {
+        // Presentation localStorage can fall back to id/title-only cards when an imported deck
+        // is large. Never sync those into a Studio scene: reload the full device-only records.
+        const needsDeviceReload = eventProjects.some(isPresentationCardOnly);
+        if (needsDeviceReload) {
+          try {
+            deviceSavedPresentations = await readDeviceSavedPresentations();
+            presentationLibraryReady = true;
+          }
+          catch { /* Keep the previous full IndexedDB snapshot if a read is temporarily blocked. */ }
+        } else {
+          deviceSavedPresentations = eventProjects.filter((item) => item.deviceOnly);
+          presentationLibraryReady = true;
+        }
+        presentations = [...eventProjects.filter((item) => !item.deviceOnly), ...deviceSavedPresentations];
+      } else {
+        try {
+          deviceSavedPresentations = await readDeviceSavedPresentations();
+          presentationLibraryReady = true;
+        }
+        catch { /* Keep scene snapshots if the device library is briefly unavailable. */ }
+        presentations = readSavedPresentations();
+      }
+      const changedIds = rememberSavedPresentations(presentations);
+      if (changedProjectId) changedIds.add(changedProjectId);
       const byId = new Map(presentations.map((presentation) => [presentation.id, presentation]));
-      const refresh = (current: Scene[]) => current
-        .filter((scene) => !scene.presentationId || byId.has(scene.presentationId))
-        .map((scene) => {
-          const presentation = scene.presentationId ? byId.get(scene.presentationId) : undefined;
-          return hydrateSceneMedia(presentation ? syncPresentationSlides(scene, presentation) : scene, mediaUrlsRef.current);
-        });
-      setScenes(refresh);
-      setSlideshowScenes(refresh);
+      const refresh = (current: Scene[]) => {
+        let changed = false;
+        const next: Scene[] = [];
+        for (const scene of current) {
+          const linkedById = scene.presentationId ? byId.get(scene.presentationId) : undefined;
+          // Older scene snapshots may predate presentationId. Recover the link only when
+          // both the title and at least one original slide ID uniquely identify a deck.
+          const sceneSlideIds = new Set(scene.slides
+            .map((slide) => slide.presentationSlideId)
+            .filter((id): id is number => Number.isFinite(id)));
+          const legacyMatches = !scene.presentationId && !scene.songId && sceneSlideIds.size
+            ? presentations.filter((item) => item.name.trim().toLocaleLowerCase() === scene.name.trim().toLocaleLowerCase()
+              && item.slides.some((slide) => sceneSlideIds.has(slide.id)))
+            : [];
+          const presentation = linkedById ?? (legacyMatches.length === 1 ? legacyMatches[0] : undefined);
+          if (!presentation) {
+            const isLinkedPresentationScene = !!scene.presentationId
+              || (!scene.songId && sceneSlideIds.size > 0 && /^\d+ presentation slides?$/.test(scene.desc.trim()));
+            if (presentationLibraryReady && isLinkedPresentationScene) {
+              // The source deck was deleted from Presentations. Remove its stale Studio card.
+              changed = true;
+              continue;
+            }
+            next.push(scene);
+            continue;
+          }
+          const signature = savedPresentationSignaturesRef.current.get(presentation.id);
+          const recoveredLink = !scene.presentationId;
+          if (!signature || (!recoveredLink && !changedIds.has(presentation.id) && syncedScenePresentationSignaturesRef.current.get(scene.id) === signature)) {
+            next.push(scene);
+            continue;
+          }
+          syncedScenePresentationSignaturesRef.current.set(scene.id, signature);
+          next.push(hydrateSceneMedia(syncPresentationSlides(scene, presentation), mediaUrlsRef.current));
+          changed = true;
+        }
+        return changed ? next : current;
+      };
+      setScenes((current) => refresh(current));
+      setSlideshowScenes((current) => refresh(current));
     };
     const onMediaUpdated = () => {
       void refreshStudioMediaUrls().then((assets) => {
@@ -1809,7 +2208,7 @@ export default function Studio() {
       }).catch(() => setSourceError('Could not refresh presentation images.'));
     };
     const onPresentationsStorage = (event: StorageEvent) => {
-      if (event.key === getAccountStorageKey('faithstream.presentations')) refreshLinkedPresentationTitles();
+      if (event.key === getAccountStorageKey('faithstream.presentations')) void refreshLinkedPresentationTitles();
     };
     window.addEventListener('faithstream:presentations-updated', refreshLinkedPresentationTitles);
     window.addEventListener('faithstream:media-updated', onMediaUpdated);
@@ -2171,9 +2570,11 @@ export default function Studio() {
     } catch {
       setSourceError('Could not load presentation images. Try again.');
     }
+    try { deviceSavedPresentations = await readDeviceSavedPresentations(); }
+    catch { /* Use the current in-memory library if IndexedDB is temporarily unavailable. */ }
     const available = readSavedPresentations();
     setAddSceneTab(studioOutputTab);
-    setSavedPresentations(available);
+    rememberSavedPresentations(available);
     setSelectedPresentationId(available[0]?.id ?? '');
     setAddSceneSongQuery('');
     setAddSceneOpen(true);
@@ -2182,32 +2583,38 @@ export default function Studio() {
 
   const makePresentationScene = (presentation: SavedPresentation, id: number): Scene => {
     const importedSlides: StudioSlide[] = presentation.slides.map((slide) => {
-      const asset = slide.bgAssetId ? mediaUrlsRef.current[slide.bgAssetId] : undefined;
       const textParts = [slide.box?.text, ...(slide.extraBoxes ?? []).map((item) => item.box?.text)]
         .filter((text): text is string => !!text?.trim());
-      return {
+      const mapped: StudioSlide = {
         presentationSlideId: slide.id,
         title: slide.title,
         text: textParts.join('\n') || slide.title || '',
         bg: slide.bg ?? 'from-slate-600 to-slate-950',
         canvasAspect: slide.canvasAspect,
+        canvasWidthPoints: slide.canvasWidthPoints,
+        canvasHeightPoints: slide.canvasHeightPoints,
         bgAssetId: slide.bgAssetId,
-        bgImage: asset?.type === 'image' ? asset.url : asset?.type === 'video' ? asset.thumbnailUrl : slide.bgAssetId ? undefined : slide.bgImage,
+        bgImage: slide.bgImage,
+        bgImageFit: slide.bgImageFit,
         bgPosition: slide.bgPosition,
-        bgVideo: asset?.type === 'video' ? asset.url : slide.bgAssetId ? undefined : slide.bgVideo,
+        bgVideo: slide.bgVideo,
         bgVideoMuted: slide.bgVideoMuted ?? true,
         dim: slide.dim,
         backgroundOpacity: slide.backgroundOpacity,
         textColor: slide.box?.color,
         countdown: slide.countdown,
         design: {
+          box: slide.box,
+          extraBoxes: slide.extraBoxes,
           pictures: slide.pictures?.map((picture) => {
             const pictureAsset = picture.assetId ? mediaUrlsRef.current[picture.assetId] : undefined;
             return pictureAsset ? { ...picture, src: pictureAsset.url, poster: pictureAsset.thumbnailUrl } : picture;
           }),
           shapes: slide.shapes,
+          countdown: slide.countdown,
         },
       };
+      return restoreImportedSlideForStudio(mapped, mediaUrlsRef.current);
     });
     return {
       id,
@@ -2219,7 +2626,9 @@ export default function Studio() {
     };
   };
 
-  const addAllPresentationScenes = (destinationTab: 'stream' | 'slideshow' = studioOutputTab) => {
+  const addAllPresentationScenes = async (destinationTab: 'stream' | 'slideshow' = studioOutputTab) => {
+    try { deviceSavedPresentations = await readDeviceSavedPresentations(); }
+    catch { /* Use the current in-memory library if IndexedDB is temporarily unavailable. */ }
     const destinationScenes = destinationTab === 'slideshow' ? slideshowScenes : scenes;
     const existingPresentationIds = new Set(destinationScenes.map((scene) => scene.presentationId).filter(Boolean));
     const presentationsToAdd = readSavedPresentations().filter((presentation) => presentation.slides.length > 0 && !existingPresentationIds.has(presentation.id));
@@ -2230,14 +2639,17 @@ export default function Studio() {
     let nextId = Math.max(0, ...destinationScenes.map((scene) => scene.id)) + 1;
     const newScenes = presentationsToAdd.map((presentation) => makePresentationScene(presentation, nextId++));
     if (destinationTab === 'slideshow') {
-      setSlideshowScenes((current) => [...current, ...newScenes]);
+      const next = [...slideshowScenes, ...newScenes];
+      persistScenesImmediately(next, STUDIO_SLIDESHOW_SCENES_KEY);
+      setSlideshowScenes(next);
       setOfflineSlide({ sceneId: newScenes[0].id, slideIdx: 0 });
     } else {
-      setScenes((current) => [...current, ...newScenes]);
+      const next = [...scenes, ...newScenes];
+      persistScenesImmediately(next, STUDIO_SCENES_KEY);
+      setScenes(next);
       setSceneId(newScenes[0].id);
       setSelected({ sceneId: newScenes[0].id, slideIdx: 0 });
       setPreview({ sceneId: newScenes[0].id, slideIdx: 0 });
-      if (!previewMode) setOnAir({ sceneId: newScenes[0].id, slideIdx: 0 });
     }
     setAddSceneOpen(false);
   };
@@ -2249,14 +2661,17 @@ export default function Studio() {
     const id = Math.max(0, ...destinationScenes.map((item) => item.id)) + 1;
     const newScene = makePresentationScene(presentation, id);
     if (addSceneTab === 'slideshow') {
-      setSlideshowScenes((current) => [...current, newScene]);
+      const next = [...slideshowScenes, newScene];
+      persistScenesImmediately(next, STUDIO_SLIDESHOW_SCENES_KEY);
+      setSlideshowScenes(next);
       setOfflineSlide({ sceneId: id, slideIdx: 0 });
     } else {
-      setScenes((current) => [...current, newScene]);
+      const next = [...scenes, newScene];
+      persistScenesImmediately(next, STUDIO_SCENES_KEY);
+      setScenes(next);
       setSceneId(id);
       setSelected({ sceneId: id, slideIdx: 0 });
       setPreview({ sceneId: id, slideIdx: 0 });
-      if (!previewMode) setOnAir({ sceneId: id, slideIdx: 0 });
     }
     setAddSceneOpen(false);
   };
@@ -2264,7 +2679,9 @@ export default function Studio() {
   const removeSlideshowScene = (scene: Scene) => {
     const fallback = slideshowScenes.find((item) => item.id !== scene.id);
     const fallbackRef = { sceneId: fallback?.id ?? 0, slideIdx: 0 };
-    setSlideshowScenes((current) => current.filter((item) => item.id !== scene.id));
+    const next = slideshowScenes.filter((item) => item.id !== scene.id);
+    persistScenesImmediately(next, STUDIO_SLIDESHOW_SCENES_KEY);
+    setSlideshowScenes(next);
     if (offlineSlide.sceneId === scene.id) setOfflineSlide(fallbackRef);
     setSceneToDelete(null);
   };
@@ -2276,9 +2693,11 @@ export default function Studio() {
 
   const clearAllScenes = (tab: 'stream' | 'slideshow') => {
     if (tab === 'slideshow') {
+      persistScenesImmediately([], STUDIO_SLIDESHOW_SCENES_KEY);
       setSlideshowScenes([]);
       setOfflineSlide({ sceneId: 0, slideIdx: 0 });
     } else {
+      persistScenesImmediately([], STUDIO_SCENES_KEY);
       sourceStreams.current.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
       sourceStreams.current.clear();
       setSources((current) => current.map((source) => ({ ...source, sceneId: 0, stream: undefined })));
@@ -2297,7 +2716,9 @@ export default function Studio() {
   const removeScene = (scene: Scene) => {
     const fallback = scenes.find((item) => item.id !== scene.id);
     const fallbackRef = { sceneId: fallback?.id ?? 0, slideIdx: 0 };
-    setScenes((current) => current.filter((item) => item.id !== scene.id));
+    const nextScenes = scenes.filter((item) => item.id !== scene.id);
+    persistScenesImmediately(nextScenes, STUDIO_SCENES_KEY);
+    setScenes(nextScenes);
     sources.filter((source) => source.sceneId === scene.id && !source.shared).forEach((source) => {
       sourceStreams.current.get(source.id)?.getTracks().forEach((track) => track.stop());
       sourceStreams.current.delete(source.id);
@@ -2351,7 +2772,8 @@ export default function Studio() {
   const offlineScene = slideshowScenes.find((item) => item.id === offlineSlide.sceneId) ?? emptyScene;
   const offlineCurrent = (() => {
     const sc = offlineScene;
-    const slide = sc.slides[offlineSlide.slideIdx] ?? { text: 'Add a presentation to create a scene' };
+    const sourceSlide = sc.slides[offlineSlide.slideIdx] ?? { text: 'Add a presentation to create a scene' };
+    const slide = restoreImportedSlideForStudio(sourceSlide, mediaUrls);
     return { bg: sc.bg, slide };
   })();
   const setOfflineScene = (id: number) => {
@@ -2415,10 +2837,18 @@ export default function Studio() {
   };
 
   const scene = scenes.find((x) => x.id === sceneId) ?? emptyScene;
-  const previewSetupRef = previewMode ? preview : selected;
+  const selectedDesignScene = studioOutputTab === 'stream'
+    ? scenes.find((item) => item.id === selected.sceneId)
+    : slideshowScenes.find((item) => item.id === offlineSlide.sceneId);
+  const canEditSelectedDesign = !!(selectedDesignScene?.songId || (selectedDesignScene && scriptureDesignForScene(selectedDesignScene)));
+  const editingScriptureScene = editingScriptureSceneId === null ? undefined
+    : (studioOutputTab === 'stream' ? scenes : slideshowScenes).find((item) => item.id === editingScriptureSceneId);
+  const editingScriptureData = editingScriptureScene ? scriptureDesignForScene(editingScriptureScene) : null;
+  const previewSetupRef = preview;
   const previewSetupSlide = resolve(previewSetupRef);
-  const previewSlide = previewSetupSlide.slide;
-  const airing = resolve(onAir);
+  const previewSlide = restoreImportedSlideForStudio(previewSetupSlide.slide, mediaUrls);
+  const airingSource = resolve(onAir);
+  const airing = { ...airingSource, slide: restoreImportedSlideForStudio(airingSource.slide, mediaUrls) };
   // Keep sources available when switching slides/scenes, like reusable OBS sources.
   const sourcesForScene = (id: number) => sources.filter((source) => source.shared || source.sceneId === id);
   const sceneSources = sourcesForScene(sceneId);
@@ -2464,14 +2894,38 @@ export default function Studio() {
   const streamAudioStatus = !mixerChannels.length ? 'No inputs' : !connectedMixerChannels.length ? 'Disconnected' : !audibleMixerChannels.length ? 'Muted' : streamAudioPeak > 0.002 ? 'Signal' : 'No signal';
   const streamAudioPercent = streamAudioPeak > 0 ? Math.max(0, Math.min(100, ((20 * Math.log10(streamAudioPeak) + 60) / 60) * 100)) : 0;
 
-  // In Preview Mode, clicking a slide only selects it; Direct Mode also sends it on air.
+  const refreshSceneFromSavedPresentations = (sceneId: number, readLatest = false) => {
+    if (readLatest) rememberSavedPresentations(readSavedPresentations());
+    const scene = scenes.find((item) => item.id === sceneId);
+    const presentation = scene?.presentationId
+      ? savedPresentationsRef.current.find((item) => item.id === scene.presentationId)
+      : undefined;
+    if (!scene || !presentation) return scene;
+
+    const signature = savedPresentationSignaturesRef.current.get(presentation.id) ?? JSON.stringify(presentation);
+    savedPresentationSignaturesRef.current.set(presentation.id, signature);
+    if (syncedScenePresentationSignaturesRef.current.get(scene.id) === signature) return scene;
+
+    const refreshed = hydrateSceneMedia(syncPresentationSlides(scene, presentation), mediaUrlsRef.current);
+    syncedScenePresentationSignaturesRef.current.set(scene.id, signature);
+    setScenes((current) => current.map((item) => item.id === scene.id ? refreshed : item));
+    return refreshed;
+  };
+
+  // Scene selections always stage. Slide selections can quick-show only inside the live scene.
+  const prepareSlide = (target: Ref) => {
+    setSelected(target);
+    setPreview(target);
+    if (quickShowLiveSlides && target.sceneId === onAir.sceneId) setOnAir(target);
+  };
+
   const selectSlide = (i: number) => {
     const target = { sceneId, slideIdx: i };
-    setSelected(target);
-    if (!previewMode) {
-      setPreview(target);
-      setOnAir(target);
-    }
+    const latestScene = refreshSceneFromSavedPresentations(target.sceneId);
+    const readyTarget = latestScene
+      ? { sceneId: target.sceneId, slideIdx: Math.min(target.slideIdx, Math.max(0, latestScene.slides.length - 1)) }
+      : target;
+    prepareSlide(readyTarget);
   };
 
   const selectScene = (id: number) => {
@@ -2479,7 +2933,7 @@ export default function Studio() {
     setSceneId(id);
     setSelected(target);
     setPreview(target);
-    if (!previewMode) setOnAir(target);
+    refreshSceneFromSavedPresentations(id);
     setAddSourceOpen(false);
   };
 
@@ -2504,10 +2958,12 @@ export default function Studio() {
     const bg = slides[0]?.bg ?? SONG_SCENE_BG;
     const scene: Scene = { bg, id, name: song.number ? `${song.number}. ${song.title}` : song.title, desc: `Song · ${slides.length} ${slides.length === 1 ? 'part' : 'parts'}`, slides, songId: song.id };
     if (slideshow) {
+      persistScenesImmediately([...slideshowScenes, scene], STUDIO_SLIDESHOW_SCENES_KEY);
       setSlideshowScenes((current) => [...current, scene]);
       return;
     }
     // Keep the operator on the current scene. Adding a song only makes it available in Scenes.
+    persistScenesImmediately([...scenes, scene], STUDIO_SCENES_KEY);
     setScenes((current) => [...current, scene]);
   };
 
@@ -2517,10 +2973,11 @@ export default function Studio() {
     setPendingScriptureDesign({ reference, verses: selectedVerses?.length ? selectedVerses : [{ reference, text }] });
   };
 
-  const addScriptureScene = async (reference: string, verses: SelectedScriptureVerse[], style: SongStyle, presentNow = false) => {
+  const addScriptureScene = async (reference: string, verses: SelectedScriptureVerse[], style: SongStyle, presentNow = false, editSceneId?: number) => {
     const slideshow = studioOutputTab === 'slideshow';
     const list = slideshow ? slideshowScenes : scenes;
-    const id = Math.max(0, ...list.map((scene) => scene.id), onAir.sceneId, preview.sceneId, selected.sceneId, offlineSlide.sceneId) + 1;
+    const existingScene = editSceneId === undefined ? undefined : list.find((scene) => scene.id === editSceneId);
+    const id = existingScene?.id ?? Math.max(0, ...list.map((scene) => scene.id), onAir.sceneId, preview.sceneId, selected.sceneId, offlineSlide.sceneId) + 1;
     let urls = mediaUrlsRef.current;
     if (style.backgroundAssetId && !urls[style.backgroundAssetId]) {
       try { urls = await refreshStudioMediaUrls(); } catch { /* The asset ID remains saved and will hydrate on reload. */ }
@@ -2548,17 +3005,31 @@ export default function Studio() {
       };
     });
     const bg = slides[0]?.bg ?? style.background;
-    const scene: Scene = { id, name: reference, desc: `Scripture · ${slides.length} verses`, bg, slides };
+    const scene: Scene = { ...existingScene, id, name: reference, desc: `Scripture · ${slides.length} verses`, bg, slides, scriptureReference: reference, scriptureVerses: verses, scriptureStyle: style };
     const target = { sceneId: id, slideIdx: 0 };
+    if (existingScene) {
+      const next = list.map((item) => item.id === id ? scene : item);
+      if (slideshow) {
+        persistScenesImmediately(next, STUDIO_SLIDESHOW_SCENES_KEY);
+        setSlideshowScenes(next);
+      } else {
+        persistScenesImmediately(next, STUDIO_SCENES_KEY);
+        setScenes(next);
+      }
+      setEditingScriptureSceneId(null);
+      return;
+    }
     if (slideshow) {
+      persistScenesImmediately([...slideshowScenes, scene], STUDIO_SLIDESHOW_SCENES_KEY);
       setSlideshowScenes((current) => [...current, scene]);
       setOfflineSlide(target);
     } else {
+      persistScenesImmediately([...scenes, scene], STUDIO_SCENES_KEY);
       setScenes((current) => [...current, scene]);
       setSceneId(id);
       setSelected(target);
       setPreview(target);
-      if (presentNow || !previewMode) setOnAir(target);
+      if (presentNow) setOnAir(target);
     }
     setPendingScriptureDesign(null);
   };
@@ -2567,6 +3038,32 @@ export default function Studio() {
     setScripturePickerOpen(false);
     const verses = selectedVerses?.length ? selectedVerses : [{ reference, text }];
     void addScriptureScene(reference, verses, { ...loadSongSlideSettings(), titleSlide: false }, true);
+  };
+
+  const openScripturePicker = () => {
+    preloadBible();
+    setScripturePickerOpen(true);
+  };
+
+  const openSelectedSceneDesign = async () => {
+    const target = studioOutputTab === 'stream'
+      ? scenes.find((item) => item.id === selected.sceneId)
+      : slideshowScenes.find((item) => item.id === offlineSlide.sceneId);
+    if (target && scriptureDesignForScene(target)) {
+      setEditingScriptureSceneId(target.id);
+      return;
+    }
+    if (target?.songId) {
+      try {
+        const library = await loadLibrary();
+        const song = library.songs.find((item) => item.id === target.songId);
+        if (!song) { setSourceError('This song is no longer in your songbooks. Open Songbooks to restore or re-add it.'); return; }
+        setStudioSongBooks(library.books);
+        setEditingStudioSong(song);
+      } catch {
+        setSourceError('Could not open this song for design. Try again.');
+      }
+    }
   };
 
 
@@ -2639,38 +3136,20 @@ export default function Studio() {
     };
   }, []);
 
-  const showSelectedInPreview = () => setPreview(selected);
-
   // Fix typos in the slide that is in Preview, before it goes on air.
   useEffect(() => {
     if (studioOutputTab !== 'stream') return;
     slideCardRefs.current.get(`${selected.sceneId}:${selected.slideIdx}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [selected.sceneId, selected.slideIdx, studioOutputTab]);
 
-  // Keyboard: ← → ↑ ↓ and PageUp / PageDown (what most presentation clickers send) change slides.
-  // Fast mode (Preview Mode off): the slide goes on air immediately. Otherwise it is only selected.
+  // Keyboard navigation prepares the next slide. Enter sends it to the audience.
   const step = (dir: 1 | -1) => {
     const count = scenes.find((x) => x.id === selected.sceneId)?.slides.length ?? 0;
     if (count < 1) return;
     const i = (selected.slideIdx + dir + count) % count;
     if (i === selected.slideIdx) return;
     const target = { sceneId: selected.sceneId, slideIdx: i };
-    setSelected(target);
-    if (!previewMode) {
-      setPreview(target);
-      setOnAir(target);
-    }
-  };
-
-  const stepOnAir = (dir: 1 | -1) => {
-    const count = scenes.find((item) => item.id === onAir.sceneId)?.slides.length ?? 0;
-    if (count < 1) return;
-    const slideIdx = (onAir.slideIdx + dir + count) % count;
-    if (slideIdx === onAir.slideIdx) return;
-    const target = { sceneId: onAir.sceneId, slideIdx };
-    setSelected(target);
-    setPreview(target);
-    setOnAir(target);
+    prepareSlide(target);
   };
 
   const stepPreview = (dir: 1 | -1) => {
@@ -2679,8 +3158,7 @@ export default function Studio() {
     const slideIdx = (preview.slideIdx + dir + count) % count;
     if (slideIdx === preview.slideIdx) return;
     const target = { sceneId: preview.sceneId, slideIdx };
-    setSelected(target);
-    setPreview(target);
+    prepareSlide(target);
   };
 
   useEffect(() => {
@@ -2689,7 +3167,22 @@ export default function Studio() {
       const target = e.target as HTMLElement;
       if (target.isContentEditable || target.closest('[contenteditable="true"], [contenteditable="plaintext-only"]')
         || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return; // Keep typing and slider keys inside their controls.
-      if (studioOutputTab === 'stream' && previewMode && e.key === 'Enter' && tag !== 'BUTTON' && tag !== 'A') {
+      if ((e.ctrlKey || e.metaKey) && e.altKey && e.key.toLocaleLowerCase() === 'b') {
+        e.preventDefault();
+        openScripturePicker();
+        return;
+      }
+      if (e.key === 'Escape' && slidesExpanded) {
+        e.preventDefault();
+        setSlidesExpanded(false);
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLocaleLowerCase() === 'e') {
+        e.preventDefault();
+        setSlidesExpanded((expanded) => !expanded);
+        return;
+      }
+      if (studioOutputTab === 'stream' && e.key === 'Enter' && tag !== 'BUTTON' && tag !== 'A') {
         e.preventDefault();
         setOnAir(preview);
         return;
@@ -2697,8 +3190,7 @@ export default function Studio() {
       if (studioOutputTab === 'stream' && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
         e.preventDefault();
         const direction = e.key === 'ArrowDown' ? 1 : -1;
-        if (previewMode) stepPreview(direction);
-        else stepOnAir(direction);
+        stepPreview(direction);
         return;
       }
       const forward = ['ArrowRight', 'ArrowDown', 'PageDown'].includes(e.key);
@@ -2713,7 +3205,7 @@ export default function Studio() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [studioOutputTab, selected, onAir, scenes, previewMode, preview, sceneId, offlineSlide]);
+  }, [studioOutputTab, selected, scenes, preview, onAir, quickShowLiveSlides, sceneId, offlineSlide, slidesExpanded]);
 
   const toggleSource = (id: number) => {
     const source = sources.find((item) => item.id === id);
@@ -2811,19 +3303,11 @@ export default function Studio() {
   };
 
   const takePreviewSetupOnAir = () => {
-    // Read the saved deck again at the moment it is sent to Program. This covers
-    // route changes and missed cross-page events, so the live scene always uses
-    // the latest saved slide design and media references.
-    const latestPresentations = new Map(readSavedPresentations().map((presentation) => [presentation.id, presentation]));
-    const latestScenes = scenes.map((item) => {
-      const presentation = item.presentationId ? latestPresentations.get(item.presentationId) : undefined;
-      return hydrateSceneMedia(presentation ? syncPresentationSlides(item, presentation) : item, mediaUrlsRef.current);
-    });
-    const targetScene = latestScenes.find((item) => item.id === previewSetupRef.sceneId);
+    // Read the selected saved deck at take time to cover route changes and missed events.
+    const targetScene = refreshSceneFromSavedPresentations(previewSetupRef.sceneId, true);
     const targetRef = targetScene
       ? { sceneId: targetScene.id, slideIdx: Math.min(previewSetupRef.slideIdx, Math.max(0, targetScene.slides.length - 1)) }
       : previewSetupRef;
-    setScenes(latestScenes);
     setSources((current) => current.map((source) => {
       const linkedCamera = source.mobileCamSourceId === undefined ? undefined : current.find((item) => item.id === source.mobileCamSourceId);
       const linkedCameraVisible = linkedCamera ? (previewSetupVisibility[linkedCamera.id] ?? linkedCamera.visible) : undefined;
@@ -3703,23 +4187,27 @@ export default function Studio() {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
-      <div role="tablist" aria-label="Studio output" className="flex shrink-0 items-end gap-1 border-b border-white/10">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={studioOutputTab === 'stream'}
-          onClick={() => setStudioOutputTab('stream')}
-          className={`border-b-2 px-3 py-2 text-xs font-semibold transition ${studioOutputTab === 'stream' ? 'border-brand text-white' : 'border-transparent text-warm-white/50 hover:text-white'}`}
-        >Streaming</button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={studioOutputTab === 'slideshow'}
-          disabled={live}
-          onClick={() => { setStudioOutputTab('slideshow'); setSelectedProgramSource(null); }}
-          title={live ? 'End the stream before switching to offline slideshow' : undefined}
-          className={`border-b-2 px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${studioOutputTab === 'slideshow' ? 'border-brand text-white' : 'border-transparent text-warm-white/50 hover:text-white'}`}
-        >Slideshow</button>
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/10">
+        <UnderlineTabs
+          label="Studio output"
+          value={studioOutputTab}
+          options={[
+            { value: 'stream', label: 'Streaming' },
+            { value: 'slideshow', label: 'Slideshow', disabled: live, title: live ? 'End the stream before switching to offline slideshow' : undefined },
+          ]}
+          onChange={(tab) => {
+            setStudioOutputTab(tab);
+            if (tab === 'slideshow') setSelectedProgramSource(null);
+          }}
+        />
+        <div className="mb-1 flex shrink-0 items-center gap-1.5">
+          <button type="button" onPointerEnter={() => preloadBible()} onFocus={() => preloadBible()} onClick={openScripturePicker} title="Open Scripture picker · Ctrl+Alt+B" aria-label="Open Scripture picker" className="flex shrink-0 items-center gap-1.5 rounded-md border border-white/10 px-2.5 py-1.5 text-xs font-semibold text-warm-white/75 transition hover:border-brand/40 hover:bg-brand/10 hover:text-brand">
+            <BookOpen size={14} /> <span>Scripture</span>
+          </button>
+          <button type="button" onClick={() => { void openSelectedSceneDesign(); }} disabled={!canEditSelectedDesign} title={canEditSelectedDesign ? selectedDesignScene?.songId ? 'Edit this song’s design' : 'Edit this Scripture passage’s design' : 'Select a song or Scripture scene to edit its design'} className="flex shrink-0 items-center gap-1.5 rounded-md border border-white/10 px-2.5 py-1.5 text-xs font-semibold text-warm-white/75 transition hover:border-brand/40 hover:bg-brand/10 hover:text-brand disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-white/10 disabled:hover:bg-transparent disabled:hover:text-warm-white/75">
+            <Pencil size={13} /> <span>Design</span>
+          </button>
+        </div>
       </div>
       {studioOutputTab === 'stream' ? (
       <>
@@ -3798,12 +4286,12 @@ export default function Studio() {
         <Panel
           title="Program"
           className="min-w-0 overflow-hidden"
-          action={<span className="rounded bg-sky-500/15 px-2 py-1 text-[10px] font-bold text-sky-200">STAGE &amp; TAKE</span>}
+          action={<span className="rounded bg-sky-500/15 px-2 py-1 text-[10px] font-bold text-sky-200">NEXT UP</span>}
         >
           {outputDisplayBar('stream')}
           {displayError && studioOutputTab === 'stream' && <p role="alert" className="mb-2 shrink-0 text-[11px] text-amber-200">{displayError}</p>}
           <div data-program-control className="mb-2 flex shrink-0 items-center justify-between gap-2">
-            <p className="min-w-0 text-[10px] text-warm-white/50">Choose and arrange sources for the on-air output.</p>
+            <p className="min-w-0 text-[10px] text-warm-white/50">Prepare what the audience will see next.</p>
             <div className="flex shrink-0 items-center gap-1">
               {orientationControlCamera && <select
                 aria-label={`${orientationControlCamera.name} rotation`}
@@ -3854,17 +4342,20 @@ export default function Studio() {
               </div>;
             })}
           </div>
-          <div className="mt-1.5 flex shrink-0 items-center gap-1.5 rounded-md border border-white/10 bg-black/25 p-1.5">
-            <div className="flex shrink-0 items-center gap-1.5 px-1">
-              <span className="text-[9px] font-semibold text-warm-white/70">Preview</span>
-              <button type="button" role="switch" aria-label="Preview Mode" aria-checked={previewMode} onClick={() => setPreviewMode(!previewMode)} title={previewMode ? 'Preview Mode is on: stage slides before putting them on air' : 'Preview Mode is off: selecting a slide sends it on air'} className={`h-5 w-9 rounded-full p-0.5 transition-colors ${previewMode ? 'bg-sky-500' : 'bg-white/15'}`}>
-                <span className={`block h-4 w-4 rounded-full bg-white transition-transform ${previewMode ? 'translate-x-4' : ''}`} />
+          <div className="mt-1.5 flex shrink-0 flex-col gap-1.5 rounded-md border border-white/10 bg-black/25 p-1.5">
+            <div className="flex items-center justify-between gap-2 px-1">
+              <div className="min-w-0">
+                <p className="text-[10px] font-semibold text-warm-white/80">Quick show slides</p>
+                <p className="text-[9px] leading-snug text-warm-white/45">Only affects slides in the live scene. Other scenes wait.</p>
+              </div>
+              <button type="button" role="switch" aria-label="Quick show slides in the live scene" aria-checked={quickShowLiveSlides} onClick={() => setQuickShowLiveSlides((enabled) => !enabled)} title="When on, choosing a slide in the live scene shows it immediately. Other scenes still need Show to audience." className={`h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors ${quickShowLiveSlides ? 'bg-sky-500' : 'bg-white/15'}`}>
+                <span className={`block h-4 w-4 rounded-full bg-white transition-transform ${quickShowLiveSlides ? 'translate-x-4' : ''}`} />
               </button>
             </div>
-            {previewMode ? <>
-              <button type="button" disabled={same(selected, preview)} onClick={showSelectedInPreview} title="Stage the selected slide for review" className="flex min-h-7 min-w-0 flex-1 items-center justify-center gap-1 rounded border border-sky-300/30 bg-sky-400/10 px-1.5 py-1 text-[9px] font-bold text-sky-100 transition hover:bg-sky-400/20 disabled:cursor-default disabled:opacity-45"><Eye size={11} />Show Preview</button>
-              <button type="button" onClick={takePreviewSetupOnAir} title="Send the staged Program output to the audience" className="flex min-h-7 min-w-0 flex-1 items-center justify-center gap-1 rounded bg-brand px-1.5 py-1 text-[9px] font-bold text-white transition hover:brightness-110"><ArrowRight size={11} />Put on Air</button>
-            </> : <button type="button" onClick={takePreviewSetupOnAir} title="Send the selected slide and current Program layout directly to the audience" className="flex min-h-7 min-w-0 flex-1 items-center justify-center gap-1 rounded bg-brand px-1.5 py-1 text-[9px] font-bold text-white transition hover:brightness-110"><ArrowRight size={11} />Show on Air</button>}
+            <div className="flex items-center gap-2 rounded bg-white/[0.03] px-1.5 py-1">
+              <span className={`flex min-w-0 flex-1 items-center gap-1.5 text-[10px] font-semibold ${same(preview, onAir) ? 'text-red-200' : 'text-sky-100'}`}><span className={`h-1.5 w-1.5 shrink-0 rounded-full ${same(preview, onAir) ? 'bg-red-400' : 'bg-sky-400'}`} />{same(preview, onAir) ? 'Live now' : 'Ready next'}</span>
+              <button type="button" onClick={takePreviewSetupOnAir} title="Show the prepared scene and slide to the audience" className="flex min-h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded bg-brand px-2 py-1.5 text-xs font-bold text-white transition hover:brightness-110"><ArrowRight size={14} />Show to audience</button>
+            </div>
           </div>
           {selectedProgramOverlay && selectedProgramLayout && <div data-program-layout-controls className="mt-1.5 flex shrink-0 items-end gap-1 rounded-lg border border-white/10 bg-black/20 p-1.5">
             <div className="mr-auto min-w-0 pb-1"><p className="truncate text-[9px] font-semibold text-warm-white">{selectedProgramOverlay.name}</p><p className="text-[8px] text-warm-white/45">Position and size</p></div>
@@ -3872,7 +4363,7 @@ export default function Studio() {
           </div>}
         </Panel>
 
-        <Panel title="Slides" className="min-w-0">
+        <Panel title="Slides" className="min-w-0" action={<button type="button" onClick={() => setSlidesExpanded(true)} aria-label="Expand slides" title="Expand slides · Ctrl+Shift+E" className="rounded-md p-1.5 text-warm-white/60 transition hover:bg-white/10 hover:text-white"><Maximize2 size={15} /></button>}>
           <div className="mb-2 flex shrink-0 items-baseline justify-between gap-2">
             <h3 className="truncate text-xs font-semibold text-warm-white/80">{scene.name}</h3>
             <span className="shrink-0 text-[10px] text-warm-white/50">{scene.slides.length}</span>
@@ -3885,18 +4376,18 @@ export default function Studio() {
               const isSelected = same(selected, ref);
               const inPreview = same(preview, ref);
               const isOnAir = same(onAir, ref);
-              return <div key={i} ref={(element) => { if (element) slideCardRefs.current.set(cardKey, element); else slideCardRefs.current.delete(cardKey); }} className="min-w-0 shrink-0">
+              return <div key={i} ref={(element) => { if (element) slideCardRefs.current.set(cardKey, element); else slideCardRefs.current.delete(cardKey); }} className="min-w-0 shrink-0" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 200px' }}>
                 <button
                   onClick={() => selectSlide(i)}
-                  title={previewMode ? 'Click to select, then use Program to stage it or put Preview on air' : 'Click to select; use Program to send it on air'}
+                  title="Select to prepare. Quick show slides can show slides immediately in the scene that is already live."
                   aria-pressed={isSelected}
                   className={`relative block aspect-video w-full overflow-hidden rounded-lg border-2 transition ${isSelected ? 'border-brand ring-2 ring-brand/40' : 'border-white/10 hover:border-white/40'}`}
                 >
                   <StudioSlideThumbnail bg={scene.bg} slide={sl} mediaUrls={mediaUrls} scale={8} minRem={0.5} />
                   <span className="absolute bottom-1 left-1 rounded bg-black/65 px-1 text-[10px] font-semibold text-white">{i + 1}</span>
                   <div className="absolute right-1 top-1 flex flex-col items-end gap-0.5">
-                    {isOnAir && <span className="rounded bg-red-600 px-1 text-[9px] font-bold text-white">On air</span>}
-                    {inPreview && <span className="rounded bg-sky-600 px-1 text-[9px] font-bold text-white">Preview</span>}
+                    {isOnAir && <span className="rounded bg-red-600 px-1.5 py-0.5 text-[9px] font-bold text-white">Live now</span>}
+                    {inPreview && !isOnAir && <span className="rounded bg-sky-600 px-1.5 py-0.5 text-[9px] font-bold text-white">Ready next</span>}
                   </div>
                 </button>
                 <p className="mt-1 truncate px-0.5 text-[11px] font-medium text-warm-white/80" title={sl.title?.trim() || `Slide ${i + 1}`}>{sl.title?.trim() || `Slide ${i + 1}`}</p>
@@ -3913,7 +4404,6 @@ export default function Studio() {
             sidebarPanel === 'scenes' ? (
               <div className="flex items-center gap-1">
                 <button type="button" onClick={() => setClearScenesTab('stream')} disabled={!scenes.length} title="Remove all scenes" className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-semibold text-red-300/80 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 size={12} />Clear all</button>
-                <button type="button" aria-label="Add scripture scene" title="Add a Scripture scene" onPointerEnter={() => preloadBible()} onFocus={() => preloadBible()} onClick={() => setScripturePickerOpen(true)} className="rounded p-1 text-warm-white/70 hover:bg-white/5 hover:text-brand"><BookOpen size={17} /></button>
                 <button aria-label="Add scene" onClick={beginAddScene} className="rounded p-1 text-warm-white/70 hover:bg-white/5 hover:text-brand"><Plus size={18} /></button>
               </div>
             ) : musicView === 'songs' ? null : (
@@ -3922,10 +4412,13 @@ export default function Studio() {
           }
         >
           <input ref={musicFileRef} type="file" accept="audio/*" className="hidden" onChange={(event) => { void importMusicFile(event.currentTarget.files?.[0]); event.currentTarget.value = ''; }} />
-          <div role="tablist" aria-label="Studio sidebar panels" className="mb-2 flex shrink-0 gap-1 rounded-lg bg-black/20 p-1">
-            <button type="button" role="tab" aria-selected={sidebarPanel === 'scenes'} onClick={() => setSidebarPanel('scenes')} className={`flex-1 rounded-md px-2 py-1 text-xs font-semibold ${sidebarPanel === 'scenes' ? 'bg-white/10 text-white' : 'text-warm-white/55 hover:text-white'}`}>Scenes</button>
-            <button type="button" role="tab" aria-selected={sidebarPanel === 'music'} onClick={() => setSidebarPanel('music')} className={`flex-1 rounded-md px-2 py-1 text-xs font-semibold ${sidebarPanel === 'music' ? 'bg-white/10 text-white' : 'text-warm-white/55 hover:text-white'}`}>Music</button>
-          </div>
+          <SegmentedTabs
+            label="Studio sidebar panels"
+            value={sidebarPanel}
+            options={[{ value: 'scenes', label: 'Scenes' }, { value: 'music', label: 'Music' }]}
+            onChange={setSidebarPanel}
+            className="mb-2"
+          />
           {sidebarPanel === 'scenes' ? <>
           <ul className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto">
             {scenes.length === 0 && <li className="rounded-lg border border-dashed border-white/10 p-3 text-xs leading-relaxed text-warm-white/45">No scenes yet. Add one to bring a saved presentation into Studio.</li>}
@@ -3948,7 +4441,10 @@ export default function Studio() {
                     <p className="truncate text-xs text-warm-white/50">{s.desc}</p>
                   </div>
                   {onAir.sceneId === s.id && (
-                    <span aria-label="On air" className="h-2 w-2 shrink-0 rounded-full bg-red-500" />
+                    <span aria-label="Live now" title="Live now" className="h-2 w-2 shrink-0 rounded-full bg-red-500" />
+                  )}
+                  {sceneId === s.id && onAir.sceneId !== s.id && (
+                    <span aria-label="Ready next" className="shrink-0 rounded bg-sky-600 px-1.5 py-0.5 text-[9px] font-bold text-white">NEXT</span>
                   )}
                 </button>
                 <button
@@ -3964,10 +4460,14 @@ export default function Studio() {
           </ul>
           <button onClick={beginAddScene} className="mt-2 flex w-full shrink-0 items-center justify-center gap-2 rounded-lg border border-white/10 py-1.5 text-sm text-warm-white hover:bg-white/5"><Plus size={16} />Add Scene</button>
           </> : <>
-          <div role="tablist" aria-label="Music" className="mb-2 flex shrink-0 gap-3 border-b border-white/10 px-1">
-            <button type="button" role="tab" aria-selected={musicView === 'songs'} onClick={() => setMusicView('songs')} className={`-mb-px border-b-2 pb-1.5 text-[11px] font-semibold ${musicView === 'songs' ? 'border-brand text-white' : 'border-transparent text-warm-white/50 hover:text-white'}`}>Songbooks</button>
-            <button type="button" role="tab" aria-selected={musicView === 'tracks'} onClick={() => setMusicView('tracks')} className={`-mb-px border-b-2 pb-1.5 text-[11px] font-semibold ${musicView === 'tracks' ? 'border-brand text-white' : 'border-transparent text-warm-white/50 hover:text-white'}`}>Audio tracks</button>
-          </div>
+          <UnderlineTabs
+            label="Music"
+            value={musicView}
+            options={[{ value: 'songs', label: 'Songbooks' }, { value: 'tracks', label: 'Audio tracks' }]}
+            onChange={setMusicView}
+            className="mb-2 gap-3 px-1"
+            buttonClassName="-mb-px px-0 pb-1.5 pt-0 text-[11px]"
+          />
           {musicView === 'songs' ? (() => {
             const liveScene = scenes.find((item) => item.id === onAir.sceneId);
             const liveSong = liveScene?.songId ? { id: liveScene.songId, index: onAir.slideIdx } : null;
@@ -4224,7 +4724,6 @@ export default function Studio() {
                   <h3 className="text-sm font-semibold text-white">Scenes</h3>
                   <div className="flex items-center gap-1">
                     <button type="button" onClick={() => setClearScenesTab('slideshow')} disabled={!slideshowScenes.length} title="Remove all scenes" className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-semibold text-red-300/80 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 size={12} />Clear all</button>
-                    <button type="button" aria-label="Add scripture scene" title="Add a Scripture scene" onPointerEnter={() => preloadBible()} onFocus={() => preloadBible()} onClick={() => setScripturePickerOpen(true)} className="rounded p-1 text-warm-white/60 hover:bg-white/10 hover:text-white"><BookOpen size={14} /></button>
                     <button type="button" aria-label="Add scene" title="Add scene" onClick={beginAddScene} className="rounded p-1 text-warm-white/60 hover:bg-white/10 hover:text-white"><Plus size={15} /></button>
                   </div>
                 </div>
@@ -4250,7 +4749,7 @@ export default function Studio() {
                 <button type="button" onClick={beginAddScene} className="mt-2 flex w-full shrink-0 items-center justify-center gap-1.5 rounded-lg border border-white/10 py-1.5 text-xs text-warm-white hover:bg-white/5"><Plus size={14} />Add Scene</button>
             </div>
             <div className="order-2 flex min-h-0 flex-col rounded-xl border border-white/10 bg-panel p-3">
-                <h3 className="mb-2 shrink-0 text-sm font-semibold text-white">Slides <span className="font-normal text-warm-white/45">· {offlineScene.name}</span></h3>
+                <div className="mb-2 flex shrink-0 items-center justify-between gap-2"><h3 className="min-w-0 truncate text-sm font-semibold text-white">Slides <span className="font-normal text-warm-white/45">· {offlineScene.name}</span></h3><button type="button" onClick={() => setSlidesExpanded(true)} aria-label="Expand slides" title="Expand slides · Ctrl+Shift+E" className="rounded-md p-1.5 text-warm-white/60 transition hover:bg-white/10 hover:text-white"><Maximize2 size={15} /></button></div>
                 <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain pr-1">
                   {offlineScene.slides.map((slide, index) => (
                     <button key={`${offlineScene.id}-${index}`} type="button" onClick={() => setOfflineSlide({ sceneId: offlineScene.id, slideIdx: index })} aria-pressed={offlineSlide.slideIdx === index} className={`flex items-center gap-2 rounded-lg border p-2 text-left transition ${offlineSlide.slideIdx === index ? 'border-brand bg-brand/10' : 'border-white/10 hover:border-white/25'}`}>
@@ -4274,10 +4773,14 @@ export default function Studio() {
               </div>
               <button aria-label="Close" onClick={() => setAddSceneOpen(false)} className="rounded-lg p-1.5 text-warm-white/55 hover:bg-white/10 hover:text-white"><X size={17} /></button>
             </div>
-            <div role="tablist" aria-label="Scene type" className="mt-4 flex gap-1 rounded-lg bg-black/25 p-1">
-              <button type="button" role="tab" aria-selected={addSceneKind === 'presentation'} onClick={() => setAddSceneKind('presentation')} className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-semibold ${addSceneKind === 'presentation' ? 'bg-brand text-navy' : 'text-warm-white/65 hover:bg-white/10 hover:text-white'}`}><Image size={14} /> Presentation</button>
-              <button type="button" role="tab" aria-selected={addSceneKind === 'song'} onClick={() => setAddSceneKind('song')} className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-semibold ${addSceneKind === 'song' ? 'bg-brand text-navy' : 'text-warm-white/65 hover:bg-white/10 hover:text-white'}`}><Music2 size={14} /> Song</button>
-            </div>
+            <SegmentedTabs
+              label="Scene type"
+              value={addSceneKind}
+              options={[{ value: 'presentation', label: 'Presentation', icon: <Image size={14} /> }, { value: 'song', label: 'Song', icon: <Music2 size={14} /> }]}
+              onChange={setAddSceneKind}
+              className="mt-4 bg-black/25"
+              buttonClassName="flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm"
+            />
             {addSceneKind === 'song' ? (() => {
               const songResults = (addSceneSongQuery.trim() ? searchSongs(addSceneSongs, addSceneSongQuery) : addSceneSongs).slice(0, 200);
               const chosen = songResults.find((song) => song.id === selectedSongId) ?? songResults[0];
@@ -4449,6 +4952,8 @@ export default function Studio() {
             <div className="mt-5 rounded-xl border border-white/10 p-4">
               <h3 className="text-sm font-semibold text-warm-white">Keyboard shortcuts</h3>
               <dl className="mt-3 flex flex-col gap-2 text-sm">
+                <div className="flex justify-between text-warm-white/65"><dt>Open Scripture picker</dt><dd className="text-warm-white">Ctrl + Alt + B</dd></div>
+                <div className="flex justify-between text-warm-white/65"><dt>Expand slide navigator</dt><dd className="text-warm-white">Ctrl + Shift + E</dd></div>
                 <div className="flex justify-between text-warm-white/65"><dt>Next slide</dt><dd className="text-warm-white">→ / ↓ / Page Down</dd></div>
                 <div className="flex justify-between text-warm-white/65"><dt>Previous slide</dt><dd className="text-warm-white">← / ↑ / Page Up</dd></div>
               </dl>
@@ -4572,11 +5077,50 @@ export default function Studio() {
         onPresent={presentScriptureNow}
       />
       {pendingScriptureDesign && <ScriptureDesignModal
+        key="new-scripture-design"
         reference={pendingScriptureDesign.reference}
         verses={pendingScriptureDesign.verses}
         onClose={() => { setPendingScriptureDesign(null); setScripturePickerOpen(true); }}
         onAdd={(style, verses) => { void addScriptureScene(pendingScriptureDesign.reference, verses, style); }}
       />}
+      {editingScriptureScene && editingScriptureData && <ScriptureDesignModal
+        key={`edit-scripture-${editingScriptureScene.id}`}
+        reference={editingScriptureData.reference}
+        verses={editingScriptureData.verses}
+        initialStyle={editingScriptureData.style}
+        editing
+        onClose={() => setEditingScriptureSceneId(null)}
+        onAdd={(style, verses) => { void addScriptureScene(editingScriptureData.reference, verses, style, false, editingScriptureScene.id); }}
+      />}
+      <SongEditorModal
+        open={editingStudioSong !== null}
+        song={editingStudioSong}
+        books={studioSongBooks}
+        live={!!editingStudioSong && live && scenes.find((item) => item.songId === editingStudioSong.id)?.id === onAir.sceneId}
+        initialTab="lyrics"
+        onClose={() => setEditingStudioSong(null)}
+        onSave={async (song) => { await saveSong(song); setEditingStudioSong(null); }}
+      />
+      {slidesExpanded && (() => {
+        const slidesScene = studioOutputTab === 'stream' ? scene : offlineScene;
+        const activeIndex = studioOutputTab === 'stream' ? selected.slideIdx : offlineSlide.slideIdx;
+        return <ExpandedSlidesModal
+          title={slidesScene.name}
+          slides={slidesScene.slides.map((slide, index) => ({
+            key: `${slidesScene.id}-${slide.presentationSlideId ?? index}`,
+            title: slide.title?.trim() || `Slide ${index + 1}`,
+            thumbnail: <div className="absolute inset-0" style={{ containerType: 'inline-size' }}><StudioSlideThumbnail bg={slidesScene.bg} slide={slide} mediaUrls={mediaUrls} scale={8} minRem={0.5} /></div>,
+            active: index === activeIndex,
+            onAir: studioOutputTab === 'stream' && onAir.sceneId === slidesScene.id && index === onAir.slideIdx,
+            preview: studioOutputTab === 'stream' && preview.sceneId === slidesScene.id && index === preview.slideIdx,
+          }))}
+          onSelect={(index) => {
+            if (studioOutputTab === 'stream') selectSlide(index);
+            else setOfflineSlide({ sceneId: offlineScene.id, slideIdx: index });
+          }}
+          onClose={() => setSlidesExpanded(false)}
+        />;
+      })()}
     </div>
   );
 }
@@ -4585,6 +5129,8 @@ export default function Studio() {
 export function StudioDisplayOutput() {
   const [outputMode, setOutputMode] = useState<'stream' | 'slideshow'>(() => localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? 'stream' : 'slideshow');
   const [scenes, setScenes] = useState<Scene[]>(() => outputMode === 'stream' ? loadStudioScenes() : loadSlideshowScenes());
+  const scenesRef = useRef(scenes);
+  scenesRef.current = scenes;
   const [currentRef, setCurrentRef] = useState<Ref>(() => {
     try {
       const key = localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? STUDIO_STREAM_OUTPUT_REF_KEY : STUDIO_OUTPUT_REF_KEY;
@@ -4594,12 +5140,23 @@ export function StudioDisplayOutput() {
     const firstScene = (localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? loadStudioScenes() : loadSlideshowScenes())[0];
     return { sceneId: firstScene?.id ?? 0, slideIdx: 0 };
   });
-  const [assets, setAssets] = useState<Record<string, { type: 'image' | 'video'; url: string; thumbnailUrl?: string }>>({});
+  const [assets, setAssets] = useState<StudioMediaUrlMap>({});
 
   useEffect(() => {
     let active = true;
     const releases: Array<() => void> = [];
-    let currentAssets: Record<string, { type: 'image' | 'video'; url: string; thumbnailUrl?: string }> = {};
+    let currentAssets: StudioMediaUrlMap = {};
+    const scenesKeyForMode = (mode: 'stream' | 'slideshow') => mode === 'stream' ? STUDIO_SCENES_KEY : STUDIO_SLIDESHOW_SCENES_KEY;
+    const localScenesForMode = (mode: 'stream' | 'slideshow') => mode === 'stream' ? loadStudioScenes() : loadSlideshowScenes();
+    const refreshScenes = async (mode: 'stream' | 'slideshow') => {
+      const key = scenesKeyForMode(mode);
+      const fallback = localScenesForMode(mode);
+      setScenes(fallback);
+      try {
+        const latest = await readPreferredStudioScenes(key, fallback);
+        if (active && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === mode) setScenes(latest);
+      } catch { /* Keep the localStorage copy visible if the scene database is unavailable. */ }
+    };
     const refreshAssets = async () => {
       const result = await readStudioMediaUrlMap();
       if (!active) { result.release(); return; }
@@ -4613,7 +5170,7 @@ export function StudioDisplayOutput() {
       if (event.key === STUDIO_DISPLAY_MODE_KEY) {
         const mode = event.newValue === 'stream' ? 'stream' : 'slideshow';
         setOutputMode(mode);
-        setScenes(mode === 'stream' ? loadStudioScenes() : loadSlideshowScenes());
+        void refreshScenes(mode);
         void refreshAssets();
         const key = mode === 'stream' ? STUDIO_STREAM_OUTPUT_REF_KEY : STUDIO_OUTPUT_REF_KEY;
         try {
@@ -4622,11 +5179,11 @@ export function StudioDisplayOutput() {
         } catch { /* Keep the current output while a new mode initializes. */ }
       }
       if (event.key === getAccountStorageKey(STUDIO_SLIDESHOW_SCENES_KEY) && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) !== 'stream') {
-        setScenes(loadSlideshowScenes());
+        void refreshScenes('slideshow');
         void refreshAssets();
       }
       if (event.key === getAccountStorageKey(STUDIO_SCENES_KEY) && localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream') {
-        setScenes(loadStudioScenes());
+        void refreshScenes('stream');
         void refreshAssets();
       }
       const activeRefKey = localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? STUDIO_STREAM_OUTPUT_REF_KEY : STUDIO_OUTPUT_REF_KEY;
@@ -4637,7 +5194,16 @@ export function StudioDisplayOutput() {
         } catch { /* Ignore incomplete updates. */ }
       }
     };
+    const snapshotChannel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(STUDIO_SCENE_SNAPSHOT_CHANNEL);
+    if (snapshotChannel) snapshotChannel.onmessage = (event: MessageEvent<{ key?: string }>) => {
+      const mode = localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? 'stream' : 'slideshow';
+      if (event.data?.key === getAccountStorageKey(scenesKeyForMode(mode))) {
+        void refreshScenes(mode);
+        void refreshAssets();
+      }
+    };
     window.addEventListener('storage', onStorage);
+    void refreshScenes(localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? 'stream' : 'slideshow');
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
       if (target.isContentEditable || target.closest('[contenteditable="true"], [contenteditable="plaintext-only"]')
@@ -4653,7 +5219,7 @@ export function StudioDisplayOutput() {
       const mode = localStorage.getItem(STUDIO_DISPLAY_MODE_KEY) === 'stream' ? 'stream' : 'slideshow';
       const outputKey = mode === 'stream' ? STUDIO_STREAM_OUTPUT_REF_KEY : STUDIO_OUTPUT_REF_KEY;
       setCurrentRef((current) => {
-        const scene = (mode === 'stream' ? loadStudioScenes() : loadSlideshowScenes()).find((item) => item.id === current.sceneId);
+        const scene = scenesRef.current.find((item) => item.id === current.sceneId) ?? localScenesForMode(mode).find((item) => item.id === current.sceneId);
         const count = scene?.slides.length ?? 0;
         if (!count) return current;
         const next = { ...current, slideIdx: (current.slideIdx + direction + count) % count };
@@ -4666,25 +5232,28 @@ export function StudioDisplayOutput() {
       active = false;
       window.removeEventListener('storage', onStorage);
       window.removeEventListener('keydown', onKeyDown);
+      snapshotChannel?.close();
       releases.forEach((release) => release());
     };
   }, []);
 
+  useEffect(() => {
+    if (!scenes.length) return;
+    const currentScene = scenes.find((item) => item.id === currentRef.sceneId);
+    const scene = currentScene ?? scenes[0];
+    const slideIdx = currentScene
+      ? Math.min(Math.max(0, currentRef.slideIdx), Math.max(0, scene.slides.length - 1))
+      : 0;
+    if (scene.id === currentRef.sceneId && slideIdx === currentRef.slideIdx) return;
+    const next = { sceneId: scene.id, slideIdx };
+    setCurrentRef(next);
+    const outputKey = outputMode === 'stream' ? STUDIO_STREAM_OUTPUT_REF_KEY : STUDIO_OUTPUT_REF_KEY;
+    try { localStorage.setItem(outputKey, JSON.stringify(next)); } catch { /* Keep the restored first slide visible. */ }
+  }, [scenes, currentRef, outputMode]);
+
   const scene = scenes.find((item) => item.id === currentRef.sceneId) ?? scenes[0];
   const slide = scene?.slides[currentRef.slideIdx];
-  const asset = slide?.bgAssetId ? assets[slide.bgAssetId] : undefined;
-  const outputSlide = slide ? {
-    ...slide,
-    bgImage: asset?.type === 'image' ? asset.url : asset?.type === 'video' ? asset.thumbnailUrl : slide.bgImage,
-    bgVideo: asset?.type === 'video' ? asset.url : slide.bgVideo,
-    design: slide.design ? {
-      ...slide.design,
-      pictures: slide.design.pictures?.map((picture) => {
-        const pictureAsset = picture.assetId ? assets[picture.assetId] : undefined;
-        return pictureAsset ? { ...picture, src: pictureAsset.url, poster: pictureAsset.thumbnailUrl } : picture;
-      }),
-    } : undefined,
-  } : undefined;
+  const outputSlide = slide ? restoreImportedSlideForStudio(slide, assets) : undefined;
 
   return (
     <main className="fixed inset-0 overflow-hidden bg-black" style={{ containerType: 'inline-size' }} aria-label="Slideshow output">

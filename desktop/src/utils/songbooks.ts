@@ -720,18 +720,34 @@ export const songTextArea = (style: SongStyle) => style.area ?? SONG_TEXT_AREAS[
 export const songTextSize = (screens: SongScreen[], style: SongStyle) => {
   if (!style.autoFit) return style.fontSize;
   const lyrics = screens.filter((screen) => screen.kind === 'lyrics');
+  if (!lyrics.length) return style.fontSize;
   const area = songTextArea(style);
   const charWidth = (style.caps ? 0.68 : 0.56) * (style.bold ? 1 : 0.94);
   const width = 1280 * (area.w / 100) * 0.96;
   const height = 720 * (area.h / 100) * 0.95;
-  for (let size = style.fontSize; size > 24; size -= 2) {
-    const fits = lyrics.every((screen) => {
-      const rows = screen.text.split('\n').reduce((count, line) => count + Math.max(1, Math.ceil((line.length * charWidth * size) / width)), 0);
-      return rows * style.lineHeight * size <= height;
-    });
-    if (fits) return size;
+  // Cache line lengths once and binary-search the descending font-size candidates. The old
+  // step-by-step scan repeatedly split every verse for each candidate, which delayed opening
+  // the designer for imported songs with many slides or unusually large text settings.
+  const lineLengths = lyrics.map((screen) => screen.text.split('\n').map((line) => line.length));
+  const candidateCount = Math.ceil(Math.max(0, style.fontSize - 24) / 2);
+  const fits = (size: number) => lineLengths.every((lines) => {
+    let rows = 0;
+    for (const length of lines) {
+      rows += Math.max(1, Math.ceil((length * charWidth * size) / width));
+      if (rows * style.lineHeight * size > height) return false;
+    }
+    return rows * style.lineHeight * size <= height;
+  });
+  let low = 0;
+  let high = candidateCount - 1;
+  let best: number | undefined;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const size = style.fontSize - (middle * 2);
+    if (fits(size)) { best = size; high = middle - 1; }
+    else low = middle + 1;
   }
-  return 24;
+  return best ?? 24;
 };
 
 export type SongTextLayout = {
