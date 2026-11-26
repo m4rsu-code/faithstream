@@ -1017,15 +1017,14 @@ const createWindow = () => {
     show: false,
     backgroundColor: '#101923',
 
-    // Use your custom icon during development.
-    // The packaged app uses the icon configured in forge.config.mts.
+    // Use the FaithStream Studio icon in the window and Windows taskbar.
     icon: path.join(
       app.getAppPath(),
       'src',
       'assets',
       'icons',
       'win',
-      'camera-logo.ico',
+      'faithstream-studio.ico',
     ),
 
     // Use the app's own titlebar controls so preview can hide them completely.

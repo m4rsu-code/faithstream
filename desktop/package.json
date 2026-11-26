@@ -12,6 +12,11 @@
   },
   "main": ".vite/build/main.cjs",
   "scripts": {
+    "build:icon": "node scripts/build-desktop-icon.cjs",
+    "prestart": "npm run build:icon",
+    "prepackage": "npm run build:icon",
+    "premake": "npm run build:icon",
+    "prerelease": "npm run build:icon",
     "start": "electron-forge start",
     "package": "electron-forge package",
     "make": "electron-forge make",
