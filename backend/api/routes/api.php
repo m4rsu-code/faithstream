@@ -56,6 +56,10 @@ Route::middleware('auth:sanctum')->group(function () {
             Route::get('/license-payments', [LicensePaymentController::class, 'adminIndex']);
             Route::get('/license-payments/{payment}/proof', [LicensePaymentController::class, 'proof']);
             Route::patch('/license-payments/{payment}', [LicensePaymentController::class, 'decide']);
+            Route::get('/licenses', [LicensePaymentController::class, 'adminLicenses']);
+            Route::post('/licenses', [LicensePaymentController::class, 'grantAdminLicense']);
+            Route::patch('/licenses/{license}/revoke', [LicensePaymentController::class, 'revokeAdminLicense']);
+            Route::get('/license-actions', [LicensePaymentController::class, 'adminActions']);
         });
     });
 });

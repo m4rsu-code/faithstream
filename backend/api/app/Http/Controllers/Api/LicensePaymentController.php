@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Mail\LicensePaymentStatusMail;
+use App\Models\LicenseAdminAction;
 use App\Models\LicensePaymentRequest;
 use App\Models\User;
 use App\Models\UserLicense;
@@ -133,6 +134,164 @@ class LicensePaymentController extends Controller
         ])->header('Cache-Control', 'no-store');
     }
 
+    public function adminLicenses(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'status' => ['nullable', Rule::in(['active', 'revoked', 'all'])],
+            'search' => ['nullable', 'string', 'max:100'],
+            'page' => ['nullable', 'integer', 'min:1'],
+        ]);
+        $status = $validated['status'] ?? 'all';
+        $search = trim((string) ($validated['search'] ?? ''));
+        $licenses = UserLicense::query()
+            ->with(['user:id,name,email', 'activator:id,name,email', 'revoker:id,name,email'])
+            ->when($status !== 'all', fn ($query) => $query->where('status', $status))
+            ->when($search !== '', function ($query) use ($search): void {
+                $query->whereHas('user', fn ($users) => $users->where(function ($users) use ($search): void {
+                    $users->whereRaw('LOWER(name) LIKE ?', ['%'.strtolower($search).'%'])
+                        ->orWhereRaw('LOWER(email) LIKE ?', ['%'.strtolower($search).'%']);
+                }));
+            })
+            ->orderByRaw("CASE WHEN status = 'active' THEN 0 ELSE 1 END")
+            ->orderByDesc('updated_at')
+            ->paginate(20);
+
+        return response()->json([
+            'licenses' => $licenses->getCollection()->map(fn (UserLicense $license): array => $this->licenseData($license))->all(),
+            'pagination' => [
+                'current_page' => $licenses->currentPage(),
+                'last_page' => $licenses->lastPage(),
+                'total' => $licenses->total(),
+            ],
+            'counts' => [
+                'active' => UserLicense::query()->where('status', 'active')->count(),
+                'revoked' => UserLicense::query()->where('status', 'revoked')->count(),
+            ],
+        ])->header('Cache-Control', 'no-store');
+    }
+
+    public function grantAdminLicense(Request $request): JsonResponse
+    {
+        $request->merge([
+            'email_address' => trim((string) $request->input('email_address', '')),
+            'reason' => trim((string) $request->input('reason', '')),
+        ]);
+        $validated = $request->validate([
+            'email_address' => ['required', 'email:rfc', 'max:255'],
+            'reason' => ['required', 'string', 'min:5', 'max:500'],
+        ]);
+        $email = strtolower(trim($validated['email_address']));
+
+        $license = DB::transaction(function () use ($request, $email, $validated): UserLicense {
+            $user = User::query()->whereRaw('LOWER(email) = ?', [$email])->lockForUpdate()->firstOrFail();
+            if ($this->isProtectedAdmin($user)) {
+                abort(403, 'Administrator accounts do not need a license grant.');
+            }
+            if (! $user->hasVerifiedEmail()) {
+                abort(422, 'Verify this account email before granting a license.');
+            }
+
+            $license = UserLicense::query()->where('user_id', $user->id)->lockForUpdate()->first();
+            if ($license?->status === 'active') {
+                abort(409, 'This account already has an active license.');
+            }
+
+            $attributes = [
+                'payment_request_id' => null,
+                'status' => 'active',
+                'source' => 'manual',
+                'activated_at' => now(),
+                'activated_by' => $request->user()->id,
+                'activation_note' => trim($validated['reason']),
+                'revoked_at' => null,
+                'revoked_by' => null,
+                'revocation_note' => null,
+            ];
+            if ($license) {
+                $license->fill($attributes)->save();
+            } else {
+                $license = UserLicense::query()->create(['user_id' => $user->id, ...$attributes]);
+            }
+
+            LicenseAdminAction::query()->create([
+                'user_id' => $user->id,
+                'user_email' => $user->email,
+                'admin_id' => $request->user()->id,
+                'action' => 'granted',
+                'reason' => trim($validated['reason']),
+                'created_at' => now(),
+            ]);
+
+            return $license->fresh(['user:id,name,email', 'activator:id,name,email', 'revoker:id,name,email']);
+        });
+
+        return response()->json([
+            'message' => 'One-time license granted.',
+            'license' => $this->licenseData($license),
+        ], 201)->header('Cache-Control', 'no-store');
+    }
+
+    public function revokeAdminLicense(Request $request, UserLicense $license): JsonResponse
+    {
+        $request->merge(['reason' => trim((string) $request->input('reason', ''))]);
+        $validated = $request->validate([
+            'reason' => ['required', 'string', 'min:5', 'max:500'],
+        ]);
+
+        $license = DB::transaction(function () use ($request, $license, $validated): UserLicense {
+            $record = UserLicense::query()->with('user:id,name,email')->lockForUpdate()->findOrFail($license->id);
+            if ($record->status !== 'active') {
+                abort(409, 'This license is not active.');
+            }
+            if ($record->user && $this->isProtectedAdmin($record->user)) {
+                abort(403, 'Administrator access cannot be changed here.');
+            }
+
+            $reason = trim($validated['reason']);
+            $record->fill([
+                'status' => 'revoked',
+                'revoked_at' => now(),
+                'revoked_by' => $request->user()->id,
+                'revocation_note' => $reason,
+            ])->save();
+            LicenseAdminAction::query()->create([
+                'user_id' => $record->user_id,
+                'user_email' => $record->user?->email ?? 'Deleted account',
+                'admin_id' => $request->user()->id,
+                'action' => 'revoked',
+                'reason' => $reason,
+                'created_at' => now(),
+            ]);
+
+            return $record->fresh(['user:id,name,email', 'activator:id,name,email', 'revoker:id,name,email']);
+        });
+
+        return response()->json([
+            'message' => 'License revoked. This blocks access only when license enforcement is enabled.',
+            'license' => $this->licenseData($license),
+        ])->header('Cache-Control', 'no-store');
+    }
+
+    public function adminActions(Request $request): JsonResponse
+    {
+        $actions = LicenseAdminAction::query()
+            ->with(['admin:id,name,email'])
+            ->orderByDesc('created_at')
+            ->paginate(30);
+
+        return response()->json([
+            'actions' => $actions->getCollection()->map(static fn (LicenseAdminAction $action): array => [
+                'id' => $action->id,
+                'user_email' => $action->user_email,
+                'admin_name' => $action->admin?->name ?? 'Former administrator',
+                'action' => $action->action,
+                'reason' => $action->reason,
+                'created_at' => $action->created_at?->toIso8601String(),
+            ])->all(),
+            'pagination' => ['current_page' => $actions->currentPage(), 'last_page' => $actions->lastPage(), 'total' => $actions->total()],
+        ])->header('Cache-Control', 'no-store');
+    }
+
     public function accountStatus(Request $request): JsonResponse
     {
         $user = $request->user();
@@ -188,16 +347,27 @@ class LicensePaymentController extends Controller
             }
 
             if ($validated['decision'] === 'approve') {
-                if (UserLicense::query()->where('user_id', $record->user_id)->where('status', 'active')->exists()) {
+                $existingLicense = UserLicense::query()->where('user_id', $record->user_id)->lockForUpdate()->first();
+                if ($existingLicense?->status === 'active') {
                     abort(409, 'This account already has an active one-time license. Review the payment manually before deciding what to do with this request.');
                 }
 
-                UserLicense::query()->create([
-                    'user_id' => $record->user_id,
+                $licenseAttributes = [
                     'payment_request_id' => $record->id,
                     'status' => 'active',
+                    'source' => 'payment',
                     'activated_at' => now(),
-                ]);
+                    'activated_by' => $request->user()->id,
+                    'activation_note' => 'Payment verified against the receiving account.',
+                    'revoked_at' => null,
+                    'revoked_by' => null,
+                    'revocation_note' => null,
+                ];
+                if ($existingLicense) {
+                    $existingLicense->fill($licenseAttributes)->save();
+                } else {
+                    UserLicense::query()->create(['user_id' => $record->user_id, ...$licenseAttributes]);
+                }
                 $record->status = 'approved';
             } else {
                 $record->status = 'rejected';
@@ -207,6 +377,17 @@ class LicensePaymentController extends Controller
             $record->reviewed_at = now();
             $record->admin_note = isset($validated['admin_note']) ? trim($validated['admin_note']) : null;
             $record->save();
+
+            LicenseAdminAction::query()->create([
+                'user_id' => $record->user_id,
+                'user_email' => $record->user->email,
+                'admin_id' => $request->user()->id,
+                'action' => $record->status === 'approved' ? 'payment_approved' : 'payment_rejected',
+                'reason' => $record->status === 'approved'
+                    ? 'Payment proof reviewed and verified. Reference: '.$record->transaction_reference
+                    : $record->admin_note,
+                'created_at' => now(),
+            ]);
 
             return [
                 'payment' => $this->paymentData($record->fresh(['user:id,name,email', 'reviewer:id,name,email'])),
@@ -279,6 +460,25 @@ class LicensePaymentController extends Controller
             'reviewed_at' => $payment->reviewed_at?->toIso8601String(),
             'reviewed_by' => $payment->reviewer?->name,
             'admin_note' => $payment->admin_note,
+        ];
+    }
+
+    private function licenseData(UserLicense $license): array
+    {
+        return [
+            'id' => $license->id,
+            'user_id' => $license->user_id,
+            'name' => $license->user?->name ?? 'Deleted account',
+            'email_address' => $license->user?->email,
+            'status' => $license->status,
+            'source' => $license->source,
+            'activated_at' => $license->activated_at?->toIso8601String(),
+            'activated_by' => $license->activator?->name,
+            'activation_note' => $license->activation_note,
+            'revoked_at' => $license->revoked_at?->toIso8601String(),
+            'revoked_by' => $license->revoker?->name,
+            'revocation_note' => $license->revocation_note,
+            'payment_request_id' => $license->payment_request_id,
         ];
     }
 }
