@@ -140,6 +140,185 @@
   text-align: center;
 }
 
+.license-management-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  margin: 18px 0;
+}
+
+.license-access-panel,
+.license-audit-panel {
+  min-width: 0;
+  padding: 0 18px 16px;
+}
+
+.license-management-note {
+  color: #7a8793;
+  font-size: 11px;
+  line-height: 1.65;
+  padding: 14px 0 2px;
+}
+
+.license-enforcement-note {
+  padding-top: 3px;
+  color: #9b724e;
+}
+
+.license-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.license-grant-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.license-grant-form label {
+  display: grid;
+  gap: 6px;
+  color: #667585;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.license-grant-form input,
+.license-directory-controls input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid #dce3e9;
+  border-radius: 7px;
+  outline: none;
+  background: #fff;
+  color: #27384a;
+  font: inherit;
+  font-size: 11px;
+}
+
+.license-grant-form input:focus,
+.license-directory-controls input:focus {
+  border-color: #c98249;
+  box-shadow: 0 0 0 3px #c982491c;
+}
+
+.license-grant-form button {
+  min-height: 36px;
+  white-space: nowrap;
+}
+
+.license-audit-panel .license-review-toolbar {
+  min-height: 70px;
+}
+
+.license-action-list {
+  display: grid;
+  max-height: 235px;
+  overflow: auto;
+}
+
+.license-action-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #edf0f2;
+}
+
+.license-action-row > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.license-action-row strong {
+  color: #3d4c5b;
+  font-size: 10px;
+  text-transform: capitalize;
+}
+
+.license-action-row span,
+.license-action-row small,
+.license-action-row time {
+  color: #81909e;
+  font-size: 9px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.license-action-row time {
+  flex: 0 0 auto;
+  text-align: right;
+}
+
+.license-directory-controls,
+.license-directory-controls form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.license-directory-controls form {
+  max-width: 310px;
+}
+
+.license-directory-controls .table-action {
+  height: 34px;
+}
+
+.license-record-row .license-request-details {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.license-record-row .license-request-details dd {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1100px) {
+  .license-management-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .license-grant-form {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .license-grant-form button {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 700px) {
+  .license-grant-form,
+  .license-record-row .license-request-details {
+    grid-template-columns: 1fr;
+  }
+
+  .license-grant-form button {
+    grid-column: auto;
+  }
+
+  .license-directory-controls,
+  .license-directory-controls form {
+    width: 100%;
+  }
+
+  .license-directory-controls form {
+    max-width: none;
+  }
+
+  .license-directory-controls form input {
+    flex: 1;
+  }
+}
+
 .workspace-label {
   margin-top: 23px;
 }
